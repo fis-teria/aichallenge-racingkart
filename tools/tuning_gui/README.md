@@ -36,7 +36,8 @@ tools/run_tuning_gui.bash --restart
 - Text edit mode remains available for CSV files, comments, structural YAML/XML edits, or large manual changes.
 - `Path Editor` opens the active MPC reference path on the occupancy-grid map. It can move, add, delete, and smooth path points, then save a recalculated `s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps2` CSV.
 - Path smoothing keeps the point count stable and applies a neighbor-average pass before save; `undo` restores the points from immediately before the last smoothing operation.
-- In `range` mode, drag on the map to select only the points inside the rectangle; `smooth` then affects only that selected range. Use `clear` to return smoothing to the whole path.
+- In `move` mode, drag empty map space to select points with a rectangle. Drag a selected green point or selected segment to move the whole selected range together; use middle-click, Alt-drag, or Shift-drag to pan the map.
+- `smooth` affects only the selected rectangle range when points are selected. Use `clear` to return smoothing to the whole path.
 - Path Editor saves under `multi_purpose_mpc_ros/env` or `multi_purpose_mpc_ros/maps`; the first save from an original path defaults to `<name>_manual.csv`, and later manual-path saves overwrite the same CSV with a backup before writing.
 - Saving a file validates YAML/XML/JSON/CSV before writing and stores a timestamped backup under `tools/tuning_gui/backups/`.
 - `保存してビルド` and control-method `保存してビルド` start `make autoware-build` after a successful edit.

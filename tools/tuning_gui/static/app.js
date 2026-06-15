@@ -24,6 +24,9 @@ const state = {
     draggingRange: false,
     rangeStart: null,
     rangeCurrent: null,
+    draggingRangeMove: false,
+    rangeMoveStartWorld: null,
+    rangeMoveOriginalPoints: null,
   },
 };
 
@@ -653,6 +656,12 @@ function onPathPointerDown(event) {
   if (state.editorMode !== "path") return;
   event.preventDefault();
   const point = pathPointerPosition(event);
+  if (shouldPanPathView(event)) {
+    state.pathEditor.panning = true;
+    state.pathEditor.lastPointer = point;
+    $("pathCanvas").setPointerCapture(event.pointerId);
+    return;
+  }
   if (state.pathEditor.mode === "range") {
     beginPathRangeSelection(point, event.pointerId);
     return;
@@ -661,15 +670,17 @@ function onPathPointerDown(event) {
     insertPathPoint(point);
     return;
   }
+  if (selectedPathRangeHit(point)) {
+    beginPathRangeMove(point, event.pointerId);
+    return;
+  }
   const index = nearestPathPoint(point);
   if (index !== null) {
     state.pathEditor.selectedIndex = index;
     state.pathEditor.draggingPoint = true;
     $("pathCanvas").setPointerCapture(event.pointerId);
   } else {
-    state.pathEditor.panning = true;
-    state.pathEditor.lastPointer = point;
-    $("pathCanvas").setPointerCapture(event.pointerId);
+    beginPathRangeSelection(point, event.pointerId);
   }
   renderPathStats();
   drawPathEditor();
@@ -681,6 +692,8 @@ function onPathPointerMove(event) {
   if (state.pathEditor.draggingRange) {
     state.pathEditor.rangeCurrent = point;
     drawPathEditor();
+  } else if (state.pathEditor.draggingRangeMove && state.pathEditor.rangeMoveStartWorld) {
+    moveSelectedPathRange(point);
   } else if (state.pathEditor.draggingPoint && state.pathEditor.selectedIndex !== null) {
     clearPathSmoothUndo();
     const world = imageToWorld(canvasToImage(point));
@@ -708,12 +721,19 @@ function onPathPointerUp(event) {
   state.pathEditor.draggingPoint = false;
   state.pathEditor.panning = false;
   state.pathEditor.draggingRange = false;
+  state.pathEditor.draggingRangeMove = false;
+  state.pathEditor.rangeMoveStartWorld = null;
+  state.pathEditor.rangeMoveOriginalPoints = null;
   state.pathEditor.lastPointer = null;
   try {
     $("pathCanvas").releasePointerCapture(event.pointerId);
   } catch {
     // pointer capture may already be released by the browser
   }
+}
+
+function shouldPanPathView(event) {
+  return state.pathEditor.mode === "move" && (event.button === 1 || event.altKey || event.shiftKey);
 }
 
 function onPathWheel(event) {
@@ -797,7 +817,7 @@ function setPathMode(mode) {
 function renderPathModeButtons() {
   $("pathSelectMode").classList.toggle("active", state.pathEditor.mode === "move");
   $("pathAddMode").classList.toggle("active", state.pathEditor.mode === "add");
-  $("pathRangeMode").classList.toggle("active", state.pathEditor.mode === "range");
+  $("pathRangeMode")?.classList.toggle("active", state.pathEditor.mode === "range");
 }
 
 function pathIsCircular() {
@@ -859,10 +879,66 @@ function finishPathRangeSelection() {
 function clearPathRangeSelection(showToast = true) {
   state.pathEditor.selectedRangeIndices = [];
   state.pathEditor.draggingRange = false;
+  state.pathEditor.draggingRangeMove = false;
   state.pathEditor.rangeStart = null;
   state.pathEditor.rangeCurrent = null;
+  state.pathEditor.rangeMoveStartWorld = null;
+  state.pathEditor.rangeMoveOriginalPoints = null;
   renderPathSmoothButtons();
   if (showToast) toast("rangeを解除したよ");
+  renderPathStats();
+  drawPathEditor();
+}
+
+function selectedPathRangeHit(canvasPoint) {
+  const selected = new Set(state.pathEditor.selectedRangeIndices);
+  if (!selected.size) return false;
+  const pointIndex = nearestPathPoint(canvasPoint, 16);
+  if (pointIndex !== null && selected.has(pointIndex)) return true;
+
+  const canvasPoints = state.pathEditor.points.map((point) => imageToCanvas(worldToImage(point)));
+  for (const run of selectedRangeRuns()) {
+    if (run.length < 2) continue;
+    for (let cursor = 0; cursor < run.length - 1; cursor += 1) {
+      const a = canvasPoints[run[cursor]];
+      const b = canvasPoints[run[cursor + 1]];
+      if (distanceToSegment(canvasPoint, a, b) <= 12) return true;
+    }
+  }
+  return false;
+}
+
+function beginPathRangeMove(canvasPoint, pointerId) {
+  if (!state.pathEditor.selectedRangeIndices.length) return;
+  state.pathEditor.draggingRangeMove = true;
+  state.pathEditor.selectedIndex = null;
+  state.pathEditor.rangeMoveStartWorld = imageToWorld(canvasToImage(canvasPoint));
+  state.pathEditor.rangeMoveOriginalPoints = clonePathPoints(state.pathEditor.points);
+  state.pathEditor.undoPoints = clonePathPoints(state.pathEditor.points);
+  $("pathCanvas").setPointerCapture(pointerId);
+  renderPathSmoothButtons();
+  renderPathStats();
+  drawPathEditor();
+}
+
+function moveSelectedPathRange(canvasPoint) {
+  const start = state.pathEditor.rangeMoveStartWorld;
+  const original = state.pathEditor.rangeMoveOriginalPoints;
+  if (!start || !original) return;
+  const world = imageToWorld(canvasToImage(canvasPoint));
+  const dx = world.x_m - start.x_m;
+  const dy = world.y_m - start.y_m;
+  const selected = new Set(state.pathEditor.selectedRangeIndices);
+  state.pathEditor.points = original.map((point, index) => {
+    if (!selected.has(index)) return { ...point };
+    return {
+      ...point,
+      x_m: Number(point.x_m) + dx,
+      y_m: Number(point.y_m) + dy,
+    };
+  });
+  state.pathEditor.dirty = true;
+  reindexPathPoints();
   renderPathStats();
   drawPathEditor();
 }
@@ -919,7 +995,7 @@ function undoPathSmoothing() {
   renderPathSmoothButtons();
   renderPathStats();
   drawPathEditor();
-  toast("smoothを戻したよ");
+  toast("変更を戻したよ");
 }
 
 function smoothPathPoints(points, strength, passes, circular, selectedIndices = []) {
@@ -1319,7 +1395,7 @@ function bind() {
   $("pathZoomOut").addEventListener("click", () => zoomPathView(0.86));
   $("pathSelectMode").addEventListener("click", () => setPathMode("move"));
   $("pathAddMode").addEventListener("click", () => setPathMode("add"));
-  $("pathRangeMode").addEventListener("click", () => setPathMode("range"));
+  $("pathRangeMode")?.addEventListener("click", () => setPathMode("range"));
   $("pathDeletePoint").addEventListener("click", deleteSelectedPathPoint);
   $("pathSmooth").addEventListener("click", applyPathSmoothing);
   $("pathUndoSmooth").addEventListener("click", undoPathSmoothing);
