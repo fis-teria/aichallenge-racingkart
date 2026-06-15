@@ -1,0 +1,13 @@
+low_speed_mps: 0.5
+stuck_duration_sec: 3.0
+hard_brake_mps2: -1.5
+high_accel_mps2: 1.0
+steer_oscillation_warn: 0.8
+section_count: 10
+sync_tolerance_sec: 0.5
+path_error_warn_m: 1.5
+corner_curvature_min_1pm: 0.035
+corner_min_length_m: 2.0
+corner_merge_gap_m: 2.0
+corner_padding_m: 1.0
+corner_id_rotation: 1
