@@ -1,19 +1,19 @@
-# AI Challenge Local Tools
+# AI Challenge ローカルツール
 
-Local tooling for the AI Challenge racing kart repository.
+AI Challenge レーシングカートリポジトリ向けのローカル補助ツール群です。
 
-This directory is designed to be managed independently from the upstream AI
-Challenge source tree. Place it at:
+このディレクトリは、上流の AI Challenge ソースツリーとは独立して管理できる
+ように作られています。配置先は次のパスです。
 
 ```text
 aichallenge-racingkart/tools/
 ```
 
-The tools use the parent directory as the AI Challenge repository root, so the
-same layout works whether this directory is installed as a Git submodule or
-extracted from a ZIP archive.
+各ツールは親ディレクトリを AI Challenge リポジトリのルートとして扱います。
+そのため、このディレクトリを Git サブモジュールとして配置した場合でも、
+ZIP アーカイブから展開した場合でも同じレイアウトで動作します。
 
-## Commands
+## コマンド
 
 ```bash
 tools/evalwrap doctor
@@ -22,9 +22,9 @@ tools/evalwrap ingest --label manual --path output/latest
 tools/run_tuning_gui.bash --background
 ```
 
-## Optional Top-Level Shortcuts
+## 任意のトップレベルショートカット
 
-If your workspace has this layout:
+ワークスペースが次の構成になっている場合:
 
 ```text
 workspace-root/
@@ -32,9 +32,9 @@ workspace-root/
     tools/
 ```
 
-you can place two shortcut scripts at `workspace-root/evalwrap` and
-`workspace-root/run_tuning_gui.bash`. They let you run the tools from the
-workspace root exactly like:
+`workspace-root/evalwrap` と `workspace-root/run_tuning_gui.bash` に
+ショートカットスクリプトを置けます。これにより、ワークスペースルートから
+次のようにツールを実行できます。
 
 ```bash
 ./evalwrap doctor
@@ -42,7 +42,7 @@ workspace root exactly like:
 ./run_tuning_gui.bash --background
 ```
 
-Create `workspace-root/evalwrap`:
+`workspace-root/evalwrap` を作成します。
 
 ```bash
 #!/usr/bin/env bash
@@ -94,7 +94,7 @@ esac
 exec python3 -m evalwrap --repo-root "${AIC_REPO}" "$@"
 ```
 
-Create `workspace-root/run_tuning_gui.bash`:
+`workspace-root/run_tuning_gui.bash` を作成します。
 
 ```bash
 #!/usr/bin/env bash
@@ -111,40 +111,40 @@ fi
 exec "${GUI_SCRIPT}" "$@"
 ```
 
-Make both scripts executable:
+両方のスクリプトに実行権限を付けます。
 
 ```bash
 chmod +x evalwrap run_tuning_gui.bash
 ```
 
-## Git Submodule Layout
+## Git サブモジュール構成
 
-Recommended parent-repository layout:
+推奨する親リポジトリ構成:
 
 ```text
 aichallenge-racingkart/
   tools/  # submodule
 ```
 
-Clone with:
+クローン時:
 
 ```bash
 git clone --recurse-submodules <aichallenge-racingkart-url>
 ```
 
-For an already cloned repository:
+既にクローン済みのリポジトリでは:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-## ZIP Layout
+## ZIP 配置
 
-For a ZIP install, extract the archive so that this README ends up at:
+ZIP で導入する場合は、この README が次の場所に来るように展開してください。
 
 ```text
 aichallenge-racingkart/tools/README.md
 ```
 
-Generated local files such as GUI state, runtime logs, backups, and Python
-caches are ignored by this tools repository.
+GUI の状態、実行ログ、バックアップ、Python キャッシュなどの生成物は、この
+ツール用リポジトリでは無視されます。

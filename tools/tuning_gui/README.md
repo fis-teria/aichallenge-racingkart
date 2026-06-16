@@ -1,23 +1,25 @@
 # AI Challenge Tuning GUI
 
-Local browser UI for choosing `control_method`, editing the related launch/YAML/CSV files, rebuilding, and launching `make dev`, `tools/evalwrap run`, or quick `make eval`.
+`control_method` の選択、関連する launch/YAML/CSV ファイルの編集、再ビルド、
+`make dev`、`tools/evalwrap run`、または軽量な `make eval` の起動を行うための
+ローカルブラウザ UI です。
 
-## Start
+## 起動
 
 ```bash
 cd /home/graneple/git/autononous_ai/aichallenge-racingkart
 tools/run_tuning_gui.bash --background
 ```
 
-Open `http://127.0.0.1:8765`.
+`http://127.0.0.1:8765` を開きます。
 
-Foreground mode is also available when you want to keep logs in the terminal:
+ログをターミナルに表示したまま使いたい場合は、フォアグラウンドモードも使えます。
 
 ```bash
 tools/run_tuning_gui.bash
 ```
 
-Useful management commands:
+便利な管理コマンド:
 
 ```bash
 tools/run_tuning_gui.bash --status
@@ -25,25 +27,25 @@ tools/run_tuning_gui.bash --stop
 tools/run_tuning_gui.bash --restart
 ```
 
-## Behavior
+## 動作
 
-- The control method list is read from `aichallenge_submit_launch/launch/reference.launch.xml`.
-- `XMLへ保存` updates the `control_method` default in the XML launch chain.
-- YAML/XML files open in table-edit mode by default. YAML scalar values are shown as path/value rows.
-- The table includes an editable `description` column. Descriptions are GUI metadata stored in `tools/tuning_gui/.state/parameter_descriptions.json`; they are not written into YAML/XML comments.
-- XML files are shown as one row per element, with common editable attributes such as `name`, `default`, `value`, `to`, `from`, `args`, and `file` grouped into columns.
-- Edit table cells, then save; the GUI reflects table changes back into the file text before validation.
-- Text edit mode remains available for CSV files, comments, structural YAML/XML edits, or large manual changes.
-- `Path Editor` opens the active MPC reference path on the occupancy-grid map. It can move, add, delete, and smooth path points, then save a recalculated `s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps2` CSV.
-- Path smoothing keeps the point count stable and applies a neighbor-average pass before save; `undo` restores the points from immediately before the last smoothing operation.
-- In `move` mode, drag empty map space to select points with a rectangle. Drag a selected green point or selected segment to move the whole selected range together; use middle-click, Alt-drag, or Shift-drag to pan the map.
-- `smooth` affects only the selected rectangle range when points are selected. Use `clear` to return smoothing to the whole path.
-- Path Editor saves under `multi_purpose_mpc_ros/env` or `multi_purpose_mpc_ros/maps`; the first save from an original path defaults to `<name>_manual.csv`, and later manual-path saves overwrite the same CSV with a backup before writing.
-- Saving a file validates YAML/XML/JSON/CSV before writing and stores a timestamped backup under `tools/tuning_gui/backups/`.
-- `保存してビルド` and control-method `保存してビルド` start `make autoware-build` after a successful edit.
-- `dev` runs with `CONTROL_METHOD=<selected>` and can run `make autoware-build` first.
-- `evalwrap` runs `tools/evalwrap run --label ...` with `CONTROL_METHOD=<selected>`. With the update-build checkbox enabled, it regenerates the submit archive, rebuilds the eval image, runs `make eval`, and collects reports.
-- `quick eval` keeps the lighter direct `make eval` path for fast local checks; it can also run `make autoware-build` first.
-- The run note is passed to evalwrap as the label/note. If it is empty, the GUI uses `<control_method>-gui-eval`.
-- While a command is running, parameter edits are locked.
-- Run snapshots and command history are stored under `tools/tuning_gui/history/`.
+- control method の一覧は `aichallenge_submit_launch/launch/reference.launch.xml` から読み込みます。
+- `XMLへ保存` は XML launch チェーン内の `control_method` デフォルト値を更新します。
+- YAML/XML ファイルはデフォルトでテーブル編集モードで開きます。YAML のスカラー値は path/value の行として表示されます。
+- テーブルには編集可能な `description` 列があります。説明文は `tools/tuning_gui/.state/parameter_descriptions.json` に保存される GUI メタデータで、YAML/XML のコメントには書き込まれません。
+- XML ファイルは要素ごとに1行で表示され、`name`、`default`、`value`、`to`、`from`、`args`、`file` などのよく使う編集可能属性が列にまとめられます。
+- テーブルセルを編集して保存すると、GUI は検証前にテーブルの変更をファイル本文へ反映します。
+- CSV ファイル、コメント、YAML/XML の構造的な編集、大きな手動変更には、引き続きテキスト編集モードを使えます。
+- `Path Editor` は現在有効な MPC 参照経路を占有グリッドマップ上で開きます。経路点の移動、追加、削除、平滑化を行い、再計算した `s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps2` CSV として保存できます。
+- 経路平滑化は点数を維持し、保存前に近傍平均のパスを適用します。`undo` は直前の平滑化操作前の点列に戻します。
+- `move` モードでは、マップ上の空白部分をドラッグして矩形で点を選択します。選択済みの緑色の点または選択済みセグメントをドラッグすると、選択範囲全体をまとめて移動できます。マップのパンには中クリック、Alt ドラッグ、Shift ドラッグを使えます。
+- 点が選択されている場合、`smooth` は選択矩形範囲だけに適用されます。経路全体の平滑化に戻すには `clear` を使います。
+- Path Editor は `multi_purpose_mpc_ros/env` または `multi_purpose_mpc_ros/maps` 配下に保存します。元の経路から初めて保存する場合のデフォルト名は `<name>_manual.csv` で、それ以降の手動経路保存では同じ CSV をバックアップ作成後に上書きします。
+- ファイル保存時には YAML/XML/JSON/CSV を検証し、タイムスタンプ付きバックアップを `tools/tuning_gui/backups/` に保存します。
+- `保存してビルド` と control-method の `保存してビルド` は、編集成功後に `make autoware-build` を開始します。
+- `dev` は `CONTROL_METHOD=<selected>` 付きで実行され、先に `make autoware-build` を走らせることもできます。
+- `evalwrap` は `CONTROL_METHOD=<selected>` 付きで `tools/evalwrap run --label ...` を実行します。update-build チェックボックスを有効にすると、提出アーカイブの再生成、eval イメージの再ビルド、`make eval` の実行、レポート収集まで行います。
+- `quick eval` は、短時間のローカル確認向けに軽量な直接 `make eval` 経路を残しています。こちらも先に `make autoware-build` を実行できます。
+- 実行メモは evalwrap の label/note として渡されます。空の場合、GUI は `<control_method>-gui-eval` を使います。
+- コマンド実行中はパラメータ編集がロックされます。
+- 実行スナップショットとコマンド履歴は `tools/tuning_gui/history/` に保存されます。
