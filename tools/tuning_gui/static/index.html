@@ -197,6 +197,19 @@
             <input id="buildFirst" type="checkbox" checked>
             <span>実行前に更新ビルド</span>
           </label>
+          <label class="check">
+            <input id="runHeadless" type="checkbox">
+            <span>AWSIMヘッドレス</span>
+          </label>
+          <label class="field">
+            <span>NPC台数</span>
+            <select id="npcCount">
+              <option value="0">0台</option>
+              <option value="1">1台</option>
+              <option value="2">2台</option>
+              <option value="3">3台</option>
+            </select>
+          </label>
           <label class="field">
             <span>run note</span>
             <input id="runNote" type="text" placeholder="試行メモ">

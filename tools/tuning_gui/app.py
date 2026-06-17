@@ -231,6 +231,8 @@ class CommandState:
     command: str
     control_method: str
     note: str
+    headless: bool
+    npc_count: int
     status: str
     started_at: str
     finished_at: str | None
@@ -1229,41 +1231,108 @@ def command_env(method: str) -> dict[str, str]:
     return env
 
 
-def evalwrap_label(method: str, note: str) -> str:
-    label = note.strip() or f"{method}-gui-eval"
+def normalize_npc_count(value: Any) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = 0
+    if not 0 <= count <= 3:
+        raise ValueError("npc_count must be between 0 and 3")
+    return count
+
+
+def evalwrap_label(method: str, note: str, headless: bool, npc_count: int) -> str:
+    profile = "headless-eval" if headless else "gui-eval"
+    if npc_count:
+        profile = f"{profile}-{npc_count}npc"
+    label = note.strip() or f"{method}-{profile}"
     return label[:80]
 
 
-def command_for(action: str, method: str, build_first: bool, note: str = "") -> str:
+def command_for(
+    action: str,
+    method: str,
+    build_first: bool,
+    note: str = "",
+    headless: bool = False,
+    npc_count: int = 0,
+) -> str:
+    npc_count = normalize_npc_count(npc_count)
+    total_vehicles = npc_count + 1
     method_prefix = f"CONTROL_METHOD={shell_quote(method)} "
+    eval_prefix = eval_env_prefix(method, headless, total_vehicles)
     if action == "build":
         return "make autoware-build"
     if action == "dev":
-        run = f"{method_prefix}make dev"
+        run = (
+            command_for_headless_dev(method, total_vehicles)
+            if headless
+            else f"{method_prefix}make {dev_target(total_vehicles)}"
+        )
         return f"make autoware-build && {run}" if build_first else run
     if action == "eval":
-        run = f"{method_prefix}tools/evalwrap run --label {shell_quote(evalwrap_label(method, note))}"
+        label = evalwrap_label(method, note, headless, npc_count)
+        run = f"{eval_prefix}tools/evalwrap run --label {shell_quote(label)}"
         if note.strip():
             run += f" --note {shell_quote(note.strip())}"
         if not build_first:
             run += " --skip-build"
         return run
     if action == "quick-eval":
-        run = f"{method_prefix}make eval"
+        run = f"{eval_prefix}make eval"
         return f"make autoware-build && {run}" if build_first else run
     if action == "down":
         return "make down"
     raise ValueError(f"unknown action: {action}")
 
 
+def dev_target(total_vehicles: int) -> str:
+    if not 1 <= total_vehicles <= 4:
+        raise ValueError("total vehicles must be between 1 and 4")
+    return "dev" if total_vehicles == 1 else f"dev{total_vehicles}"
+
+
+AWSIM_HEADLESS_ARGS = "-batchmode -nographics --camera false --lidar false"
+
+
+def eval_env_prefix(method: str, headless: bool, total_vehicles: int) -> str:
+    if not 1 <= total_vehicles <= 4:
+        raise ValueError("total vehicles must be between 1 and 4")
+    pairs = {
+        "CONTROL_METHOD": method,
+        "AWSIM_VEHICLES": str(total_vehicles),
+    }
+    if headless:
+        pairs["AWSIM_EXTRA_ARGS"] = AWSIM_HEADLESS_ARGS
+    return "".join(f"{key}={shell_quote(value)} " for key, value in pairs.items())
+
+
+def command_for_headless_dev(method: str, total_vehicles: int) -> str:
+    if not 1 <= total_vehicles <= 4:
+        raise ValueError("total vehicles must be between 1 and 4")
+    return (
+        f"CONTROL_METHOD={shell_quote(method)} "
+        f"AWSIM_EXTRA_ARGS={shell_quote(AWSIM_HEADLESS_ARGS)} "
+        f"make {dev_target(total_vehicles)}"
+    )
+
+
 def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def start_command(action: str, method: str, build_first: bool, note: str) -> CommandState:
+def start_command(
+    action: str,
+    method: str,
+    build_first: bool,
+    note: str,
+    headless: bool = False,
+    npc_count: int = 0,
+) -> CommandState:
     global active_process, active_state
     if method not in parse_control_methods():
         raise ValueError(f"unknown control_method: {method}")
+    npc_count = normalize_npc_count(npc_count)
     with command_lock:
         if active_process is not None and active_process.poll() is None:
             raise RuntimeError("command is already running")
@@ -1271,7 +1340,7 @@ def start_command(action: str, method: str, build_first: bool, note: str) -> Com
         command_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         log_path = COMMAND_DIR / f"{command_id}-{action}.log"
         snapshot_dir = snapshot_files(command_id, method) if action in {"dev", "eval", "quick-eval", "build"} else None
-        command = command_for(action, method, build_first, note)
+        command = command_for(action, method, build_first, note, headless, npc_count)
         log = log_path.open("w", encoding="utf-8", buffering=1)
         log.write(f"$ {command}\n")
         process = subprocess.Popen(
@@ -1289,6 +1358,8 @@ def start_command(action: str, method: str, build_first: bool, note: str) -> Com
             command=command,
             control_method=method,
             note=note,
+            headless=headless,
+            npc_count=npc_count,
             status="running",
             started_at=now_iso(),
             finished_at=None,
@@ -1476,7 +1547,7 @@ def discover_reports() -> list[dict[str, Any]]:
 def docker_ps() -> str:
     try:
         result = subprocess.run(
-            ["docker", "compose", "ps"],
+            ["make", "ps"],
             cwd=REPO_ROOT,
             text=True,
             stdout=subprocess.PIPE,
@@ -1628,7 +1699,9 @@ class Handler(BaseHTTPRequestHandler):
                 method = str(body.get("control_method") or selected_method())
                 build_first = bool(body.get("build_first", action in {"dev", "eval", "quick-eval"}))
                 note = str(body.get("note", ""))
-                state = start_command(action, method, build_first, note)
+                headless = bool(body.get("headless", False))
+                npc_count = normalize_npc_count(body.get("npc_count", 0))
+                state = start_command(action, method, build_first, note, headless, npc_count)
                 self._json(asdict(state))
             elif parsed.path == "/api/stop":
                 stop_active_command()

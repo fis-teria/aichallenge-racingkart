@@ -173,6 +173,8 @@ function renderStatus(commandState) {
     $(id).disabled = locked || pathActive;
   }
   $("stopCommand").disabled = !locked;
+  $("runHeadless").disabled = locked;
+  $("npcCount").disabled = locked;
 }
 
 async function openFile(path) {
@@ -1212,9 +1214,18 @@ async function run(action) {
   const method = $("controlMethod").value;
   const buildFirst = $("buildFirst").checked;
   const note = $("runNote").value;
+  const headless = $("runHeadless").checked;
+  const npcCount = Number($("npcCount").value || 0);
   const data = await api("/api/run", {
     method: "POST",
-    body: JSON.stringify({ action, control_method: method, build_first: buildFirst, note }),
+    body: JSON.stringify({
+      action,
+      control_method: method,
+      build_first: buildFirst,
+      note,
+      headless,
+      npc_count: npcCount,
+    }),
   });
   toast(`${action} を開始したよ`);
   $("commandLog").textContent = `$ ${data.command}\n`;
