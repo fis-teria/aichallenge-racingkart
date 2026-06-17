@@ -177,6 +177,15 @@ function renderStatus(commandState) {
   $("npcCount").disabled = locked;
 }
 
+function setCommandLog(text) {
+  const log = $("commandLog");
+  log.textContent = text;
+  log.scrollTop = log.scrollHeight;
+  requestAnimationFrame(() => {
+    log.scrollTop = log.scrollHeight;
+  });
+}
+
 async function openFile(path) {
   const data = await api(`/api/file?path=${encodeURIComponent(path)}`);
   state.currentFile = data.path;
@@ -1228,7 +1237,7 @@ async function run(action) {
     }),
   });
   toast(`${action} を開始したよ`);
-  $("commandLog").textContent = `$ ${data.command}\n`;
+  setCommandLog(`$ ${data.command}\n`);
   startCommandPolling();
   await loadState();
 }
@@ -1244,9 +1253,9 @@ async function refreshCommand() {
   renderStatus(data);
   if (data.command) {
     const commandLine = data.command.command ? `$ ${data.command.command}\n` : "";
-    $("commandLog").textContent = `${commandLine}${data.log_tail || ""}`;
+    setCommandLog(`${commandLine}${data.log_tail || ""}`);
   } else {
-    $("commandLog").textContent = "";
+    setCommandLog("");
   }
   if (data.running) {
     startCommandPolling();
