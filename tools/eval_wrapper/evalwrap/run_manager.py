@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,7 @@ def run_pipeline(
 
     command_results: list[CommandResult] = []
     command_warnings: list[str] = []
+    eval_output_source: Path | None = None
     if mode == "single" and not no_eval:
         command_results = run_eval_commands(config.repo_root, command_log_dir, skip_build=skip_build)
         command_warnings.extend(
@@ -67,6 +69,9 @@ def run_pipeline(
             for result in command_results
             if result.returncode != 0
         )
+        if command_results and all(result.returncode == 0 for result in command_results):
+            eval_output_source, wait_warnings = _wait_for_single_eval_output(config.repo_root, config.domains, started)
+            command_warnings.extend(wait_warnings)
     elif mode == "parallel" and not no_eval:
         command_results = run_parallel_commands(config.repo_root, command_log_dir, parallel_submits or [])
         command_warnings.extend(
@@ -78,7 +83,7 @@ def run_pipeline(
     reference_trajectory = load_reference_trajectory(config.repo_root, config.reference_trajectory)
     use_reference_fallback = bool(config.reference_trajectory.get("use_when_rosbag_trajectory_missing", True))
 
-    source = output_path or (_latest_parallel_output(config.repo_root) if mode == "parallel" else config.output_latest)
+    source = output_path or eval_output_source or (_latest_parallel_output(config.repo_root) if mode == "parallel" else config.output_latest)
     collection = CollectionResult() if no_eval else collect_output(source, run_dir, config.domains)
     domain_results = _parse_domains(
         run_id,
@@ -249,3 +254,83 @@ def _latest_parallel_output(repo_root: Path) -> Path:
     if not candidates:
         return output_dir / "latest"
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _wait_for_single_eval_output(
+    repo_root: Path,
+    domains: list[int],
+    started: datetime,
+    timeout_sec: float = 900.0,
+    poll_sec: float = 2.0,
+) -> tuple[Path | None, list[str]]:
+    output_dir = repo_root / "output"
+    deadline = time.monotonic() + timeout_sec
+    started_ts = started.timestamp() - 5.0
+    latest_candidate: Path | None = None
+    latest_reason = "no output run directory found"
+
+    while True:
+        latest_candidate, latest_reason = _latest_single_eval_candidate(output_dir, domains, started_ts)
+        if latest_candidate is not None and _output_run_ready(latest_candidate, domains)[0]:
+            return latest_candidate, []
+        if time.monotonic() >= deadline:
+            detail = f": {latest_reason}" if latest_reason else ""
+            return latest_candidate, [f"timed out waiting for eval output to finish{detail}"]
+        time.sleep(poll_sec)
+
+
+def _latest_single_eval_candidate(output_dir: Path, domains: list[int], min_mtime: float) -> tuple[Path | None, str]:
+    if not output_dir.exists():
+        return None, f"output directory not found: {output_dir}"
+
+    candidates: list[Path] = []
+    for child in output_dir.iterdir():
+        if not child.is_dir() or child.name in {"latest", "docker"}:
+            continue
+        if child.stat().st_mtime < min_mtime:
+            continue
+        if any((child / f"d{domain}").is_dir() for domain in domains):
+            candidates.append(child)
+
+    if not candidates:
+        return None, "no new d1-d4 output directory found"
+
+    latest = max(candidates, key=lambda path: path.stat().st_mtime)
+    ready, reason = _output_run_ready(latest, domains)
+    return latest, reason if not ready else ""
+
+
+def _output_run_ready(output_run: Path, domains: list[int]) -> tuple[bool, str]:
+    reasons = []
+    saw_domain = False
+    for domain in domains:
+        name = f"d{domain}"
+        domain_dir = output_run / name
+        if not domain_dir.is_dir():
+            continue
+        saw_domain = True
+        summary = domain_dir / "result-summary.json"
+        details = domain_dir / f"{name}-result-details.json"
+        if not summary.exists() or not details.exists():
+            reasons.append(f"{name}: result json not ready")
+            continue
+        rosbag_ready, rosbag_reason = _rosbag_storage_ready(domain_dir)
+        if not rosbag_ready:
+            reasons.append(f"{name}: {rosbag_reason}")
+            continue
+        return True, ""
+
+    if not saw_domain:
+        return False, "no d1-d4 domain directory found"
+    return False, "; ".join(reasons) if reasons else "no complete domain output found"
+
+
+def _rosbag_storage_ready(domain_dir: Path) -> tuple[bool, str]:
+    for bag_dir_name in ("rosbag2_autoware",):
+        bag_dir = domain_dir / bag_dir_name
+        if bag_dir.is_dir():
+            has_storage = any(path.suffix in {".mcap", ".db3"} for path in bag_dir.iterdir())
+            if has_storage and not (bag_dir / "metadata.yaml").exists():
+                return False, f"{bag_dir_name} metadata.yaml not ready"
+
+    return True, ""
