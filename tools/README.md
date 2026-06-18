@@ -22,11 +22,33 @@ tools/evalwrap ingest --label manual --path output/latest
 tools/run_tuning_gui.bash --background
 ```
 
-## tuning GUI 連携で AI Challenge 本体側に入れている変更
+## tuning GUI ヘッドレス連携パッチ
 
 `tuning_gui` から control method、AWSIM ヘッドレス、NPC 台数を切り替えるには、
 `tools/` だけでなく AI Challenge 本体側の起動系も同じ前提にしておく必要があります。
-この作業ブランチでは次の連携変更を入れています。
+元の AI Challenge 環境へ恒久的に変更を入れないように、上書き用ファイルは
+`tools/scripts/headless_overrides/` に格納しています。
+
+まずは dry-run で上書き対象を確認します。
+
+```bash
+tools/scripts/setup.sh --dry-run
+```
+
+問題なければ適用します。適用時は `tools/scripts/backups/` に元ファイルの
+バックアップを作ってからコピーします。
+
+```bash
+tools/scripts/setup.sh --apply
+```
+
+バックアップから戻す場合:
+
+```bash
+tools/scripts/apply_headless_overrides.sh --restore --backup-dir tools/scripts/backups/<backup-dir>
+```
+
+このパッチで上書きする主な内容:
 
 - `docker-compose.yml` は `CONTROL_METHOD`、`LAUNCH_AWSIM`、`RUN_RVIZ`、
   `AWSIM_VEHICLES`、`AWSIM_LAPS`、`AWSIM_TIMEOUT`、`AWSIM_EXTRA_ARGS`
@@ -43,18 +65,9 @@ tools/run_tuning_gui.bash --background
   `evaluation.launch.xml` は `launch_awsim`、`awsim_vehicles`、`awsim_laps`、
   `awsim_timeout`、`awsim_extra_args` も受け取ります。
 
-また、ヘッドレス評価や tuning GUI の Path Editor で使うローカル調整データとして、
-AI Challenge 本体側では次の差分を使っています。
-
-- `multi_purpose_mpc_ros/config/config.yaml` の参照経路を
-  `env/final_ver3/traj_mincurv_manual.csv` に切り替えています。
-- 同じ MPC 設定で `a_min=-3.0`、`a_max=3.0`、`v_max=35.0km/h`、
-  `ay_max=10`、および対応する `Q` / `QN` を有効にしています。
-- `autostart_orchestrator.param.yaml` と `bag_manager.param.yaml` の rosbag 対象に、
-  actuation command、planning trajectory、velocity / steering status、
-  camera image / camera info、LiDAR scan、acceleration などを追加しています。
-- Path Editor が生成した手動経路 CSV は
-  `multi_purpose_mpc_ros/env/final_ver3/traj_mincurv_manual*.csv` に置かれます。
+MPC の参照CSVや rosbag 収録トピックなどの走行チューニングデータは、
+このヘッドレス連携パッチには含めません。必要な環境ごとに tuning GUI や
+別管理の設定差分として扱います。
 
 ## 任意のトップレベルショートカット
 

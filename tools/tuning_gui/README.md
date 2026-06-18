@@ -44,6 +44,7 @@ tools/run_tuning_gui.bash --restart
 - ファイル保存時には YAML/XML/JSON/CSV を検証し、タイムスタンプ付きバックアップを `tools/tuning_gui/backups/` に保存します。
 - `保存してビルド` と control-method の `保存してビルド` は、編集成功後に `make autoware-build` を開始します。
 - `dev` は `CONTROL_METHOD=<selected>` 付きで実行され、先に `make autoware-build` を走らせることもできます。
+- `AWSIMヘッドレス` を使う前に、AI Challenge 本体側の起動ファイルへ `tools/scripts/setup.sh --apply` でヘッドレス連携パッチを適用してください。
 - `AWSIMヘッドレス` を有効にした `dev` は、AWSIMサービスを起動したまま `AWSIM_EXTRA_ARGS='-batchmode -nographics --camera false --lidar false'` を渡し、AWSIM画面や重いセンサ描画を抑えます。シミュレーション時刻 `/clock` は出るので、カートは通常のdevと同じく動けます。
 - `NPC台数` は自車以外の追加車両数です。通常 `dev` では `0台` が `make dev`、`1台`〜`3台` が `make dev2`〜`make dev4` に対応します。`AWSIMヘッドレス` の場合も同じターゲットを使い、AWSIMの車両数は通常通り `dev2`〜`dev4` 側で指定されます。
 - `evalwrap` は `CONTROL_METHOD=<selected>` 付きで `tools/evalwrap run --label ...` を実行します。update-build チェックボックスを有効にすると、提出アーカイブの再生成、eval イメージの再ビルド、`make eval` の実行、レポート収集まで行います。

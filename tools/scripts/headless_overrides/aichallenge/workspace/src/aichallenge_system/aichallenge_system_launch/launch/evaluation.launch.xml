@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+    <arg name="domain_id" default="1"/>
+    <arg name="sim_mode" default="eval"/>
+    <arg name="log_dir" default="/output"/>
+    <arg name="capture" default="false"/>
+    <arg name="rosbag" default="false"/>
+    <arg name="simulation" default="true"/>
+    <arg name="use_sim_time" default="true"/>
+    <arg name="run_rviz" default="true"/>
+    <arg name="launch_awsim" default="true"/>
+    <arg name="launch_awsim_state_manager" default="true"/>
+    <arg name="awsim_vehicles" default="1"/>
+    <arg name="awsim_laps" default="6"/>
+    <arg name="awsim_timeout" default="600"/>
+    <arg name="awsim_extra_args" default=""/>
+    <arg name="control_method" default="mpc"/>
+
+    <log message="Launching evaluation bundle (simulator + autoware)."/>
+    <log message=" - domain_id: $(var domain_id)"/>
+    <log message=" - sim_mode: $(var sim_mode)"/>
+    <log message=" - log_dir: $(var log_dir)"/>
+    <log message=" - capture: $(var capture)"/>
+    <log message=" - rosbag: $(var rosbag)"/>
+    <log message=" - simulation: $(var simulation)"/>
+    <log message=" - use_sim_time: $(var use_sim_time)"/>
+    <log message=" - run_rviz: $(var run_rviz)"/>
+    <log message=" - launch_awsim: $(var launch_awsim)"/>
+    <log message=" - launch_awsim_state_manager: $(var launch_awsim_state_manager)"/>
+    <log message=" - awsim_vehicles: $(var awsim_vehicles)"/>
+    <log message=" - awsim_laps: $(var awsim_laps)"/>
+    <log message=" - awsim_timeout: $(var awsim_timeout)"/>
+    <log message=" - awsim_extra_args: $(var awsim_extra_args)"/>
+    <log message=" - control_method: $(var control_method)"/>
+
+    <group if="$(var launch_awsim)">
+        <set_env name="ROS_DOMAIN_ID" value="0"/>
+        <executable
+            name="aichallenge_awsim_eval"
+            cwd="$(var log_dir)"
+            output="both"
+            cmd="/aichallenge/simulator/AWSIM/AWSIM.x86_64 --start-mode sync --vehicles $(var awsim_vehicles) --laps $(var awsim_laps) --timeout $(var awsim_timeout) $(var awsim_extra_args)"/>
+    </group>
+
+    <group if="$(var launch_awsim_state_manager)">
+        <set_env name="ROS_DOMAIN_ID" value="0"/>
+        <include file="$(find-pkg-share aichallenge_system_launch)/launch/mode/awsim_state_manager.launch.xml"/>
+    </group>
+
+    <group>
+        <set_env name="ROS_DOMAIN_ID" value="$(var domain_id)"/>
+        <include file="$(find-pkg-share aichallenge_system_launch)/launch/aichallenge_system.launch.xml">
+            <arg name="simulation" value="$(var simulation)"/>
+            <arg name="use_sim_time" value="$(var use_sim_time)"/>
+            <arg name="run_rviz" value="$(var run_rviz)"/>
+            <arg name="capture" value="$(var capture)"/>
+            <arg name="rosbag" value="$(var rosbag)"/>
+            <arg name="domain_id" value="$(var domain_id)"/>
+            <arg name="control_method" value="$(var control_method)"/>
+        </include>
+    </group>
+
+</launch>

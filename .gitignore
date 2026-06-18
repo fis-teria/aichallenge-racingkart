@@ -14,16 +14,6 @@ metadata.yaml
 output/
 outputs/
 aichallenge/capture/
-analysis/
-.pytest_cache/
-
-# Keep evalwrap test fixtures even though real logs/results are ignored.
-!tools/eval_wrapper/tests/
-!tools/eval_wrapper/tests/**
-!tools/eval_wrapper/tests/fixtures/**/*.log
-!tools/eval_wrapper/tests/fixtures/**/*details.json
-!tools/eval_wrapper/tests/fixtures/**/rosbag2_autoware/
-!tools/eval_wrapper/tests/fixtures/**/rosbag2_autoware/.gitkeep
 
 # AI related local notes (do not commit)
 .claude
