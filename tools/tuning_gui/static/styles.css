@@ -619,6 +619,41 @@ input {
   max-height: 240px;
 }
 
+#motionChart {
+  display: block;
+  width: 100%;
+  height: 300px;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-alt);
+}
+
+.motion-stats {
+  grid-template-columns: 92px 1fr;
+}
+
+.motion-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.motion-links a {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  text-decoration: none;
+  background: var(--panel-alt);
+  font-size: 12px;
+}
+
+.motion-links a:hover {
+  border-color: var(--blue);
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

@@ -219,6 +219,7 @@
             <button id="runDev">dev</button>
             <button id="runEval">evalwrap</button>
             <button id="runQuickEval">quick eval</button>
+            <button id="runIngest">log化</button>
             <button id="runDown">down</button>
             <button id="stopCommand">stop</button>
             <button id="refreshDocker">ps</button>
@@ -239,6 +240,24 @@
         <section class="panel">
           <h2>Reports</h2>
           <div id="reportList" class="report-list"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Motion Log</h2>
+          <label class="field">
+            <span>run</span>
+            <select id="motionRun"></select>
+          </label>
+          <label class="field">
+            <span>domain</span>
+            <select id="motionDomain"></select>
+          </label>
+          <div class="button-row">
+            <button id="refreshMotion">更新</button>
+          </div>
+          <canvas id="motionChart" width="640" height="360"></canvas>
+          <dl id="motionStats" class="kv motion-stats"></dl>
+          <div id="motionLinks" class="motion-links"></div>
         </section>
       </aside>
     </main>

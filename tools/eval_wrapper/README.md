@@ -47,6 +47,7 @@ analysis/runs/<run_id>/raw/d1/
 analysis/runs/<run_id>/processed/metrics.json
 analysis/runs/<run_id>/processed/corner_summary.csv
 analysis/runs/<run_id>/processed/trajectory_reference.csv
+analysis/runs/<run_id>/processed/motion_log.csv
 analysis/runs/<run_id>/report/index.html
 analysis/experiments.sqlite
 ```

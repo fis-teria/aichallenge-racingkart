@@ -1267,7 +1267,7 @@ def command_for(
         run = (
             command_for_headless_dev(method, total_vehicles)
             if headless
-            else f"{method_prefix}make {dev_target(total_vehicles)}"
+            else f"ROSBAG=true {method_prefix}make {dev_target(total_vehicles)}"
         )
         return f"make autoware-build && {run}" if build_first else run
     if action == "eval":
@@ -1281,6 +1281,12 @@ def command_for(
     if action == "quick-eval":
         run = f"{eval_prefix}make eval"
         return f"make autoware-build && {run}" if build_first else run
+    if action == "ingest":
+        label = evalwrap_label(method, note, headless, npc_count).replace("-eval", "-log")
+        run = f"tools/evalwrap ingest --label {shell_quote(label)} --path output/latest"
+        if note.strip():
+            run += f" --note {shell_quote(note.strip())}"
+        return run
     if action == "down":
         return "make down"
     raise ValueError(f"unknown action: {action}")
@@ -1311,6 +1317,7 @@ def command_for_headless_dev(method: str, total_vehicles: int) -> str:
     if not 1 <= total_vehicles <= 4:
         raise ValueError("total vehicles must be between 1 and 4")
     return (
+        "ROSBAG=true "
         f"CONTROL_METHOD={shell_quote(method)} "
         f"AWSIM_EXTRA_ARGS={shell_quote(AWSIM_HEADLESS_ARGS)} "
         f"make {dev_target(total_vehicles)}"
@@ -1339,7 +1346,7 @@ def start_command(
         ensure_dirs()
         command_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         log_path = COMMAND_DIR / f"{command_id}-{action}.log"
-        snapshot_dir = snapshot_files(command_id, method) if action in {"dev", "eval", "quick-eval", "build"} else None
+        snapshot_dir = snapshot_files(command_id, method) if action in {"dev", "eval", "quick-eval", "ingest", "build"} else None
         command = command_for(action, method, build_first, note, headless, npc_count)
         log = log_path.open("w", encoding="utf-8", buffering=1)
         log.write(f"$ {command}\n")
@@ -1392,7 +1399,7 @@ def _watch_command(process: subprocess.Popen[str], log: Any, state: CommandState
         if state.action == "build" and returncode == 0:
             store["last_build_at"] = state.finished_at
             store.pop("dirty_since", None)
-        elif state.action in {"dev", "eval", "quick-eval"} and returncode == 0:
+        elif state.action in {"dev", "eval", "quick-eval", "ingest"} and returncode == 0:
             store["last_run_at"] = state.finished_at
             if "make autoware-build" in state.command or (
                 state.action == "eval" and "--skip-build" not in state.command
@@ -1520,6 +1527,9 @@ def discover_reports() -> list[dict[str, Any]]:
     for report in sorted((REPO_ROOT / "analysis/runs").glob("*/report/index.html"), key=lambda p: p.stat().st_mtime, reverse=True):
         run_dir = report.parents[1]
         metrics_path = run_dir / "processed/metrics.json"
+        motion_log_path = run_dir / "processed/motion_log.csv"
+        vehicle_timeseries_path = run_dir / "processed/vehicle_timeseries.csv"
+        control_timeseries_path = run_dir / "processed/control_timeseries.csv"
         metrics: dict[str, Any] = {}
         if metrics_path.exists():
             try:
@@ -1528,6 +1538,7 @@ def discover_reports() -> list[dict[str, Any]]:
                 metrics = {}
         domains = metrics.get("domains") or {}
         domain = next(iter(domains.values()), {})
+        motion_log_available = motion_log_path.exists() or vehicle_timeseries_path.exists() or control_timeseries_path.exists()
         reports.append(
             {
                 "run_id": run_dir.name,
@@ -1538,10 +1549,180 @@ def discover_reports() -> list[dict[str, Any]]:
                 "judgement": domain.get("judgement"),
                 "low_speed_time_sec": domain.get("low_speed_time_sec"),
                 "max_speed_mps": domain.get("max_speed_mps"),
+                "motion_log_available": motion_log_available,
+                "motion_log_path": str(motion_log_path.relative_to(REPO_ROOT)) if motion_log_path.exists() else None,
+                "vehicle_timeseries_path": str(vehicle_timeseries_path.relative_to(REPO_ROOT)) if vehicle_timeseries_path.exists() else None,
+                "control_timeseries_path": str(control_timeseries_path.relative_to(REPO_ROOT)) if control_timeseries_path.exists() else None,
                 "mtime": report.stat().st_mtime,
             }
         )
     return reports[:100]
+
+
+def motion_log_payload(run_id: str, domain_id: str | None = None, limit: int = 1600) -> dict[str, Any]:
+    safe_run_id = _safe_run_id(run_id)
+    run_dir = REPO_ROOT / "analysis/runs" / safe_run_id
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"analysis run not found: {safe_run_id}")
+
+    processed_dir = run_dir / "processed"
+    motion_path = processed_dir / "motion_log.csv"
+    vehicle_path = processed_dir / "vehicle_timeseries.csv"
+    control_path = processed_dir / "control_timeseries.csv"
+    motion_rows = _read_csv_dicts(motion_path)
+    if not motion_rows:
+        motion_rows = _combine_motion_rows(_read_csv_dicts(vehicle_path), _read_csv_dicts(control_path))
+
+    domains = sorted({str(row.get("domain_id") or "") for row in motion_rows if row.get("domain_id")})
+    selected_domain = domain_id if domain_id in domains else (domains[0] if domains else "")
+    if selected_domain:
+        motion_rows = [row for row in motion_rows if row.get("domain_id") == selected_domain]
+
+    motion_rows = sorted(motion_rows, key=lambda row: _float_or_none(row.get("time_sec")) or 0.0)
+    sampled_rows = _sample_rows(motion_rows, max(100, min(limit, 6000)))
+    first_time = next((_float_or_none(row.get("time_sec")) for row in motion_rows if _float_or_none(row.get("time_sec")) is not None), None)
+    points = [_motion_point(row, first_time) for row in sampled_rows]
+    points = [point for point in points if point["time_sec"] is not None]
+
+    return {
+        "run_id": safe_run_id,
+        "domain_id": selected_domain,
+        "domains": domains,
+        "sample_count": len(motion_rows),
+        "display_count": len(points),
+        "paths": {
+            "motion_log": str(motion_path.relative_to(REPO_ROOT)) if motion_path.exists() else None,
+            "vehicle_timeseries": str(vehicle_path.relative_to(REPO_ROOT)) if vehicle_path.exists() else None,
+            "control_timeseries": str(control_path.relative_to(REPO_ROOT)) if control_path.exists() else None,
+        },
+        "stats": _motion_stats(motion_rows, first_time),
+        "points": points,
+    }
+
+
+def _safe_run_id(run_id: str) -> str:
+    safe = run_id.strip()
+    if not safe or safe in {".", ".."} or "/" in safe or "\\" in safe:
+        raise PermissionError(f"invalid run_id: {run_id}")
+    return safe
+
+
+def _read_csv_dicts(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
+
+
+def _combine_motion_rows(vehicle_rows: list[dict[str, str]], control_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    if vehicle_rows:
+        for vehicle in vehicle_rows:
+            control = _nearest_csv_row(control_rows, _float_or_none(vehicle.get("time_sec")))
+            rows.append(
+                {
+                    "run_id": vehicle.get("run_id", ""),
+                    "domain_id": vehicle.get("domain_id", ""),
+                    "time_sec": vehicle.get("time_sec", ""),
+                    "speed_mps": vehicle.get("speed_mps", ""),
+                    "acceleration_mps2": vehicle.get("acceleration_mps2", ""),
+                    "steering_rad": vehicle.get("steering_rad", ""),
+                    "target_speed_mps": control.get("target_speed_mps", "") if control else "",
+                    "command_accel_mps2": control.get("accel_mps2", "") if control else "",
+                    "command_steer_rad": control.get("steer_rad", "") if control else "",
+                    "throttle": control.get("throttle", "") if control else "",
+                    "brake": control.get("brake", "") if control else "",
+                }
+            )
+        return rows
+
+    for control in control_rows:
+        rows.append(
+            {
+                "run_id": control.get("run_id", ""),
+                "domain_id": control.get("domain_id", ""),
+                "time_sec": control.get("time_sec", ""),
+                "speed_mps": "",
+                "acceleration_mps2": "",
+                "steering_rad": "",
+                "target_speed_mps": control.get("target_speed_mps", ""),
+                "command_accel_mps2": control.get("accel_mps2", ""),
+                "command_steer_rad": control.get("steer_rad", ""),
+                "throttle": control.get("throttle", ""),
+                "brake": control.get("brake", ""),
+            }
+        )
+    return rows
+
+
+def _nearest_csv_row(rows: list[dict[str, str]], time_sec: float | None, tolerance_sec: float = 0.25) -> dict[str, str] | None:
+    if time_sec is None:
+        return None
+    best: dict[str, str] | None = None
+    best_delta = tolerance_sec
+    for row in rows:
+        row_time = _float_or_none(row.get("time_sec"))
+        if row_time is None:
+            continue
+        delta = abs(row_time - time_sec)
+        if delta <= best_delta:
+            best = row
+            best_delta = delta
+    return best
+
+
+def _sample_rows(rows: list[dict[str, str]], limit: int) -> list[dict[str, str]]:
+    if len(rows) <= limit:
+        return rows
+    step = max(1, math.ceil(len(rows) / limit))
+    return rows[::step]
+
+
+def _motion_point(row: dict[str, str], first_time: float | None) -> dict[str, float | None]:
+    absolute_time = _float_or_none(row.get("time_sec"))
+    time_sec = absolute_time - first_time if absolute_time is not None and first_time is not None else absolute_time
+    return {
+        "time_sec": time_sec,
+        "speed_mps": _float_or_none(row.get("speed_mps")),
+        "acceleration_mps2": _float_or_none(row.get("acceleration_mps2")),
+        "steering_rad": _float_or_none(row.get("steering_rad")),
+        "target_speed_mps": _float_or_none(row.get("target_speed_mps")),
+        "command_accel_mps2": _float_or_none(row.get("command_accel_mps2")),
+        "command_steer_rad": _float_or_none(row.get("command_steer_rad")),
+    }
+
+
+def _motion_stats(rows: list[dict[str, str]], first_time: float | None) -> dict[str, float | int | None]:
+    times = [_float_or_none(row.get("time_sec")) for row in rows]
+    times = [value for value in times if value is not None]
+    speeds = [_float_or_none(row.get("speed_mps")) for row in rows]
+    speeds = [value for value in speeds if value is not None]
+    accels = [_float_or_none(row.get("acceleration_mps2")) for row in rows]
+    accels = [value for value in accels if value is not None]
+    steer_values = [_float_or_none(row.get("steering_rad")) for row in rows]
+    steer_values = [value for value in steer_values if value is not None]
+    command_steers = [_float_or_none(row.get("command_steer_rad")) for row in rows]
+    command_steers = [value for value in command_steers if value is not None]
+    duration = max(times) - min(times) if times else None
+    return {
+        "duration_sec": duration,
+        "samples": len(rows),
+        "max_speed_mps": max(speeds) if speeds else None,
+        "max_abs_acceleration_mps2": max((abs(value) for value in accels), default=None),
+        "max_abs_steering_rad": max((abs(value) for value in steer_values), default=None),
+        "max_abs_command_steering_rad": max((abs(value) for value in command_steers), default=None),
+        "start_time_sec": first_time,
+    }
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def docker_ps() -> str:
@@ -1623,6 +1804,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(command_status())
             elif parsed.path == "/api/history":
                 self._json({"commands": load_history(), "outputs": discover_output_runs(), "reports": discover_reports()})
+            elif parsed.path == "/api/motion-log":
+                params = parse_qs(parsed.query)
+                run_id = str(params.get("run_id", [""])[0])
+                domain_id = params.get("domain", [None])[0]
+                limit_raw = params.get("limit", ["1600"])[0]
+                try:
+                    limit = int(limit_raw)
+                except ValueError:
+                    limit = 1600
+                self._json(motion_log_payload(run_id, domain_id, limit))
             elif parsed.path == "/api/docker-ps":
                 self._json({"output": docker_ps()})
             elif parsed.path == "/api/presets":

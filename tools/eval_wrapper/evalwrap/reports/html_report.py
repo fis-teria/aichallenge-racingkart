@@ -54,6 +54,7 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
         _link("../processed/trajectory_reference.csv", "trajectory_reference.csv"),
         _link("../processed/vehicle_timeseries.csv", "vehicle_timeseries.csv"),
         _link("../processed/control_timeseries.csv", "control_timeseries.csv"),
+        _link("../processed/motion_log.csv", "motion_log.csv"),
         "</ul></section>",
         "<section><h2>Log Excerpts</h2>",
         _log_excerpts(log_excerpts),

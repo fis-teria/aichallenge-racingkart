@@ -8,6 +8,12 @@ const state = {
   structuredDirty: false,
   structuredDescriptionsDirty: false,
   commandTimer: null,
+  motion: {
+    reports: [],
+    selectedRunId: null,
+    selectedDomain: null,
+    data: null,
+  },
   pathEditor: {
     data: null,
     points: [],
@@ -98,6 +104,15 @@ function fmtDate(value) {
   return String(value).replace("T", " ").replace(/\+.*/, "");
 }
 
+function fmtNum(value, digits = 3, suffix = "") {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return `${Number(value).toFixed(digits)}${suffix}`;
+}
+
+function valueOr(value, fallback) {
+  return value === null || value === undefined ? fallback : value;
+}
+
 async function loadState() {
   const data = await api("/api/state");
   state.app = data;
@@ -150,8 +165,8 @@ function renderState() {
 }
 
 function renderStatus(commandState) {
-  const running = commandState?.running;
-  const dirty = Boolean(state.app?.dirty_since);
+  const running = commandState && commandState.running;
+  const dirty = Boolean(state.app && state.app.dirty_since);
   const pill = $("statusPill");
   pill.className = "status-pill";
   if (running) {
@@ -209,7 +224,8 @@ async function openFile(path) {
 }
 
 function fileLabel(path) {
-  const file = state.app?.files.find((item) => item.path === path);
+  const files = state.app && state.app.files ? state.app.files : [];
+  const file = files.find((item) => item.path === path);
   return file ? file.label : path.split("/").pop();
 }
 
@@ -281,12 +297,12 @@ function renderScalarStructuredRows() {
   tbody.innerHTML = rows
     .map((row) => {
       return `<tr data-row-id="${escapeHtml(row.id)}">
-        <td>${escapeHtml(row.line ?? "")}</td>
+        <td>${escapeHtml(valueOr(row.line, ""))}</td>
         <td>${escapeHtml(row.path || row.label || "")}</td>
         <td>${escapeHtml(row.name || "")}</td>
         <td class="structured-type">${escapeHtml(row.type || "")}</td>
-        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(row.description ?? "")}"></td>
-        <td><input class="structured-value" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(row.value ?? "")}"></td>
+        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.description, ""))}"></td>
+        <td><input class="structured-value" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.value, ""))}"></td>
       </tr>`;
     })
     .join("");
@@ -327,13 +343,13 @@ function renderXmlStructuredRows() {
           if (!Object.prototype.hasOwnProperty.call(attrs, column)) {
             return "<td class=\"structured-empty\"></td>";
           }
-          return `<td><input class="structured-value xml-attr-value" data-row-id="${escapeHtml(row.id)}" data-attr="${escapeHtml(column)}" value="${escapeHtml(attrs[column] ?? "")}"></td>`;
+          return `<td><input class="structured-value xml-attr-value" data-row-id="${escapeHtml(row.id)}" data-attr="${escapeHtml(column)}" value="${escapeHtml(valueOr(attrs[column], ""))}"></td>`;
         })
         .join("");
       return `<tr data-row-id="${escapeHtml(row.id)}">
-        <td>${escapeHtml(row.line ?? "")}</td>
+        <td>${escapeHtml(valueOr(row.line, ""))}</td>
         <td class="structured-tag">${escapeHtml(row.tag || "")}</td>
-        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(row.description ?? "")}"></td>
+        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.description, ""))}"></td>
         ${cells}
       </tr>`;
     })
@@ -422,13 +438,13 @@ async function openPathEditor(path = "") {
 function clonePathPoints(points) {
   return points.map((point, index) => ({
     index,
-    s_m: Number(point.s_m ?? 0),
+    s_m: Number(valueOr(point.s_m, 0)),
     x_m: Number(point.x_m),
     y_m: Number(point.y_m),
-    psi_rad: Number(point.psi_rad ?? 0),
-    kappa_radpm: Number(point.kappa_radpm ?? 0),
-    vx_mps: Number(point.vx_mps ?? 0),
-    ax_mps2: Number(point.ax_mps2 ?? 0),
+    psi_rad: Number(valueOr(point.psi_rad, 0)),
+    kappa_radpm: Number(valueOr(point.kappa_radpm, 0)),
+    vx_mps: Number(valueOr(point.vx_mps, 0)),
+    ax_mps2: Number(valueOr(point.ax_mps2, 0)),
   }));
 }
 
@@ -828,11 +844,13 @@ function setPathMode(mode) {
 function renderPathModeButtons() {
   $("pathSelectMode").classList.toggle("active", state.pathEditor.mode === "move");
   $("pathAddMode").classList.toggle("active", state.pathEditor.mode === "add");
-  $("pathRangeMode")?.classList.toggle("active", state.pathEditor.mode === "range");
+  const rangeButton = $("pathRangeMode");
+  if (rangeButton) rangeButton.classList.toggle("active", state.pathEditor.mode === "range");
 }
 
 function pathIsCircular() {
-  return Boolean(state.pathEditor.data?.circular ?? true);
+  const data = state.pathEditor.data;
+  return Boolean(data && data.circular !== null && data.circular !== undefined ? data.circular : true);
 }
 
 function renderPathSmoothButtons() {
@@ -1133,10 +1151,11 @@ async function loadSelectedPath() {
 }
 
 async function savePathEditor() {
+  const source = state.pathEditor.data && state.pathEditor.data.source ? state.pathEditor.data.source : {};
   const data = await api("/api/path-editor/save", {
     method: "POST",
     body: JSON.stringify({
-      source_path: state.pathEditor.data?.source?.path,
+      source_path: source.path,
       target_path: $("pathTarget").value,
       switch_config: $("pathSwitchConfig").checked,
       auto_rebuild: $("pathAutoBuild").checked,
@@ -1170,7 +1189,7 @@ async function rememberSelectedControlMethod(method) {
     body: JSON.stringify({ method }),
   });
   state.app.selected_control_method = data.method;
-  state.app.files = data.files || state.app.catalog?.[data.method] || [];
+  state.app.files = data.files || (state.app.catalog && state.app.catalog[data.method]) || [];
   renderState();
   if (!state.app.files.some((file) => file.path === state.currentFile) && state.app.files.length) {
     await openFile(state.app.files[0].path);
@@ -1211,7 +1230,7 @@ async function saveFile(autoRebuild) {
   state.currentContent = $("fileEditor").value;
   if (data.changed) {
     toast("保存したよ。バックアップも作成済み");
-  } else if (structuredApply?.descriptions_changed) {
+  } else if (structuredApply && structuredApply.descriptions_changed) {
     toast("descriptionを保存したよ");
   } else {
     toast("変更なし");
@@ -1313,6 +1332,7 @@ async function refreshHistory() {
   const data = await api("/api/history");
   renderLapHistory(data.outputs || []);
   renderReports(data.reports || []);
+  await renderMotionRunPicker(data.reports || []);
 }
 
 function renderLapHistory(rows) {
@@ -1360,8 +1380,239 @@ function renderReports(rows) {
     .join("");
 }
 
+async function renderMotionRunPicker(rows) {
+  state.motion.reports = rows.filter((row) => row.motion_log_available);
+  const select = $("motionRun");
+  const previous = state.motion.selectedRunId || select.value;
+  select.innerHTML = "";
+  for (const row of state.motion.reports) {
+    const option = document.createElement("option");
+    option.value = row.run_id;
+    option.textContent = row.run_id;
+    option.selected = row.run_id === previous;
+    select.appendChild(option);
+  }
+  if (!state.motion.reports.length) {
+    state.motion.selectedRunId = null;
+    state.motion.selectedDomain = null;
+    state.motion.data = null;
+    renderMotionEmpty("まだmotion logがないよ。EVAL後かDEV後にlog化してね。");
+    return;
+  }
+  state.motion.selectedRunId = select.value || state.motion.reports[0].run_id;
+  select.value = state.motion.selectedRunId;
+  if (!state.motion.data || state.motion.data.run_id !== state.motion.selectedRunId) {
+    await loadMotionLog();
+  }
+}
+
+async function loadMotionLog() {
+  const runId = $("motionRun").value;
+  if (!runId) {
+    renderMotionEmpty("表示するrunを選んでね。");
+    return;
+  }
+  const domain = $("motionDomain").value || state.motion.selectedDomain || "";
+  const params = new URLSearchParams({ run_id: runId });
+  if (domain) params.set("domain", domain);
+  const data = await api(`/api/motion-log?${params.toString()}`);
+  state.motion.selectedRunId = data.run_id;
+  state.motion.selectedDomain = data.domain_id || "";
+  state.motion.data = data;
+  renderMotionDomainPicker(data);
+  renderMotionLog(data);
+}
+
+function renderMotionDomainPicker(data) {
+  const select = $("motionDomain");
+  const previous = state.motion.selectedDomain || data.domain_id || "";
+  select.innerHTML = "";
+  for (const domain of data.domains || []) {
+    const option = document.createElement("option");
+    option.value = domain;
+    option.textContent = domain;
+    option.selected = domain === previous;
+    select.appendChild(option);
+  }
+  select.disabled = !(data.domains || []).length;
+  if (data.domain_id) {
+    select.value = data.domain_id;
+    state.motion.selectedDomain = data.domain_id;
+  }
+}
+
+function renderMotionLog(data) {
+  if (!(data.points && data.points.length)) {
+    renderMotionEmpty("このrunには表示できるmotion sampleがないよ。");
+    return;
+  }
+  drawMotionChart(data.points);
+  const stats = data.stats || {};
+  $("motionStats").innerHTML = `
+    <dt>duration</dt><dd>${fmtSec(stats.duration_sec)}</dd>
+    <dt>samples</dt><dd>${escapeHtml(valueOr(stats.samples, "-"))}</dd>
+    <dt>max speed</dt><dd>${fmtNum(stats.max_speed_mps, 3, " m/s")}</dd>
+    <dt>max accel</dt><dd>${fmtNum(stats.max_abs_acceleration_mps2, 3, " m/s²")}</dd>
+    <dt>max steer</dt><dd>${fmtNum(valueOr(stats.max_abs_steering_rad, stats.max_abs_command_steering_rad), 3, " rad")}</dd>
+  `;
+  const links = Object.entries(data.paths || {})
+    .filter(([, path]) => path)
+    .map(([label, path]) => {
+      const href = `/files?path=${encodeURIComponent(path)}`;
+      return `<a href="${href}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+    });
+  $("motionLinks").innerHTML = links.length ? links.join("") : "";
+}
+
+function renderMotionEmpty(message) {
+  const canvas = $("motionChart");
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = chartColor("--muted");
+  ctx.font = "13px system-ui, sans-serif";
+  ctx.fillText(message, 14, 28);
+  $("motionStats").innerHTML = "";
+  $("motionLinks").innerHTML = "";
+  $("motionDomain").innerHTML = "";
+  $("motionDomain").disabled = true;
+}
+
+function drawMotionChart(points) {
+  const canvas = $("motionChart");
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const panels = [
+    {
+      label: "speed [m/s]",
+      keys: [
+        { key: "speed_mps", label: "actual", color: "#2457a6" },
+        { key: "target_speed_mps", label: "target", color: "#718096" },
+      ],
+    },
+    {
+      label: "accel [m/s²]",
+      keys: [
+        { key: "acceleration_mps2", label: "actual", color: "#956218" },
+        { key: "command_accel_mps2", label: "cmd", color: "#c05621" },
+      ],
+    },
+    {
+      label: "steer [rad]",
+      keys: [
+        { key: "steering_rad", label: "actual", color: "#177245" },
+        { key: "command_steer_rad", label: "cmd", color: "#2f855a" },
+      ],
+    },
+  ];
+  const plotLeft = 54;
+  const plotRight = 12;
+  const plotTop = 16;
+  const plotGap = 12;
+  const panelHeight = (height - plotTop * 2 - plotGap * (panels.length - 1)) / panels.length;
+  const maxTime = Math.max(...points.map((point) => Number(point.time_sec || 0)), 1e-6);
+
+  ctx.font = "11px system-ui, sans-serif";
+  panels.forEach((panel, index) => {
+    const top = plotTop + index * (panelHeight + plotGap);
+    drawMotionPanel(ctx, points, panel, {
+      left: plotLeft,
+      top,
+      width: width - plotLeft - plotRight,
+      height: panelHeight,
+      maxTime,
+    });
+  });
+}
+
+function drawMotionPanel(ctx, points, panel, rect) {
+  const text = chartColor("--text");
+  const muted = chartColor("--muted");
+  const line = chartColor("--line");
+  const values = [];
+  for (const point of points) {
+    for (const series of panel.keys) {
+      const value = point[series.key];
+      if (Number.isFinite(Number(value))) values.push(Number(value));
+    }
+  }
+  if (!values.length) {
+    ctx.fillStyle = muted;
+    ctx.fillText(`${panel.label}: no data`, rect.left, rect.top + 16);
+    return;
+  }
+  let minY = Math.min(...values);
+  let maxY = Math.max(...values);
+  if (minY === maxY) {
+    minY -= 1;
+    maxY += 1;
+  }
+  const pad = (maxY - minY) * 0.08;
+  minY -= pad;
+  maxY += pad;
+  const xFor = (time) => rect.left + (Number(time || 0) / rect.maxTime) * rect.width;
+  const yFor = (value) => rect.top + rect.height - ((Number(value) - minY) / (maxY - minY)) * rect.height;
+
+  ctx.strokeStyle = line;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(rect.left, rect.top, rect.width, rect.height);
+  ctx.beginPath();
+  for (let i = 1; i < 4; i += 1) {
+    const y = rect.top + (rect.height / 4) * i;
+    ctx.moveTo(rect.left, y);
+    ctx.lineTo(rect.left + rect.width, y);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = text;
+  ctx.fillText(panel.label, 8, rect.top + 14);
+  ctx.fillStyle = muted;
+  ctx.fillText(maxY.toFixed(2), 8, rect.top + 28);
+  ctx.fillText(minY.toFixed(2), 8, rect.top + rect.height - 4);
+
+  for (const series of panel.keys) {
+    const seriesPoints = points.filter((point) => Number.isFinite(Number(point[series.key])));
+    if (!seriesPoints.length) continue;
+    ctx.strokeStyle = series.color;
+    ctx.lineWidth = series.label === "cmd" || series.label === "target" ? 1.4 : 2;
+    ctx.setLineDash(series.label === "cmd" || series.label === "target" ? [4, 4] : []);
+    ctx.beginPath();
+    seriesPoints.forEach((point, index) => {
+      const x = xFor(point.time_sec);
+      const y = yFor(point[series.key]);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.fillStyle = muted;
+  const legend = panel.keys.map((series) => series.label).join(" / ");
+  ctx.fillText(legend, rect.left + rect.width - 90, rect.top + 14);
+}
+
+function chartColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#64748b";
+}
+
 function escapeHtml(value) {
-  return String(value ?? "")
+  return String(valueOr(value, ""))
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -1400,9 +1651,20 @@ function bind() {
   $("runDev").addEventListener("click", () => run("dev").catch((e) => toast(e.message)));
   $("runEval").addEventListener("click", () => run("eval").catch((e) => toast(e.message)));
   $("runQuickEval").addEventListener("click", () => run("quick-eval").catch((e) => toast(e.message)));
+  $("runIngest").addEventListener("click", () => run("ingest").catch((e) => toast(e.message)));
   $("runDown").addEventListener("click", () => run("down").catch((e) => toast(e.message)));
   $("stopCommand").addEventListener("click", () => stopCommand().catch((e) => toast(e.message)));
   $("refreshDocker").addEventListener("click", () => refreshDocker().catch((e) => toast(e.message)));
+  $("refreshMotion").addEventListener("click", () => loadMotionLog().catch((e) => toast(e.message)));
+  $("motionRun").addEventListener("change", () => {
+    state.motion.selectedRunId = $("motionRun").value;
+    state.motion.selectedDomain = null;
+    loadMotionLog().catch((e) => toast(e.message));
+  });
+  $("motionDomain").addEventListener("change", () => {
+    state.motion.selectedDomain = $("motionDomain").value;
+    loadMotionLog().catch((e) => toast(e.message));
+  });
   $("savePreset").addEventListener("click", () => savePreset().catch((e) => toast(e.message)));
   $("restorePreset").addEventListener("click", () => restorePreset().catch((e) => toast(e.message)));
   $("pathLoad").addEventListener("click", () => loadSelectedPath().catch((e) => toast(e.message)));
@@ -1415,7 +1677,8 @@ function bind() {
   $("pathZoomOut").addEventListener("click", () => zoomPathView(0.86));
   $("pathSelectMode").addEventListener("click", () => setPathMode("move"));
   $("pathAddMode").addEventListener("click", () => setPathMode("add"));
-  $("pathRangeMode")?.addEventListener("click", () => setPathMode("range"));
+  const pathRangeMode = $("pathRangeMode");
+  if (pathRangeMode) pathRangeMode.addEventListener("click", () => setPathMode("range"));
   $("pathDeletePoint").addEventListener("click", deleteSelectedPathPoint);
   $("pathSmooth").addEventListener("click", applyPathSmoothing);
   $("pathUndoSmooth").addEventListener("click", undoPathSmoothing);
@@ -1430,6 +1693,9 @@ function bind() {
   window.addEventListener("resize", () => {
     if (state.editorMode === "path") {
       drawPathEditor();
+    }
+    if (state.motion.data && state.motion.data.points && state.motion.data.points.length) {
+      drawMotionChart(state.motion.data.points);
     }
   });
 }

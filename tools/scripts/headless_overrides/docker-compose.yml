@@ -21,6 +21,8 @@ x-autoware-base: &autoware-base
     - AWSIM_TIMEOUT=${AWSIM_TIMEOUT:-600}
     - AWSIM_EXTRA_ARGS=${AWSIM_EXTRA_ARGS:-}
     - CMD=${CMD:-}
+    - CAPTURE=${CAPTURE:-}
+    - ROSBAG=${ROSBAG:-}
     - COLCON_TRACE=${COLCON_TRACE:-}
     - ROS_HOME=${ROS_HOME:-}
     - ROS_LOG_DIR=${ROS_LOG_DIR:-}

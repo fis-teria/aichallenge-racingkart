@@ -147,6 +147,7 @@ def write_processed_outputs(run_id: str, domains: list[DomainResult], processed_
     _write_trajectory_reference(run_id, domains, processed_dir / "trajectory_reference.csv")
     _write_vehicle_timeseries(run_id, domains, processed_dir / "vehicle_timeseries.csv")
     _write_control_timeseries(run_id, domains, processed_dir / "control_timeseries.csv")
+    _write_motion_log(run_id, domains, processed_dir / "motion_log.csv")
     _write_events(domains, processed_dir / "events.csv")
     return metrics
 
@@ -309,6 +310,79 @@ def _write_control_timeseries(run_id: str, domains: list[DomainResult], path: Pa
         for domain in domains:
             for row in domain.control_timeseries:
                 writer.writerow(_row_with_run_domain(row, run_id, domain.domain_id, fieldnames))
+
+
+def _write_motion_log(run_id: str, domains: list[DomainResult], path: Path) -> None:
+    fieldnames = [
+        "run_id",
+        "domain_id",
+        "time_sec",
+        "speed_mps",
+        "acceleration_mps2",
+        "steering_rad",
+        "target_speed_mps",
+        "command_accel_mps2",
+        "command_steer_rad",
+        "throttle",
+        "brake",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for domain in domains:
+            if domain.vehicle_timeseries:
+                for vehicle in domain.vehicle_timeseries:
+                    time_sec = _optional_float(vehicle.get("time_sec"))
+                    control = _nearest_control_row(domain.control_timeseries, time_sec)
+                    writer.writerow(
+                        {
+                            "run_id": run_id,
+                            "domain_id": domain.domain_id,
+                            "time_sec": vehicle.get("time_sec", ""),
+                            "speed_mps": vehicle.get("speed_mps", ""),
+                            "acceleration_mps2": vehicle.get("acceleration_mps2", ""),
+                            "steering_rad": vehicle.get("steering_rad", ""),
+                            "target_speed_mps": control.get("target_speed_mps", "") if control else "",
+                            "command_accel_mps2": control.get("accel_mps2", "") if control else "",
+                            "command_steer_rad": control.get("steer_rad", "") if control else "",
+                            "throttle": control.get("throttle", "") if control else "",
+                            "brake": control.get("brake", "") if control else "",
+                        }
+                    )
+                continue
+
+            for control in domain.control_timeseries:
+                writer.writerow(
+                    {
+                        "run_id": run_id,
+                        "domain_id": domain.domain_id,
+                        "time_sec": control.get("time_sec", ""),
+                        "speed_mps": "",
+                        "acceleration_mps2": "",
+                        "steering_rad": "",
+                        "target_speed_mps": control.get("target_speed_mps", ""),
+                        "command_accel_mps2": control.get("accel_mps2", ""),
+                        "command_steer_rad": control.get("steer_rad", ""),
+                        "throttle": control.get("throttle", ""),
+                        "brake": control.get("brake", ""),
+                    }
+                )
+
+
+def _nearest_control_row(rows: list[dict[str, object]], time_sec: float | None, tolerance_sec: float = 0.25) -> dict[str, object] | None:
+    if time_sec is None or not rows:
+        return None
+    best: dict[str, object] | None = None
+    best_delta = tolerance_sec
+    for row in rows:
+        row_time = _optional_float(row.get("time_sec"))
+        if row_time is None:
+            continue
+        delta = abs(row_time - time_sec)
+        if delta <= best_delta:
+            best = row
+            best_delta = delta
+    return best
 
 
 def _write_events(domains: list[DomainResult], path: Path) -> None:
