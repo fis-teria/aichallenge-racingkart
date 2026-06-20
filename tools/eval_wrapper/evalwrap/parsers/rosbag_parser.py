@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,9 @@ DEFAULT_THRESHOLDS = {
     "corner_merge_gap_m": 2.0,
     "corner_padding_m": 1.0,
     "corner_id_rotation": 0.0,
+    "grade_min_speed_mps": 1.0,
+    "grade_min_distance_delta_m": 0.5,
+    "grade_smoothing_window_m": 2.0,
 }
 
 ODOMETRY_TOPICS = {
@@ -49,8 +53,15 @@ TRAJECTORY_TOPICS = {
 AWSIM_STATUS_TOPICS = {
     "/awsim/status",
 }
+DELAY_DEBUG_TOPICS = {
+    "/delay_aware_mpc/debug",
+}
+SPEED_PROFILE_DEBUG_TOPICS = {
+    "/mpc/speed_profile_debug",
+}
 ACKERMANN_CONTROL_COMMAND_TYPE = "autoware_auto_control_msgs/msg/AckermannControlCommand"
 RawDecoder = Callable[[bytes, float], dict[str, float | None] | None]
+PathPoint = tuple[float, float, float | None]
 
 
 @dataclass
@@ -61,6 +72,8 @@ class ParsedRosbag:
     metrics: dict[str, float | int | None] = field(default_factory=dict)
     vehicle_timeseries: list[dict[str, float | int | None]] = field(default_factory=list)
     control_timeseries: list[dict[str, float | None]] = field(default_factory=list)
+    delay_debug_timeseries: list[dict[str, object]] = field(default_factory=list)
+    speed_profile_debug_timeseries: list[dict[str, object]] = field(default_factory=list)
     section_summary: list[dict[str, float | int | None]] = field(default_factory=list)
     awsim_section_summary: list[dict[str, float | int | None]] = field(default_factory=list)
     corner_summary: list[dict[str, float | int | str | None]] = field(default_factory=list)
@@ -72,7 +85,7 @@ class ParsedRosbag:
 def parse_rosbag(
     domain_dir: Path,
     thresholds: dict[str, float] | None = None,
-    fallback_trajectory_points: list[tuple[float, float]] | None = None,
+    fallback_trajectory_points: list[Sequence[float | None]] | None = None,
     fallback_trajectory_source: str | None = None,
 ) -> ParsedRosbag:
     bag_uri = _find_rosbag_uri(domain_dir)
@@ -124,7 +137,9 @@ def parse_rosbag(
     control: list[dict[str, float | None]] = []
     actuation: list[dict[str, float | None]] = []
     awsim_status: list[dict[str, float | int | None]] = []
-    trajectory_points: list[tuple[float, float]] = []
+    delay_debug: list[dict[str, object]] = []
+    speed_profile_debug: list[dict[str, object]] = []
+    trajectory_points: list[PathPoint] = []
     trajectory_source: str | None = None
     raw_decode_failed_topics: set[str] = set()
 
@@ -164,6 +179,14 @@ def parse_rosbag(
             status = _extract_awsim_status(msg, time_sec)
             if status is not None:
                 awsim_status.append(status)
+        elif topic_name in DELAY_DEBUG_TOPICS:
+            row = _extract_json_debug(msg, time_sec)
+            if row is not None:
+                delay_debug.append(row)
+        elif topic_name in SPEED_PROFILE_DEBUG_TOPICS:
+            row = _extract_json_debug(msg, time_sec)
+            if row is not None:
+                speed_profile_debug.append(row)
         elif topic_name in TRAJECTORY_TOPICS:
             points = _extract_trajectory_points(msg)
             if points:
@@ -171,7 +194,7 @@ def parse_rosbag(
                 trajectory_source = topic_name
 
     if not trajectory_points and fallback_trajectory_points:
-        trajectory_points = fallback_trajectory_points
+        trajectory_points = _normalize_trajectory_points(fallback_trajectory_points)
         trajectory_source = fallback_trajectory_source or "fallback"
 
     return build_analysis_from_series(
@@ -182,6 +205,8 @@ def parse_rosbag(
         control=control,
         actuation=actuation,
         awsim_status=awsim_status,
+        delay_debug=delay_debug,
+        speed_profile_debug=speed_profile_debug,
         trajectory_points=trajectory_points,
         trajectory_source=trajectory_source,
         thresholds=thresholds,
@@ -198,7 +223,9 @@ def build_analysis_from_series(
     control: list[dict[str, float | None]] | None = None,
     actuation: list[dict[str, float | None]] | None = None,
     awsim_status: list[dict[str, float | int | None]] | None = None,
-    trajectory_points: list[tuple[float, float]] | None = None,
+    delay_debug: list[dict[str, object]] | None = None,
+    speed_profile_debug: list[dict[str, object]] | None = None,
+    trajectory_points: list[Sequence[float | None]] | None = None,
     trajectory_source: str | None = None,
     thresholds: dict[str, float] | None = None,
     warnings: list[str] | None = None,
@@ -212,7 +239,9 @@ def build_analysis_from_series(
     control = _sorted_rows(control or [])
     actuation = _sorted_rows(actuation or [])
     awsim_status = _sorted_rows(awsim_status or [])
-    trajectory_points = trajectory_points or []
+    delay_debug = _sorted_debug_rows(delay_debug or [])
+    speed_profile_debug = _sorted_debug_rows(speed_profile_debug or [])
+    trajectory_points = _normalize_trajectory_points(trajectory_points or [])
 
     vehicle_rows = _merge_vehicle_rows(odometry, velocity_status, acceleration, steering_status, sync_tolerance)
     control_rows = _merge_control_rows(control, actuation, sync_tolerance)
@@ -232,6 +261,7 @@ def build_analysis_from_series(
         )
 
     _attach_distance_and_sections(vehicle_rows, int(merged_thresholds["section_count"]))
+    _attach_odometry_grade(vehicle_rows, merged_thresholds)
     metrics = _compute_metrics(vehicle_rows, control_rows, merged_thresholds)
     events = _detect_events(vehicle_rows, control_rows, metrics, merged_thresholds)
     sections = _build_section_summary(vehicle_rows, events)
@@ -243,6 +273,8 @@ def build_analysis_from_series(
         metrics=metrics,
         vehicle_timeseries=vehicle_rows,
         control_timeseries=control_rows,
+        delay_debug_timeseries=delay_debug,
+        speed_profile_debug_timeseries=speed_profile_debug,
         section_summary=sections,
         awsim_section_summary=awsim_sections,
         corner_summary=corners,
@@ -306,6 +338,8 @@ def _target_topics(topic_types: dict[str, str]) -> set[str]:
         | STEERING_STATUS_TOPICS
         | TRAJECTORY_TOPICS
         | AWSIM_STATUS_TOPICS
+        | DELAY_DEBUG_TOPICS
+        | SPEED_PROFILE_DEBUG_TOPICS
     )
     return set(topic_types).intersection(supported)
 
@@ -315,6 +349,7 @@ def _extract_odometry(msg: Any, time_sec: float) -> dict[str, float | None]:
         "time_sec": time_sec,
         "x_m": _get_nested_float(msg, "pose.pose.position.x"),
         "y_m": _get_nested_float(msg, "pose.pose.position.y"),
+        "z_m": _get_nested_float(msg, "pose.pose.position.z"),
         "speed_mps": _get_nested_float(msg, "twist.twist.linear.x"),
         "yaw_rate_rps": _get_nested_float(msg, "twist.twist.angular.z"),
     }
@@ -384,17 +419,65 @@ def _extract_awsim_status(msg: Any, time_sec: float) -> dict[str, float | int | 
         return None
 
 
-def _extract_trajectory_points(msg: Any) -> list[tuple[float, float]]:
+def _extract_json_debug(msg: Any, time_sec: float) -> dict[str, object] | None:
+    data = getattr(msg, "data", None)
+    if not isinstance(data, str) or not data:
+        return None
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return {"time_sec": time_sec, "raw": data}
+    if not isinstance(payload, dict):
+        return {"time_sec": time_sec, "raw": data}
+    row: dict[str, object] = {"time_sec": time_sec}
+    _flatten_debug_payload(row, "", payload)
+    return row
+
+
+def _flatten_debug_payload(output: dict[str, object], prefix: str, payload: dict[str, object]) -> None:
+    for key, value in payload.items():
+        name = f"{prefix}_{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            _flatten_debug_payload(output, name, value)
+        elif isinstance(value, (int, float, str, bool)) or value is None:
+            output[name] = value
+
+
+def _extract_trajectory_points(msg: Any) -> list[PathPoint]:
     points = getattr(msg, "points", None)
     if not points:
         return []
-    result: list[tuple[float, float]] = []
+    result: list[PathPoint] = []
     for point in points:
         x = _get_nested_float(point, "pose.position.x")
         y = _get_nested_float(point, "pose.position.y")
+        z = _get_nested_float(point, "pose.position.z")
         if x is not None and y is not None:
-            result.append((x, y))
+            result.append((x, y, z))
     return result
+
+
+def _normalize_trajectory_points(points: list[Sequence[float | None]]) -> list[PathPoint]:
+    normalized: list[PathPoint] = []
+    for point in points:
+        if len(point) < 2:
+            continue
+        x = _finite_float(point[0])
+        y = _finite_float(point[1])
+        z = _finite_float(point[2]) if len(point) >= 3 else None
+        if x is None or y is None:
+            continue
+        normalized.append((x, y, z))
+    return normalized
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
 
 
 def _merge_vehicle_rows(
@@ -403,9 +486,9 @@ def _merge_vehicle_rows(
     acceleration: list[dict[str, float | None]],
     steering_status: list[dict[str, float | None]],
     sync_tolerance: float,
-) -> list[dict[str, float | int | None]]:
+) -> list[dict[str, float | int | str | None]]:
     primary = odometry or velocity_status
-    rows: list[dict[str, float | int | None]] = []
+    rows: list[dict[str, float | int | str | None]] = []
     for source in primary:
         time_sec = source["time_sec"]
         speed = source.get("speed_mps")
@@ -416,8 +499,18 @@ def _merge_vehicle_rows(
                 "time_sec": float(time_sec),
                 "x_m": source.get("x_m"),
                 "y_m": source.get("y_m"),
+                "z_m": source.get("z_m"),
                 "distance_m": None,
                 "section": None,
+                "track_s_m": None,
+                "trajectory_curvature_1pm": None,
+                "corner_id": None,
+                "trajectory_z_m": None,
+                "trajectory_grade_rad": None,
+                "trajectory_grade_percent": None,
+                "grade_rad": None,
+                "grade_percent": None,
+                "grade_source": None,
                 "speed_mps": speed,
                 "acceleration_mps2": _nearest_value(acceleration, float(time_sec), "acceleration_mps2", sync_tolerance),
                 "steering_rad": _nearest_value(steering_status, float(time_sec), "steering_rad", sync_tolerance),
@@ -455,34 +548,46 @@ def _merge_control_rows(
 
 
 def _attach_trajectory_projection(
-    rows: list[dict[str, float | int | None]],
+    rows: list[dict[str, float | int | str | None]],
     trajectory_profile: dict[str, object],
 ) -> None:
     points = trajectory_profile["points"]
     s_values = trajectory_profile["s_values"]
     curvatures = trajectory_profile["curvatures"]
     corner_by_index = trajectory_profile["corner_by_index"]
+    z_values = trajectory_profile["z_values"]
+    grade_rads = trajectory_profile["grade_rads"]
+    grade_percents = trajectory_profile["grade_percents"]
     for row in rows:
         x = row.get("x_m")
         y = row.get("y_m")
         if x is None or y is None:
             continue
         nearest_idx, min_sq = min(
-            enumerate((float(x) - tx) ** 2 + (float(y) - ty) ** 2 for tx, ty in points),
+            enumerate((float(x) - tx) ** 2 + (float(y) - ty) ** 2 for tx, ty, _tz in points),
             key=lambda item: item[1],
         )
         row["path_error_m"] = math.sqrt(min_sq)
         row["track_s_m"] = s_values[nearest_idx]
         row["trajectory_curvature_1pm"] = curvatures[nearest_idx]
         row["corner_id"] = corner_by_index[nearest_idx]
+        row["trajectory_z_m"] = z_values[nearest_idx]
+        row["trajectory_grade_rad"] = grade_rads[nearest_idx]
+        row["trajectory_grade_percent"] = grade_percents[nearest_idx]
+        if grade_rads[nearest_idx] is not None:
+            row["grade_rad"] = grade_rads[nearest_idx]
+            row["grade_percent"] = grade_percents[nearest_idx]
+            row["grade_source"] = "trajectory"
 
 
 def _build_trajectory_profile(
-    trajectory_points: list[tuple[float, float]],
+    trajectory_points: list[PathPoint],
     thresholds: dict[str, float],
 ) -> dict[str, object]:
     s_values = _trajectory_s_values(trajectory_points)
     curvatures = _trajectory_curvatures(trajectory_points)
+    z_values = [point[2] for point in trajectory_points]
+    grade_rads, grade_percents = _trajectory_grades(s_values, z_values)
     segments = _detect_corner_segments(trajectory_points, s_values, curvatures, thresholds)
     segments = _apply_corner_id_rotation(segments, int(thresholds.get("corner_id_rotation", 0.0)))
     corner_by_index: list[str | None] = [None] * len(trajectory_points)
@@ -493,6 +598,9 @@ def _build_trajectory_profile(
         "points": trajectory_points,
         "s_values": s_values,
         "curvatures": curvatures,
+        "z_values": z_values,
+        "grade_rads": grade_rads,
+        "grade_percents": grade_percents,
         "segments": segments,
         "corner_by_index": corner_by_index,
     }
@@ -505,17 +613,23 @@ def _build_trajectory_reference_rows(
     points = trajectory_profile["points"]
     s_values = trajectory_profile["s_values"]
     curvatures = trajectory_profile["curvatures"]
+    z_values = trajectory_profile["z_values"]
+    grade_rads = trajectory_profile["grade_rads"]
+    grade_percents = trajectory_profile["grade_percents"]
     corner_by_index = trajectory_profile["corner_by_index"]
     output: list[dict[str, float | int | str | None]] = []
-    for index, ((x, y), s_value, curvature, corner_id) in enumerate(
-        zip(points, s_values, curvatures, corner_by_index)
+    for index, ((x, y, _z), s_value, curvature, z_value, grade_rad, grade_percent, corner_id) in enumerate(
+        zip(points, s_values, curvatures, z_values, grade_rads, grade_percents, corner_by_index)
     ):
         output.append(
             {
                 "point_index": index,
                 "x_m": x,
                 "y_m": y,
+                "z_m": z_value,
                 "track_s_m": s_value,
+                "grade_rad": grade_rad,
+                "grade_percent": grade_percent,
                 "trajectory_curvature_1pm": curvature,
                 "corner_id": corner_id,
                 "trajectory_source": trajectory_source,
@@ -524,7 +638,7 @@ def _build_trajectory_reference_rows(
     return output
 
 
-def _trajectory_s_values(points: list[tuple[float, float]]) -> list[float]:
+def _trajectory_s_values(points: list[PathPoint]) -> list[float]:
     if not points:
         return []
     values = [0.0]
@@ -535,7 +649,7 @@ def _trajectory_s_values(points: list[tuple[float, float]]) -> list[float]:
     return values
 
 
-def _trajectory_curvatures(points: list[tuple[float, float]]) -> list[float]:
+def _trajectory_curvatures(points: list[PathPoint]) -> list[float]:
     if len(points) < 3:
         return [0.0] * len(points)
     curvatures = [0.0] * len(points)
@@ -555,8 +669,120 @@ def _trajectory_curvatures(points: list[tuple[float, float]]) -> list[float]:
     return curvatures
 
 
+def _trajectory_grades(
+    s_values: list[float],
+    z_values: list[float | None],
+    min_distance_delta_m: float = 0.5,
+    smoothing_window_m: float = 2.0,
+    valid_mask: list[bool] | None = None,
+) -> tuple[list[float | None], list[float | None]]:
+    if len(s_values) != len(z_values) or len(s_values) < 2:
+        empty = [None] * len(s_values)
+        return empty, empty.copy()
+    valid = [
+        value is not None and (valid_mask[index] if valid_mask is not None else True)
+        for index, value in enumerate(z_values)
+    ]
+    finite_z = [float(value) for index, value in enumerate(z_values) if valid[index] and value is not None]
+    if len(finite_z) < 2 or max(finite_z) - min(finite_z) <= 1e-4:
+        empty = [None] * len(s_values)
+        return empty, empty.copy()
+
+    grade_rads: list[float | None] = []
+    grade_percents: list[float | None] = []
+    for index, z_value in enumerate(z_values):
+        if z_value is None or not valid[index]:
+            grade_rads.append(None)
+            grade_percents.append(None)
+            continue
+        bounds = _grade_bounds(
+            index,
+            s_values,
+            valid,
+            max(0.0, float(min_distance_delta_m)),
+            max(0.0, float(smoothing_window_m)),
+        )
+        if bounds is None:
+            grade_rads.append(None)
+            grade_percents.append(None)
+            continue
+        left, right = bounds
+        ds = float(s_values[right]) - float(s_values[left])
+        if abs(ds) < max(float(min_distance_delta_m), 1e-9):
+            grade_rads.append(None)
+            grade_percents.append(None)
+            continue
+        left_z = z_values[left]
+        right_z = z_values[right]
+        if left_z is None or right_z is None:
+            grade_rads.append(None)
+            grade_percents.append(None)
+            continue
+        dz = float(right_z) - float(left_z)
+        grade_rad = math.atan2(dz, ds)
+        grade_rads.append(grade_rad)
+        grade_percents.append(dz / ds * 100.0)
+    return grade_rads, grade_percents
+
+
+def _grade_bounds(
+    index: int,
+    s_values: list[float],
+    valid: list[bool],
+    min_distance_delta_m: float,
+    smoothing_window_m: float,
+) -> tuple[int, int] | None:
+    left = index
+    right = index
+    half_window = max(smoothing_window_m * 0.5, min_distance_delta_m * 0.5)
+    while True:
+        previous = _previous_valid_index(valid, left)
+        if previous is None:
+            break
+        left = previous
+        if float(s_values[index]) - float(s_values[left]) >= half_window:
+            break
+    while True:
+        next_index = _next_valid_index(valid, right)
+        if next_index is None:
+            break
+        right = next_index
+        if float(s_values[right]) - float(s_values[index]) >= half_window:
+            break
+    while float(s_values[right]) - float(s_values[left]) < min_distance_delta_m:
+        previous = _previous_valid_index(valid, left)
+        next_index = _next_valid_index(valid, right)
+        if previous is None and next_index is None:
+            return None
+        if previous is not None and (
+            next_index is None
+            or abs(float(s_values[index]) - float(s_values[previous]))
+            <= abs(float(s_values[next_index]) - float(s_values[index]))
+        ):
+            left = previous
+        elif next_index is not None:
+            right = next_index
+    if left == right:
+        return None
+    return left, right
+
+
+def _previous_valid_index(valid: list[bool], start: int) -> int | None:
+    for index in range(start - 1, -1, -1):
+        if valid[index]:
+            return index
+    return None
+
+
+def _next_valid_index(valid: list[bool], start: int) -> int | None:
+    for index in range(start + 1, len(valid)):
+        if valid[index]:
+            return index
+    return None
+
+
 def _detect_corner_segments(
-    points: list[tuple[float, float]],
+    points: list[PathPoint],
     s_values: list[float],
     curvatures: list[float],
     thresholds: dict[str, float],
@@ -672,6 +898,36 @@ def _attach_distance_and_sections(rows: list[dict[str, float | int | None]], sec
     for row in rows:
         section = int(float(row.get("distance_m") or 0.0) / total_distance * count) + 1
         row["section"] = min(section, count)
+
+
+def _attach_odometry_grade(rows: list[dict[str, float | int | str | None]], thresholds: dict[str, float]) -> None:
+    if not rows:
+        return
+    distances = [float(row.get("distance_m") or 0.0) for row in rows]
+    z_values = [
+        float(row["z_m"]) if isinstance(row.get("z_m"), (int, float)) else None
+        for row in rows
+    ]
+    min_speed_mps = float(thresholds.get("grade_min_speed_mps", 1.0))
+    valid_mask = [
+        z_value is not None
+        and isinstance(row.get("speed_mps"), (int, float))
+        and abs(float(row.get("speed_mps") or 0.0)) >= min_speed_mps
+        for row, z_value in zip(rows, z_values)
+    ]
+    grade_rads, grade_percents = _trajectory_grades(
+        distances,
+        z_values,
+        min_distance_delta_m=float(thresholds.get("grade_min_distance_delta_m", 0.5)),
+        smoothing_window_m=float(thresholds.get("grade_smoothing_window_m", 2.0)),
+        valid_mask=valid_mask,
+    )
+    for row, grade_rad, grade_percent in zip(rows, grade_rads, grade_percents):
+        if grade_rad is None or row.get("grade_rad") is not None:
+            continue
+        row["grade_rad"] = grade_rad
+        row["grade_percent"] = grade_percent
+        row["grade_source"] = "odometry"
 
 
 def _compute_metrics(
@@ -1115,6 +1371,10 @@ def _mean(values: list[float]) -> float | None:
 
 
 def _sorted_rows(rows: list[dict[str, float | None]]) -> list[dict[str, float | None]]:
+    return sorted(rows, key=lambda row: float(row.get("time_sec") or 0.0))
+
+
+def _sorted_debug_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return sorted(rows, key=lambda row: float(row.get("time_sec") or 0.0))
 
 

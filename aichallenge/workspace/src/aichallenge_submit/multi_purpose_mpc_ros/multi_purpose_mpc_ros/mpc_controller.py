@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import yaml
 from typing import List, Tuple, Optional, NamedTuple
 import dataclasses
@@ -19,7 +20,7 @@ from rclpy.parameter import Parameter
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy
 
-from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32
+from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32, String
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Quaternion, Pose2D, Point, Vector3
 from std_msgs.msg import ColorRGBA
@@ -48,6 +49,11 @@ from multi_purpose_mpc_ros.common import convert_to_namedtuple, file_exists
 from multi_purpose_mpc_ros.simulation_logger import SimulationLogger
 from multi_purpose_mpc_ros.obstacle_manager import ObstacleManager
 from multi_purpose_mpc_ros.exexution_stats import ExecutionStats
+from multi_purpose_mpc_ros.speed_profile import (
+    SpeedProfilePoint,
+    apply_combined_speed_profile,
+    combine_speed_profile,
+)
 from multi_purpose_mpc_ros_msgs.msg import AckermannControlBoostCommand, PathConstraints, BorderCells
 from multi_purpose_mpc_ros.tools.reference_velocity_configulator import ReferenceVelocityConfigulator
 
@@ -55,6 +61,7 @@ from multi_purpose_mpc_ros.tools.reference_velocity_configulator import Referenc
 RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
 YELLOW = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
 CYAN = ColorRGBA(r=0.0, g=156.0 / 255.0, b=209.0 / 255.0, a=1.0)
+GRAVITY_MPS2 = 9.80665
 
 def array_to_ackermann_control_command(stamp, u: np.ndarray, acc: float) -> AckermannControlCommand:
     msg = AckermannControlCommand()
@@ -93,6 +100,14 @@ def odom_to_pose_2d(odom: Odometry) -> Pose2D:
 
     return pose
 
+
+def cfg_bool(config, name: str, default: bool) -> bool:
+    return bool(getattr(config, name, default))
+
+
+def cfg_float(config, name: str, default: float) -> float:
+    return float(getattr(config, name, default))
+
 @dataclasses.dataclass
 class MPCConfig:
     N: int
@@ -111,6 +126,18 @@ class MPCConfig:
     steer_low_pass_gain: float
     wp_id_offset: int
     use_max_kappa_pred: bool
+    use_curvature_speed_profile: bool
+    use_ref_vel_as_speed_cap: bool
+    speed_profile_debug_publish_period_sec: float
+    use_grade_accel_feedforward: bool
+    grade_ff_gain: float
+    grade_ff_max_accel_mps2: float
+    grade_ff_window_m: float
+    grade_ff_min_distance_delta_m: float
+    grade_ff_min_speed_mps: float
+    grade_ff_low_pass_gain: float
+    grade_ff_only_when_not_decelerating: bool
+    grade_ff_speed_error_deadband_mps: float
 
 
 class MPCController(Node):
@@ -238,6 +265,20 @@ class MPCController(Node):
             self.declare_parameter("accel_low_pass_gain", mpc_cfg.accel_low_pass_gain)
             self.declare_parameter("steer_low_pass_gain", mpc_cfg.steer_low_pass_gain)
             self.declare_parameter("wp_id_offset", mpc_cfg.wp_id_offset)
+            self.declare_parameter("use_curvature_speed_profile", mpc_cfg.use_curvature_speed_profile)
+            self.declare_parameter("use_ref_vel_as_speed_cap", mpc_cfg.use_ref_vel_as_speed_cap)
+            self.declare_parameter(
+                "speed_profile_debug_publish_period_sec",
+                mpc_cfg.speed_profile_debug_publish_period_sec)
+            self.declare_parameter("use_grade_accel_feedforward", mpc_cfg.use_grade_accel_feedforward)
+            self.declare_parameter("grade_ff_gain", mpc_cfg.grade_ff_gain)
+            self.declare_parameter("grade_ff_max_accel_mps2", mpc_cfg.grade_ff_max_accel_mps2)
+            self.declare_parameter("grade_ff_window_m", mpc_cfg.grade_ff_window_m)
+            self.declare_parameter("grade_ff_min_distance_delta_m", mpc_cfg.grade_ff_min_distance_delta_m)
+            self.declare_parameter("grade_ff_min_speed_mps", mpc_cfg.grade_ff_min_speed_mps)
+            self.declare_parameter("grade_ff_low_pass_gain", mpc_cfg.grade_ff_low_pass_gain)
+            self.declare_parameter("grade_ff_only_when_not_decelerating", mpc_cfg.grade_ff_only_when_not_decelerating)
+            self.declare_parameter("grade_ff_speed_error_deadband_mps", mpc_cfg.grade_ff_speed_error_deadband_mps)
 
         def param_cb(parameters):
             cfg_mpc = self._cfg.mpc # type: ignore
@@ -263,11 +304,10 @@ class MPCController(Node):
 
             for param in parameters:
                 if param.name == "v_max" and param.type_ == Parameter.Type.DOUBLE:
-                    mpc_cfg.v_max = param.value
-                    self._mpc.update_v_max(kmh_to_m_per_sec(param.value))
-                    v_ref: List[float] = [kmh_to_m_per_sec(param.value)] * len(self._reference_path.waypoints)
-                    self._reference_path.set_v_ref(v_ref)
-
+                    mpc_cfg.v_max = kmh_to_m_per_sec(param.value)
+                    self._mpc.update_v_max(mpc_cfg.v_max)
+                    self._recompute_curvature_speed_profile()
+                    self._apply_speed_profile(self._mpc.model.wp_id)
                     self.get_logger().warn(f"v_max was updated to '{param.value}' [km/h]")
 
                 elif param.name == "steering_tire_angle_gain_var" and param.type_ == Parameter.Type.DOUBLE:
@@ -297,6 +337,8 @@ class MPCController(Node):
                 elif param.name == "ay_max" and param.type_ == Parameter.Type.DOUBLE:
                     mpc_cfg.ay_max = param.value
                     self._mpc.update_ay_max(param.value)
+                    self._recompute_curvature_speed_profile()
+                    self._apply_speed_profile(self._mpc.model.wp_id)
                     self.get_logger().warn(f"ay_max was updated to '{param.value}'")
 
                 elif param.name == "accel_low_pass_gain" and param.type_ == Parameter.Type.DOUBLE:
@@ -312,6 +354,57 @@ class MPCController(Node):
                     self._mpc.update_wp_id_offset(param.value)
                     self.get_logger().warn(f"wp_id_offset was updated to '{param.value}'")
 
+                elif param.name == "use_curvature_speed_profile" and param.type_ == Parameter.Type.BOOL:
+                    mpc_cfg.use_curvature_speed_profile = param.value
+                    self._recompute_curvature_speed_profile()
+                    self._apply_speed_profile(self._mpc.model.wp_id)
+                    self.get_logger().warn(f"use_curvature_speed_profile was updated to '{param.value}'")
+
+                elif param.name == "use_ref_vel_as_speed_cap" and param.type_ == Parameter.Type.BOOL:
+                    mpc_cfg.use_ref_vel_as_speed_cap = param.value
+                    self._apply_speed_profile(self._mpc.model.wp_id)
+                    self.get_logger().warn(f"use_ref_vel_as_speed_cap was updated to '{param.value}'")
+
+                elif param.name == "speed_profile_debug_publish_period_sec" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.speed_profile_debug_publish_period_sec = param.value
+                    self.get_logger().warn(
+                        f"speed_profile_debug_publish_period_sec was updated to '{param.value}'")
+
+                elif param.name == "use_grade_accel_feedforward" and param.type_ == Parameter.Type.BOOL:
+                    mpc_cfg.use_grade_accel_feedforward = param.value
+                    self.get_logger().warn(f"use_grade_accel_feedforward was updated to '{param.value}'")
+
+                elif param.name == "grade_ff_gain" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.grade_ff_gain = param.value
+                    self.get_logger().warn(f"grade_ff_gain was updated to '{param.value}'")
+
+                elif param.name == "grade_ff_max_accel_mps2" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.grade_ff_max_accel_mps2 = param.value
+                    self.get_logger().warn(f"grade_ff_max_accel_mps2 was updated to '{param.value}'")
+
+                elif param.name == "grade_ff_window_m" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.grade_ff_window_m = param.value
+                    self.get_logger().warn(f"grade_ff_window_m was updated to '{param.value}'")
+
+                elif param.name == "grade_ff_min_distance_delta_m" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.grade_ff_min_distance_delta_m = param.value
+                    self.get_logger().warn(f"grade_ff_min_distance_delta_m was updated to '{param.value}'")
+
+                elif param.name == "grade_ff_min_speed_mps" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.grade_ff_min_speed_mps = param.value
+                    self.get_logger().warn(f"grade_ff_min_speed_mps was updated to '{param.value}'")
+
+                elif param.name == "grade_ff_low_pass_gain" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.grade_ff_low_pass_gain = param.value
+                    self.get_logger().warn(f"grade_ff_low_pass_gain was updated to '{param.value}'")
+
+                elif param.name == "grade_ff_only_when_not_decelerating" and param.type_ == Parameter.Type.BOOL:
+                    mpc_cfg.grade_ff_only_when_not_decelerating = param.value
+                    self.get_logger().warn(f"grade_ff_only_when_not_decelerating was updated to '{param.value}'")
+
+                elif param.name == "grade_ff_speed_error_deadband_mps" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.grade_ff_speed_error_deadband_mps = param.value
+                    self.get_logger().warn(f"grade_ff_speed_error_deadband_mps was updated to '{param.value}'")
 
             return SetParametersResult(successful=True)
 
@@ -392,7 +485,19 @@ class MPCController(Node):
                 cfg_mpc.accel_low_pass_gain,
                 cfg_mpc.steer_low_pass_gain,
                 cfg_mpc.wp_id_offset,
-                cfg_mpc.use_max_kappa_pred)
+                cfg_mpc.use_max_kappa_pred,
+                cfg_bool(cfg_mpc, "use_curvature_speed_profile", True),
+                cfg_bool(cfg_mpc, "use_ref_vel_as_speed_cap", True),
+                cfg_float(cfg_mpc, "speed_profile_debug_publish_period_sec", 0.25),
+                cfg_bool(cfg_mpc, "use_grade_accel_feedforward", False),
+                cfg_float(cfg_mpc, "grade_ff_gain", 1.0),
+                cfg_float(cfg_mpc, "grade_ff_max_accel_mps2", 0.35),
+                cfg_float(cfg_mpc, "grade_ff_window_m", 2.0),
+                cfg_float(cfg_mpc, "grade_ff_min_distance_delta_m", 0.5),
+                cfg_float(cfg_mpc, "grade_ff_min_speed_mps", 0.3),
+                cfg_float(cfg_mpc, "grade_ff_low_pass_gain", 0.25),
+                cfg_bool(cfg_mpc, "grade_ff_only_when_not_decelerating", True),
+                cfg_float(cfg_mpc, "grade_ff_speed_error_deadband_mps", 0.1))
 
             state_constraints = {
                 "xmin": np.array([-np.inf, -np.inf, -np.inf]),
@@ -437,9 +542,15 @@ class MPCController(Node):
         self._reference_path = create_ref_path(self._map)
         self._car = create_car(self._reference_path)
         self._mpc_cfg, self._mpc = create_mpc(self._car)
+        self._curvature_speed_profile_mps: List[float] = []
+        self._combined_speed_profile: List[SpeedProfilePoint] = []
+        self._last_speed_profile_debug_publish_sec = -1.0e9
+        self._reset_grade_estimator()
         compute_speed_profile(self._car, self._mpc_cfg)
+        self._curvature_speed_profile_mps = self._read_reference_speed_profile()
 
         self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = create_ref_vel_configulator()
+        self._apply_speed_profile(0)
 
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
@@ -487,6 +598,178 @@ class MPCController(Node):
         if self._cfg.common.save_config:
             self._save_config()
 
+    def _read_reference_speed_profile(self) -> List[float]:
+        fallback = self._mpc_cfg.v_max
+        if not self._mpc_cfg.use_curvature_speed_profile:
+            return [fallback] * len(self._reference_path.waypoints)
+        return [
+            fallback if wp.v_ref is None else float(wp.v_ref)
+            for wp in self._reference_path.waypoints
+        ]
+
+    def _recompute_curvature_speed_profile(self) -> None:
+        if self._mpc_cfg.use_curvature_speed_profile:
+            speed_profile_constraints = {
+                "a_min": self._mpc_cfg.a_min,
+                "a_max": self._mpc_cfg.a_max,
+                "v_min": 0.0,
+                "v_max": self._mpc_cfg.v_max,
+                "ay_max": self._mpc_cfg.ay_max,
+            }
+            self._reference_path.compute_speed_profile(speed_profile_constraints)
+        self._curvature_speed_profile_mps = self._read_reference_speed_profile()
+
+    def _section_speed_cap_mps(self, wp_id: int) -> Optional[float]:
+        if not self._mpc_cfg.use_ref_vel_as_speed_cap or self._ref_vel_configulator is None:
+            return None
+        try:
+            return kmh_to_m_per_sec(self._ref_vel_configulator.get_ref_vel(wp_id))
+        except ValueError:
+            return None
+
+    def _apply_speed_profile(self, current_wp_id: int) -> None:
+        self._combined_speed_profile = combine_speed_profile(
+            self._curvature_speed_profile_mps,
+            self._mpc_cfg.v_max,
+            self._section_speed_cap_mps,
+        )
+        apply_combined_speed_profile(self._reference_path, self._combined_speed_profile)
+        current_point = self._combined_speed_profile[
+            current_wp_id % len(self._combined_speed_profile)
+        ] if self._combined_speed_profile else None
+        if current_point is not None:
+            self._mpc.update_v_max(current_point.global_cap_mps)
+
+    def _publish_speed_profile_debug(self, now, current_wp_id: int, actual_speed_mps: float, command_speed_mps: float) -> None:
+        period = self._mpc_cfg.speed_profile_debug_publish_period_sec
+        if period <= 0.0:
+            return
+        t = now.nanoseconds / 1e9
+        if t - self._last_speed_profile_debug_publish_sec < period:
+            return
+        self._last_speed_profile_debug_publish_sec = t
+        if not self._combined_speed_profile:
+            return
+
+        point = self._combined_speed_profile[current_wp_id % len(self._combined_speed_profile)]
+        msg = String()
+        msg.data = json.dumps(
+            {
+                "wp_id": point.wp_id,
+                "source": point.source,
+                "target_speed_mps": point.target_speed_mps,
+                "curvature_speed_mps": point.curvature_speed_mps,
+                "section_cap_mps": point.section_cap_mps,
+                "global_cap_mps": point.global_cap_mps,
+                "actual_speed_mps": actual_speed_mps,
+                "command_speed_mps": command_speed_mps,
+                "use_curvature_speed_profile": self._mpc_cfg.use_curvature_speed_profile,
+                "use_ref_vel_as_speed_cap": self._mpc_cfg.use_ref_vel_as_speed_cap,
+                "use_grade_accel_feedforward": self._mpc_cfg.use_grade_accel_feedforward,
+                "grade_percent": self._last_grade_percent,
+                "grade_accel_base_mps2": self._last_grade_accel_base_mps2,
+                "grade_accel_ff_mps2": self._last_grade_accel_ff_mps2,
+            },
+            separators=(",", ":"),
+        )
+        self._speed_profile_debug_pub.publish(msg)
+
+    def _reset_grade_estimator(self) -> None:
+        self._grade_samples: List[Tuple[float, float, float, float]] = []
+        self._grade_distance_m = 0.0
+        self._grade_last_pose_xyz: Optional[Tuple[float, float, float]] = None
+        self._filtered_grade_fraction = 0.0
+        self._last_grade_percent = 0.0
+        self._last_grade_accel_base_mps2 = 0.0
+        self._last_grade_accel_ff_mps2 = 0.0
+
+    def _update_grade_estimate(self, odom: Odometry, speed_mps: float) -> float:
+        pos = odom.pose.pose.position
+        x = float(pos.x)
+        y = float(pos.y)
+        z = float(pos.z)
+        if not np.isfinite([x, y, z]).all():
+            return self._filtered_grade_fraction
+
+        if self._grade_last_pose_xyz is None:
+            self._grade_last_pose_xyz = (x, y, z)
+            self._grade_samples = [(self._grade_distance_m, x, y, z)]
+            return self._filtered_grade_fraction
+
+        last_x, last_y, _ = self._grade_last_pose_xyz
+        distance_delta = float(np.hypot(x - last_x, y - last_y))
+        min_step_m = max(0.02, self._mpc_cfg.grade_ff_min_distance_delta_m * 0.05)
+        if distance_delta >= min_step_m:
+            self._grade_distance_m += distance_delta
+            self._grade_last_pose_xyz = (x, y, z)
+            self._grade_samples.append((self._grade_distance_m, x, y, z))
+            self._trim_grade_samples()
+
+        if abs(speed_mps) < self._mpc_cfg.grade_ff_min_speed_mps:
+            return self._filtered_grade_fraction
+
+        raw_grade = self._estimate_raw_grade_fraction()
+        if raw_grade is None:
+            return self._filtered_grade_fraction
+
+        gain = float(np.clip(self._mpc_cfg.grade_ff_low_pass_gain, 0.0, 1.0))
+        self._filtered_grade_fraction += (raw_grade - self._filtered_grade_fraction) * gain
+        self._last_grade_percent = self._filtered_grade_fraction * 100.0
+        return self._filtered_grade_fraction
+
+    def _trim_grade_samples(self) -> None:
+        if len(self._grade_samples) <= 2:
+            return
+        history_m = max(
+            self._mpc_cfg.grade_ff_window_m * 4.0,
+            self._mpc_cfg.grade_ff_min_distance_delta_m * 4.0,
+            5.0)
+        current_distance = self._grade_samples[-1][0]
+        while len(self._grade_samples) > 2 and current_distance - self._grade_samples[0][0] > history_m:
+            self._grade_samples.pop(0)
+
+    def _estimate_raw_grade_fraction(self) -> Optional[float]:
+        if len(self._grade_samples) < 2:
+            return None
+
+        current_distance, _, _, current_z = self._grade_samples[-1]
+        target_window_m = max(
+            self._mpc_cfg.grade_ff_window_m,
+            self._mpc_cfg.grade_ff_min_distance_delta_m)
+        ref_sample = self._grade_samples[0]
+        for sample in reversed(self._grade_samples[:-1]):
+            if current_distance - sample[0] >= target_window_m:
+                ref_sample = sample
+                break
+
+        ref_distance, _, _, ref_z = ref_sample
+        distance_delta = current_distance - ref_distance
+        if distance_delta < self._mpc_cfg.grade_ff_min_distance_delta_m:
+            return None
+
+        grade_fraction = (current_z - ref_z) / distance_delta
+        if not np.isfinite(grade_fraction):
+            return None
+        return float(grade_fraction)
+
+    def _compute_grade_accel_ff(self, target_speed_mps: float, actual_speed_mps: float) -> float:
+        self._last_grade_accel_ff_mps2 = 0.0
+        if not self._mpc_cfg.use_grade_accel_feedforward:
+            return 0.0
+
+        speed_error = target_speed_mps - actual_speed_mps
+        if (
+            self._mpc_cfg.grade_ff_only_when_not_decelerating
+            and speed_error < -self._mpc_cfg.grade_ff_speed_error_deadband_mps
+        ):
+            return 0.0
+
+        uphill_grade = max(0.0, self._filtered_grade_fraction)
+        ff_acc = GRAVITY_MPS2 * uphill_grade * self._mpc_cfg.grade_ff_gain
+        ff_acc = float(np.clip(ff_acc, 0.0, self._mpc_cfg.grade_ff_max_accel_mps2))
+        self._last_grade_accel_ff_mps2 = ff_acc
+        return ff_acc
+
     def _save_config(self) -> None:
         now = datetime.now().strftime("%Y%m%d_%H%M%S")
         dst_dir = self.PKG_PATH + f"log/{now}"
@@ -517,6 +800,8 @@ class MPCController(Node):
             MarkerArray, "/mpc/ref_path", latching_qos)
         self._ref_path_pub_dummy = self.create_publisher(
             MarkerArray, "/planning/scenario_planning/lane_driving/behavior_planning/behavior_path_planner/debug/bound", latching_qos)
+        self._speed_profile_debug_pub = self.create_publisher(
+            String, "/mpc/speed_profile_debug", 1)
 
         # Subscribers
         self._odom_sub = self.create_subscription(
@@ -771,8 +1056,11 @@ class MPCController(Node):
             if self._cfg.reference_path.update_by_topic: # type: ignore
                 new_referece_path = self._create_reference_path_from_autoware_trajectory(self._trajectory)
                 if new_referece_path is not None:
-                    self._car.reference_path = new_referece_path
+                    self._reference_path = new_referece_path
+                    self._car.reference_path = self._reference_path
                     self._car.update_reference_path(self._car.reference_path)
+                    self._curvature_speed_profile_mps = self._read_reference_speed_profile()
+                    self._apply_speed_profile(self._car.wp_id)
 
             def plot_reference_path(car):
                 import matplotlib.pyplot as plt
@@ -798,23 +1086,17 @@ class MPCController(Node):
 
         pose = odom_to_pose_2d(self._odom) # type: ignore
         v = self._odom.twist.twist.linear.x
+        self._update_grade_estimate(self._odom, v) # type: ignore
 
         self._car.update_states(pose.x, pose.y, pose.theta)
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
+        self._car.get_current_waypoint()
+        self._apply_speed_profile(self._car.wp_id)
 
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
             # self.get_logger().info(f"u: {u}")
-
-        if self._ref_vel_configulator is not None:
-            ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
-            ref_vel_kmph = min(
-                kmh_to_m_per_sec(ref_vel_mps),
-                self._mpc_cfg.v_max)
-            self._mpc.update_v_max(ref_vel_kmph)
-            v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
-            self._reference_path.set_v_ref(v_ref)
 
         # override by brake command if control is disabled
         if not self._enable_control:
@@ -832,6 +1114,8 @@ class MPCController(Node):
 
         acc = 0.
         bug_acc_enabled = False
+        self._last_grade_accel_base_mps2 = 0.0
+        self._last_grade_accel_ff_mps2 = 0.0
         if self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
@@ -849,10 +1133,14 @@ class MPCController(Node):
                 bug_acc_enabled = True
                 acc = 500.0
                 self._pred_marker_color = CYAN
+            self._last_grade_accel_base_mps2 = acc
         else:
-            acc =  self.KP * (u[0] - v)
-            # print(f"v: {v}, u[0]: {u[0]}, acc: {acc}")
-            acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
+            base_acc = self.KP * (u[0] - v)
+            # print(f"v: {v}, u[0]: {u[0]}, acc: {base_acc}")
+            base_acc = float(np.clip(base_acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max))
+            self._last_grade_accel_base_mps2 = base_acc
+            acc = base_acc + self._compute_grade_accel_ff(float(u[0]), float(v))
+            acc = float(np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max))
         # u[0] = np.clip(last_u[0] + acc * dt, 0.0, self._mpc_cfg.v_max)
 
         # apply low pass filter to control signal
@@ -868,6 +1156,7 @@ class MPCController(Node):
 
         # Publish control command
         self._publish_control_command(now, u, acc, bug_acc_enabled)
+        self._publish_speed_profile_debug(now, self._mpc.model.wp_id, v, float(u[0]))
 
         # Log states
         self._sim_logger.log(self._car, u, t)
@@ -905,6 +1194,7 @@ class MPCController(Node):
         self._loop = 0
         self._last_acc = 0.0
         self._last_u = np.array([0.0, 0.0])
+        self._reset_grade_estimator()
         self._t_start = self.get_clock().now()
         self._last_t = self._t_start
 

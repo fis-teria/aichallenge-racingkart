@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import struct
 from pathlib import Path
 
@@ -190,6 +191,56 @@ def test_build_analysis_from_series_preserves_trajectory_source_for_reference_ro
 
     assert parsed.trajectory_source == "mpc_csv:/tmp/ref.csv"
     assert {row["trajectory_source"] for row in parsed.trajectory_reference} == {"mpc_csv:/tmp/ref.csv"}
+
+
+def test_build_analysis_from_series_computes_grade_from_odometry_z() -> None:
+    parsed = build_analysis_from_series(
+        odometry=[
+            {"time_sec": 0.0, "x_m": 0.0, "y_m": 0.0, "z_m": 0.0, "speed_mps": 2.0, "yaw_rate_rps": 0.0},
+            {"time_sec": 1.0, "x_m": 1.0, "y_m": 0.0, "z_m": 0.1, "speed_mps": 2.0, "yaw_rate_rps": 0.0},
+            {"time_sec": 2.0, "x_m": 2.0, "y_m": 0.0, "z_m": 0.2, "speed_mps": 2.0, "yaw_rate_rps": 0.0},
+        ],
+        acceleration=[
+            {"time_sec": 0.0, "acceleration_mps2": 0.0},
+            {"time_sec": 1.0, "acceleration_mps2": -0.2},
+            {"time_sec": 2.0, "acceleration_mps2": -0.4},
+        ],
+    )
+
+    assert parsed.available
+    middle = parsed.vehicle_timeseries[1]
+    assert middle["grade_source"] == "odometry"
+    assert math.isclose(float(middle["grade_percent"]), 10.0, rel_tol=1e-6)
+
+
+def test_build_analysis_from_series_skips_grade_when_odometry_is_too_slow() -> None:
+    parsed = build_analysis_from_series(
+        odometry=[
+            {"time_sec": 0.0, "x_m": 0.0, "y_m": 0.0, "z_m": 0.0, "speed_mps": 0.0, "yaw_rate_rps": 0.0},
+            {"time_sec": 1.0, "x_m": 0.0001, "y_m": 0.0, "z_m": 0.1, "speed_mps": 0.0, "yaw_rate_rps": 0.0},
+            {"time_sec": 2.0, "x_m": 0.0002, "y_m": 0.0, "z_m": 0.2, "speed_mps": 0.0, "yaw_rate_rps": 0.0},
+        ],
+    )
+
+    assert parsed.available
+    assert all(row["grade_percent"] is None for row in parsed.vehicle_timeseries)
+
+
+def test_build_analysis_from_series_computes_grade_from_trajectory_z() -> None:
+    parsed = build_analysis_from_series(
+        odometry=[
+            {"time_sec": 0.0, "x_m": 0.0, "y_m": 0.0, "speed_mps": 2.0, "yaw_rate_rps": 0.0},
+            {"time_sec": 1.0, "x_m": 1.0, "y_m": 0.0, "speed_mps": 2.0, "yaw_rate_rps": 0.0},
+            {"time_sec": 2.0, "x_m": 2.0, "y_m": 0.0, "speed_mps": 2.0, "yaw_rate_rps": 0.0},
+        ],
+        trajectory_points=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.2), (2.0, 0.0, 0.4)],
+        trajectory_source="test_trajectory",
+    )
+
+    assert parsed.available
+    assert parsed.vehicle_timeseries[1]["grade_source"] == "trajectory"
+    assert math.isclose(float(parsed.vehicle_timeseries[1]["grade_percent"]), 20.0, rel_tol=1e-6)
+    assert math.isclose(float(parsed.trajectory_reference[1]["grade_percent"]), 20.0, rel_tol=1e-6)
 
 
 def test_apply_corner_id_rotation_starts_numbering_from_later_corner() -> None:

@@ -64,6 +64,8 @@ RUN git clone --depth 1 https://github.com/AutomotiveAIChallenge/aichallenge-rac
 COPY aichallenge/run_evaluation.bash /aichallenge/run_evaluation.bash
 COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml
 COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml
+COPY aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/config/autostart_orchestrator.param.yaml /aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/config/autostart_orchestrator.param.yaml
+COPY aichallenge/workspace/src/aichallenge_tools/bag_manager_py/config/bag_manager.param.yaml /aichallenge/workspace/src/aichallenge_tools/bag_manager_py/config/bag_manager.param.yaml
 COPY aichallenge/simulator/ /aichallenge/simulator/
 
 

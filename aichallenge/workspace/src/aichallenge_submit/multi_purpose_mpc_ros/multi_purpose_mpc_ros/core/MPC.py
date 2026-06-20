@@ -140,7 +140,7 @@ class MPC:
                 vmax_dyn = np.sqrt(self.ay_max / (np.abs(max_kappa_pred) + 1e-12))
             else:
                 vmax_dyn = np.sqrt(self.ay_max / (np.abs(kappa_pred[n]) + 1e-12))
-            umax_dyn[self.nu*n] = min(vmax_dyn, umax_dyn[self.nu*n])
+            umax_dyn[self.nu*n] = min(vmax_dyn, v_ref, umax_dyn[self.nu*n])
 
         # Update path constraints
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:

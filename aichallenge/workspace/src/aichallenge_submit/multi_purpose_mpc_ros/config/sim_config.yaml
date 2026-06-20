@@ -47,6 +47,19 @@ mpc:
   control_rate: 50.0 # Hz
   steering_tire_angle_gain_var: 1.0
   wp_id_offset: 0
+  use_max_kappa_pred: true
+  use_curvature_speed_profile: true
+  use_ref_vel_as_speed_cap: true
+  speed_profile_debug_publish_period_sec: 0.25
+  use_grade_accel_feedforward: true
+  grade_ff_gain: 1.0
+  grade_ff_max_accel_mps2: 0.35
+  grade_ff_window_m: 2.0
+  grade_ff_min_distance_delta_m: 0.5
+  grade_ff_min_speed_mps: 0.3
+  grade_ff_low_pass_gain: 0.25
+  grade_ff_only_when_not_decelerating: true
+  grade_ff_speed_error_deadband_mps: 0.1
 
 v2x_obstacle_avoidance:
   vehicle_radius: 0.5          # [m]

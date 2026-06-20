@@ -11,3 +11,6 @@ corner_min_length_m: 2.0
 corner_merge_gap_m: 2.0
 corner_padding_m: 1.0
 corner_id_rotation: 1
+grade_min_speed_mps: 1.0
+grade_min_distance_delta_m: 0.5
+grade_smoothing_window_m: 2.0

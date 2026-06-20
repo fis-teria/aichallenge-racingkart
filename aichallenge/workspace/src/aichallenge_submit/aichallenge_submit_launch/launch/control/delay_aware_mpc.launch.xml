@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <launch>
   <arg name="use_sim_time" default="true"/>
-  <arg name="use_obstacle_avoidance" default="false"/>
+  <arg name="use_obstacle_avoidance" default="true"/>
   <arg name="delay_enabled" default="true"/>
   <arg name="delay_mode" default="state_shift_with_steer_lag"/>
   <arg name="steering_delay_sec" default="0.20"/>

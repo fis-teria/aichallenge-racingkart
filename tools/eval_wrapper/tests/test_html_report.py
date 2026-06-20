@@ -61,6 +61,18 @@ def test_generate_run_report_renders_corner_split_table(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+    (processed_dir / "grade_profile.csv").write_text(
+        "\n".join(
+            [
+                "run_id,domain_id,time_sec,distance_m,track_s_m,x_m,y_m,z_m,trajectory_z_m,grade_percent,grade_rad,grade_source,speed_mps,target_speed_mps,acceleration_mps2,command_accel_mps2,command_steer_rad",
+                "run,d1,1.0,0.0,0.0,0.0,0.0,0.0,,2.0,0.02,odometry,7.0,8.0,0.1,1.0,0.0",
+                "run,d1,2.0,1.0,1.0,1.0,0.0,0.1,,4.0,0.04,odometry,7.5,8.0,-0.2,0.0,0.1",
+                "run,d1,3.0,2.0,2.0,2.0,0.0,0.0,,-3.0,-0.03,odometry,6.5,5.0,-0.8,0.0,0.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     report = generate_run_report(
         run_dir,
@@ -81,7 +93,14 @@ def test_generate_run_report_renders_corner_split_table(tmp_path: Path) -> None:
     assert "corner-map-highlight" in html
     assert "Target Speed Profile" in html
     assert "speed-map-segment" in html
+    assert "actual speed map" in html
+    assert "actual 18.7 km/h" in html
     assert "28.8 km/h -&gt; 18.0 km/h" in html
+    assert "Grade & Acceleration Profile" in html
+    assert "grade map" in html
+    assert "grade-chart-grade" in html
+    assert "4.00%" in html
+    assert "grade_profile.csv" in html
     assert "max_command_decel_mps2" in html
     assert "-0.125" in html
 

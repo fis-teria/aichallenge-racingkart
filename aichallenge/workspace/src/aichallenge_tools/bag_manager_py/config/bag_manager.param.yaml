@@ -7,6 +7,8 @@
       - /control/command/control_cmd
       - /control/command/actuation_cmd
       - /awsim/status
+      - /delay_aware_mpc/debug
+      - /mpc/speed_profile_debug
       - /planning/scenario_planning/trajectory
       - /sensing/camera/image_raw
       - /sensing/camera/camera_info

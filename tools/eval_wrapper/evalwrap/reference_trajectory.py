@@ -15,7 +15,7 @@ DEFAULT_MPC_CONFIG_PATH = f"{DEFAULT_MPC_PACKAGE_PATH}/config/config.yaml"
 
 @dataclass(frozen=True)
 class ReferenceTrajectory:
-    points: list[tuple[float, float]]
+    points: list[tuple[float, float] | tuple[float, float, float]]
     source: str
     csv_path: Path | None = None
     config_path: Path | None = None
@@ -86,20 +86,21 @@ def _load_yaml(path: Path, warnings: list[str]) -> dict[str, Any]:
     return loaded
 
 
-def _read_csv_points(path: Path, warnings: list[str]) -> list[tuple[float, float]]:
+def _read_csv_points(path: Path, warnings: list[str]) -> list[tuple[float, float] | tuple[float, float, float]]:
     if not path.exists():
         warnings.append(f"reference trajectory CSV not found: {path}")
         return []
 
-    points: list[tuple[float, float]] = []
+    points: list[tuple[float, float] | tuple[float, float, float]] = []
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             for row in csv.DictReader(handle):
                 x = _first_float(row, ("x_m", "x"))
                 y = _first_float(row, ("y_m", "y"))
+                z = _first_float(row, ("z_m", "z"))
                 if x is None or y is None:
                     continue
-                points.append((x, y))
+                points.append((x, y, z) if z is not None else (x, y))
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"failed to read reference trajectory CSV {path}: {exc}")
         return []
@@ -109,8 +110,12 @@ def _read_csv_points(path: Path, warnings: list[str]) -> list[tuple[float, float
     return points
 
 
-def _normalize_points(points: list[tuple[float, float]], *, circular: bool) -> list[tuple[float, float]]:
-    normalized: list[tuple[float, float]] = []
+def _normalize_points(
+    points: list[tuple[float, float] | tuple[float, float, float]],
+    *,
+    circular: bool,
+) -> list[tuple[float, float] | tuple[float, float, float]]:
+    normalized: list[tuple[float, float] | tuple[float, float, float]] = []
     for point in points:
         if not normalized or _distance(normalized[-1], point) > 1e-6:
             normalized.append(point)
@@ -143,5 +148,5 @@ def _first_float(row: dict[str, str | None], keys: tuple[str, ...]) -> float | N
     return None
 
 
-def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+def _distance(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
