@@ -18,7 +18,7 @@
 
   <!-- Control method -->
   <arg name="control_method" default="mpc"
-       description="Select control: mpc, pure_pursuit, tiny_lidar_net, pilot_net, joycon"/>
+       description="Select control: mpc, delay_aware_mpc, pure_pursuit, tiny_lidar_net, pilot_net, joycon"/>
 
   <!-- Global parameters -->
   <group scoped="false">
@@ -142,6 +142,12 @@
 
   <group if="$(eval &quot;'$(var control_method)' == 'mpc'&quot;)">
     <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/mpc.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    </include>
+  </group>
+
+  <group if="$(eval &quot;'$(var control_method)' == 'delay_aware_mpc'&quot;)">
+    <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/delay_aware_mpc.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
     </include>
   </group>

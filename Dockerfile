@@ -61,6 +61,9 @@ RUN git clone --depth 1 https://github.com/AutomotiveAIChallenge/aichallenge-rac
  && chmod 757 /aichallenge \
  && tar zxf /tmp/s.tgz -C /aichallenge/workspace/src \
  && rm /tmp/s.tgz
+COPY aichallenge/run_evaluation.bash /aichallenge/run_evaluation.bash
+COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml
+COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml
 COPY aichallenge/simulator/ /aichallenge/simulator/
 
 

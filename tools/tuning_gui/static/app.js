@@ -1155,6 +1155,7 @@ async function savePathEditor() {
   const data = await api("/api/path-editor/save", {
     method: "POST",
     body: JSON.stringify({
+      config_path: state.pathEditor.data ? state.pathEditor.data.config_path : null,
       source_path: source.path,
       target_path: $("pathTarget").value,
       switch_config: $("pathSwitchConfig").checked,

@@ -5,11 +5,15 @@
     all_topics: false
     topics:
       - /control/command/control_cmd
-      # - /sensing/camera/image_raw
-      # - /sensing/camera/camera_info
+      - /control/command/actuation_cmd
+      - /awsim/status
+      - /planning/scenario_planning/trajectory
+      - /sensing/camera/image_raw
+      - /sensing/camera/camera_info
       # - /sensing/imu/imu_raw
       # - /sensing/gnss/nav_sat_fix
-      # - /vehicle/status/steering_status
-      # - /vehicle/status/velocity_status
+      - /vehicle/status/steering_status
+      - /vehicle/status/velocity_status
+      - /localization/acceleration
       # - /localization/pose_with_covariance
       - /sensing/lidar/scan

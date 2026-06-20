@@ -29,6 +29,9 @@ def generate_compare_report(analysis_dir: Path, base_run: str, target_run: str) 
             "steer_oscillation_score",
             "max_accel_mps2",
             "max_decel_mps2",
+            "max_command_accel_mps2",
+            "max_command_decel_mps2",
+            "max_command_abs_steer_rad",
             "avg_path_error_m",
             "max_path_error_m",
         ):
@@ -70,10 +73,12 @@ def _html(base_run: str, target_run: str, rows: list[tuple[str, str, object, obj
             "max_abs_steer_rad",
             "steer_oscillation_score",
             "max_decel_mps2",
+            "max_command_decel_mps2",
+            "max_command_abs_steer_rad",
             "avg_path_error_m",
             "max_path_error_m",
         }
-        higher_is_better = {"avg_speed_mps", "max_speed_mps", "max_accel_mps2"}
+        higher_is_better = {"avg_speed_mps", "max_speed_mps", "max_accel_mps2", "max_command_accel_mps2"}
         if isinstance(delta, (int, float)) and metric in lower_is_better:
             cls = "good" if delta < 0 else "bad" if delta > 0 else ""
         elif isinstance(delta, (int, float)) and metric in higher_is_better:

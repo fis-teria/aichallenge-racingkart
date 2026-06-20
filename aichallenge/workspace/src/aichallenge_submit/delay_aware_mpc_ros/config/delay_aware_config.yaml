@@ -1,6 +1,29 @@
 common:
   save_config: false
 
+delay_aware_mpc:
+  # Runtime C++ node parameters are exposed in delay_aware_mpc.launch.xml
+  # so tuning_gui can edit them as launch XML parameters.
+  # Keep these values mirrored when using this YAML as experiment metadata.
+  enabled: true
+  # Modes:
+  #   baseline: existing MPC behavior with this package/config
+  #   state_shift: predict pose at t + steering_delay_sec and solve from there
+  #   state_shift_with_steer_lag: state_shift plus first-order steering lag
+  #   delay_augmented: command-buffer delay prediction bridge for experiments
+  mode: "state_shift_with_steer_lag"
+  steering_delay_sec: 0.20
+  prediction_dt: 0.02
+  steering_time_constant_sec: 0.30
+  use_reference_time_shift: true
+  use_steering_status: true
+  steering_status_timeout_sec: 0.20
+  use_yaw_rate_fallback: true
+  use_command_history_fallback: true
+  min_velocity_for_yaw_prediction: 0.20
+  publish_debug_topics: true
+  debug_publish_period_sec: 0.25
+
 sim_logger:
   animation_enabled: false
 
@@ -36,18 +59,18 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 2.30   # +safety margin
+  width: 1.30   # +safety margin
 
 mpc:
-  N: 20
+  N: 30
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [100000.0, 0.0]
-  a_min: -0.9 # m/s^2
+  R: [1000000.0, 0.0]
+  a_min: 0 # m/s^2
   a_max: 3.0 # m/s^2
   delta_max_deg: 32.0 # degrees
-  steer_rate_max: 0.35 # rad/s
+  steer_rate_max: 1.0 # rad/s
   control_rate: 40.0 # Hz
   steering_tire_angle_gain_var: 1.639
   # steering_tire_angle_gain_var: 1.0
@@ -55,7 +78,9 @@ mpc:
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 1.0
   steer_low_pass_gain: 1.0
-  wp_id_offset: 2
+  # Delay-aware prediction already shifts the control state/reference projection.
+  # Keep this at 0 to avoid double compensation against the baseline MPC offset.
+  wp_id_offset: 0
   use_max_kappa_pred: true
 
 
@@ -63,8 +88,8 @@ mpc:
   ## Lap1: 53s, Lap2: 47s
 
   v_max: 35.0   # km/h
-  ay_max: 20  # m/s^2, maximum lateral acceleration in curves
-  Q: [1000000.0, 100000000.0, 100000.0]
+  ay_max: 30  # m/s^2, maximum lateral acceleration in curves
+  Q: [300000.0, 100000000.0, 100000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##

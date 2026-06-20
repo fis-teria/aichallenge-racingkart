@@ -38,8 +38,11 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
         "<section><h2>Result Summary</h2>",
         _domain_table(domains),
         "</section>",
-        "<section><h2>Corner Splits</h2>",
-        _corner_split_table(run_dir),
+        "<section><h2>Section Splits</h2>",
+        _split_table(run_dir),
+        "</section>",
+        "<section><h2>Target Speed Profile</h2>",
+        _target_speed_profile_section(run_dir),
         "</section>",
         "<section><h2>Artifacts</h2>",
         _artifact_links(run_dir, domains.keys()),
@@ -50,6 +53,7 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
         _link("../processed/lap_summary.csv", "lap_summary.csv"),
         _link("../processed/events.csv", "events.csv"),
         _link("../processed/section_summary.csv", "section_summary.csv"),
+        _link("../processed/awsim_section_summary.csv", "awsim_section_summary.csv"),
         _link("../processed/corner_summary.csv", "corner_summary.csv"),
         _link("../processed/trajectory_reference.csv", "trajectory_reference.csv"),
         _link("../processed/vehicle_timeseries.csv", "vehicle_timeseries.csv"),
@@ -91,17 +95,35 @@ th { background: #f1f5f9; }
 .corner-map-svg { display: block; width: 100%; height: auto; background: #ffffff; border-radius: 6px; }
 .corner-map-track { fill: none; stroke: #94a3b8; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .corner-map-highlight { fill: none; stroke: #f97316; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
-.corner-map-start { fill: #0f172a; stroke: white; stroke-width: 1.2; }
-.corner-map-empty { color: #64748b; font-size: 12px; padding: 8px; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-a { color: #2563eb; }
-@media (max-width: 900px) {
-  .corner-splits-layout { grid-template-columns: 1fr; }
-  .corner-map-panel { position: static; }
-  .corner-map-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
-}
-</style>
-"""
+	.corner-map-start { fill: #0f172a; stroke: white; stroke-width: 1.2; }
+	.corner-map-empty { color: #64748b; font-size: 12px; padding: 8px; }
+	.speed-profile-domain { margin-top: 18px; }
+	.speed-profile-domain:first-child { margin-top: 0; }
+	.speed-profile-title { margin: 0 0 10px; font-size: 15px; color: #334155; }
+	.speed-profile-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr); gap: 16px; align-items: start; }
+	.speed-panel { min-width: 0; }
+	.speed-map-svg, .speed-chart-svg { display: block; width: 100%; height: auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; }
+	.speed-map-base { fill: none; stroke: #cbd5e1; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+	.speed-map-segment { fill: none; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+	.speed-drop-marker { fill: #ef4444; stroke: #ffffff; stroke-width: 1.5; }
+	.speed-chart-axis { stroke: #94a3b8; stroke-width: 1; }
+	.speed-chart-grid { stroke: #e5e7eb; stroke-width: 1; }
+	.speed-chart-target { fill: none; stroke: #2563eb; stroke-width: 2.2; stroke-linejoin: round; }
+	.speed-chart-actual { fill: none; stroke: #f97316; stroke-width: 1.8; stroke-linejoin: round; }
+	.speed-chart-label { fill: #475569; font-size: 11px; }
+	.speed-profile-legend { display: flex; flex-wrap: wrap; gap: 10px 14px; margin: 8px 0 0; color: #475569; font-size: 12px; }
+	.speed-swatch { display: inline-block; width: 28px; height: 3px; margin-right: 6px; vertical-align: middle; border-radius: 999px; }
+	.speed-drop-table { margin-top: 12px; overflow-x: auto; }
+	.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+	a { color: #2563eb; }
+	@media (max-width: 900px) {
+	  .corner-splits-layout { grid-template-columns: 1fr; }
+	  .corner-map-panel { position: static; }
+	  .corner-map-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+	  .speed-profile-layout { grid-template-columns: 1fr; }
+	}
+	</style>
+	"""
 
 
 def _kv_table(values: dict[str, Any]) -> str:
@@ -129,6 +151,9 @@ def _domain_table(domains: dict[str, Any]) -> str:
         "steer_oscillation_score",
         "max_accel_mps2",
         "max_decel_mps2",
+        "max_command_accel_mps2",
+        "max_command_decel_mps2",
+        "max_command_abs_steer_rad",
         "avg_path_error_m",
         "max_path_error_m",
         "trajectory_source",
@@ -144,6 +169,40 @@ def _domain_table(domains: dict[str, Any]) -> str:
         rows.append("</tr>")
     if not domains:
         rows.append(f"<tr><td colspan='{len(headers)}'>No domain metrics were generated.</td></tr>")
+    rows.append("</tbody></table>")
+    return "\n".join(rows)
+
+
+def _split_table(run_dir: Path) -> str:
+    processed_dir = run_dir / "processed"
+    awsim_rows = _read_awsim_section_summary(processed_dir / "awsim_section_summary.csv")
+    if awsim_rows:
+        return _awsim_section_split_table(awsim_rows)
+    return "\n".join(
+        [
+            "<p>AWSIM section data was not recorded for this run. Showing fallback Corner Splits.</p>",
+            _corner_split_table(run_dir),
+        ]
+    )
+
+
+def _awsim_section_split_table(split_rows: list[dict[str, str]]) -> str:
+    sections = sorted({str(row["section"]) for row in split_rows}, key=_section_sort_key)
+    grouped: dict[tuple[str, int], dict[str, dict[str, str]]] = {}
+    for row in split_rows:
+        key = (str(row["domain_id"]), int(float(row["lap"])))
+        grouped.setdefault(key, {})[str(row["section"])] = row
+
+    header = ["domain", "lap", *[f"section_{section}" for section in sections]]
+    rows = ["<table><thead><tr>", *[f"<th>{_e(item)}</th>" for item in header], "</tr></thead><tbody>"]
+    for domain_id, lap in sorted(grouped):
+        by_section = grouped[(domain_id, lap)]
+        rows.append("<tr>")
+        rows.append(f"<td>{_e(domain_id)}</td>")
+        rows.append(f"<td>{_e(lap)}</td>")
+        for section in sections:
+            rows.append(f"<td>{_awsim_section_cell(by_section.get(section))}</td>")
+        rows.append("</tr>")
     rows.append("</tbody></table>")
     return "\n".join(rows)
 
@@ -187,6 +246,308 @@ def _corner_split_table(run_dir: Path) -> str:
     )
 
 
+def _target_speed_profile_section(run_dir: Path) -> str:
+    processed_dir = run_dir / "processed"
+    vehicle_rows = _read_csv_rows(processed_dir / "vehicle_timeseries.csv")
+    control_rows = _read_csv_rows(processed_dir / "control_timeseries.csv")
+    if not vehicle_rows or not control_rows:
+        return "<p>No target speed profile data was generated.</p>"
+
+    domain_ids = sorted({row.get("domain_id", "") for row in vehicle_rows if row.get("domain_id")})
+    parts: list[str] = []
+    for domain_id in domain_ids:
+        profile_rows = _target_speed_profile_rows(
+            [row for row in vehicle_rows if row.get("domain_id") == domain_id],
+            [row for row in control_rows if row.get("domain_id") == domain_id],
+        )
+        if len(profile_rows) < 2:
+            continue
+        drops = _target_speed_drops(profile_rows)
+        parts.append(
+            "\n".join(
+                [
+                    "<article class='speed-profile-domain'>",
+                    f"<h3 class='speed-profile-title'>{_e(domain_id)}</h3>",
+                    "<div class='speed-profile-layout'>",
+                    f"<div class='speed-panel'>{_target_speed_map_svg(profile_rows, drops)}</div>",
+                    f"<div class='speed-panel'>{_target_speed_chart_svg(profile_rows)}</div>",
+                    "</div>",
+                    _target_speed_drop_table(drops),
+                    "</article>",
+                ]
+            )
+        )
+    if not parts:
+        return "<p>No target speed profile rows could be matched to vehicle position.</p>"
+    return "\n".join(parts)
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _target_speed_profile_rows(
+    vehicle_rows: list[dict[str, str]],
+    control_rows: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    vehicles = sorted(vehicle_rows, key=lambda row: _to_float(row.get("time_sec")) or 0.0)
+    controls = sorted(control_rows, key=lambda row: _to_float(row.get("time_sec")) or 0.0)
+    if not vehicles or not controls:
+        return []
+
+    control_index = 0
+    profile_rows: list[dict[str, Any]] = []
+    for vehicle in vehicles:
+        time_sec = _to_float(vehicle.get("time_sec"))
+        x_m = _to_float(vehicle.get("x_m"))
+        y_m = _to_float(vehicle.get("y_m"))
+        if time_sec is None or x_m is None or y_m is None:
+            continue
+        while control_index + 1 < len(controls):
+            current_delta = abs((_to_float(controls[control_index].get("time_sec")) or 0.0) - time_sec)
+            next_delta = abs((_to_float(controls[control_index + 1].get("time_sec")) or 0.0) - time_sec)
+            if next_delta > current_delta:
+                break
+            control_index += 1
+        control = controls[control_index]
+        control_time = _to_float(control.get("time_sec"))
+        if control_time is None or abs(control_time - time_sec) > 0.25:
+            continue
+        target_speed = _to_float(control.get("target_speed_mps"))
+        if target_speed is None:
+            continue
+        profile_rows.append(
+            {
+                "time_sec": time_sec,
+                "x_m": x_m,
+                "y_m": y_m,
+                "distance_m": _to_float(vehicle.get("distance_m")),
+                "track_s_m": _to_float(vehicle.get("track_s_m")),
+                "corner_id": vehicle.get("corner_id") or "",
+                "speed_mps": _to_float(vehicle.get("speed_mps")),
+                "acceleration_mps2": _to_float(vehicle.get("acceleration_mps2")),
+                "target_speed_mps": target_speed,
+                "command_accel_mps2": _to_float(control.get("accel_mps2")),
+                "command_steer_rad": _to_float(control.get("steer_rad")),
+            }
+        )
+    return profile_rows
+
+
+def _target_speed_drops(rows: list[dict[str, Any]], min_drop_mps: float = 0.2) -> list[dict[str, Any]]:
+    drops: list[dict[str, Any]] = []
+    previous: dict[str, Any] | None = None
+    for row in rows:
+        target_speed = row.get("target_speed_mps")
+        if not isinstance(target_speed, (int, float)):
+            continue
+        if previous is not None:
+            previous_speed = previous.get("target_speed_mps")
+            if isinstance(previous_speed, (int, float)) and previous_speed - target_speed >= min_drop_mps:
+                drop = dict(row)
+                drop["from_target_speed_mps"] = previous_speed
+                drop["drop_mps"] = previous_speed - target_speed
+                speed = row.get("speed_mps")
+                drop["speed_error_mps"] = (
+                    float(speed) - float(target_speed) if isinstance(speed, (int, float)) else None
+                )
+                drops.append(drop)
+        previous = row
+    return drops
+
+
+def _target_speed_map_svg(rows: list[dict[str, Any]], drops: list[dict[str, Any]]) -> str:
+    sampled = _sample_rows(rows, 900)
+    points = [(float(row["x_m"]), float(row["y_m"])) for row in sampled]
+    if len(points) < 2:
+        return "<div class='corner-map-empty'>No map data.</div>"
+    width = 620.0
+    height = 420.0
+    pad = 18.0
+    project = _projector(points, width, height, pad)
+    speed_values = [float(row["target_speed_mps"]) for row in rows if isinstance(row.get("target_speed_mps"), (int, float))]
+    min_speed = min(speed_values)
+    max_speed = max(speed_values)
+    base_points = " ".join(f"{x:.2f},{y:.2f}" for x, y in (project(point) for point in points))
+    segments: list[str] = []
+    for first, second in zip(sampled, sampled[1:]):
+        first_point = (float(first["x_m"]), float(first["y_m"]))
+        second_point = (float(second["x_m"]), float(second["y_m"]))
+        x1, y1 = project(first_point)
+        x2, y2 = project(second_point)
+        if abs(x2 - x1) < 0.05 and abs(y2 - y1) < 0.05:
+            continue
+        color = _speed_color(float(first["target_speed_mps"]), min_speed, max_speed)
+        segments.append(
+            "<line class='speed-map-segment' "
+            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}' stroke='{_attr(color)}' />"
+        )
+    drop_markers = []
+    for drop in drops[:80]:
+        x_m = drop.get("x_m")
+        y_m = drop.get("y_m")
+        if not isinstance(x_m, (int, float)) or not isinstance(y_m, (int, float)):
+            continue
+        x, y = project((float(x_m), float(y_m)))
+        label = (
+            f"{_format_speed_kmh(drop.get('from_target_speed_mps'))} -> "
+            f"{_format_speed_kmh(drop.get('target_speed_mps'))}"
+        )
+        drop_markers.append(f"<circle class='speed-drop-marker'><title>{_e(label)}</title></circle>".replace("<circle", f"<circle cx='{x:.2f}' cy='{y:.2f}' r='4.2'"))
+    return "\n".join(
+        [
+            f"<svg class='speed-map-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='target speed map'>",
+            f"<polyline class='speed-map-base' points='{_attr(base_points)}' />",
+            *segments,
+            *drop_markers,
+            "</svg>",
+            "<div class='speed-profile-legend'>",
+            f"<span><span class='speed-swatch' style='background:{_speed_color(min_speed, min_speed, max_speed)}'></span>{_e(_format_speed_kmh(min_speed))}</span>",
+            f"<span><span class='speed-swatch' style='background:{_speed_color(max_speed, min_speed, max_speed)}'></span>{_e(_format_speed_kmh(max_speed))}</span>",
+            "<span><span class='speed-swatch' style='background:#ef4444'></span>target drop</span>",
+            "</div>",
+        ]
+    )
+
+
+def _target_speed_chart_svg(rows: list[dict[str, Any]]) -> str:
+    sampled = _sample_rows(rows, 850)
+    distance_values = [row.get("distance_m") for row in sampled if isinstance(row.get("distance_m"), (int, float))]
+    target_values = [row.get("target_speed_mps") for row in sampled if isinstance(row.get("target_speed_mps"), (int, float))]
+    actual_values = [row.get("speed_mps") for row in sampled if isinstance(row.get("speed_mps"), (int, float))]
+    if len(distance_values) < 2 or not target_values:
+        return "<div class='corner-map-empty'>No speed chart data.</div>"
+    width = 520.0
+    height = 260.0
+    pad_left = 40.0
+    pad_right = 14.0
+    pad_top = 14.0
+    pad_bottom = 30.0
+    min_distance = min(distance_values)
+    max_distance = max(distance_values)
+    max_speed_kmh = max([float(value) * 3.6 for value in target_values + actual_values] or [1.0])
+    max_speed_kmh = max(max_speed_kmh, 1.0)
+
+    def project(distance_m: float, speed_mps: float) -> tuple[float, float]:
+        x = pad_left + (distance_m - min_distance) / max(max_distance - min_distance, 1e-6) * (
+            width - pad_left - pad_right
+        )
+        y = height - pad_bottom - (speed_mps * 3.6) / max_speed_kmh * (height - pad_top - pad_bottom)
+        return x, y
+
+    target_points = []
+    actual_points = []
+    for row in sampled:
+        distance = row.get("distance_m")
+        target = row.get("target_speed_mps")
+        actual = row.get("speed_mps")
+        if isinstance(distance, (int, float)) and isinstance(target, (int, float)):
+            x, y = project(float(distance), float(target))
+            target_points.append(f"{x:.2f},{y:.2f}")
+        if isinstance(distance, (int, float)) and isinstance(actual, (int, float)):
+            x, y = project(float(distance), max(0.0, float(actual)))
+            actual_points.append(f"{x:.2f},{y:.2f}")
+
+    grid_y = pad_top + (height - pad_top - pad_bottom) * 0.5
+    return "\n".join(
+        [
+            f"<svg class='speed-chart-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='target and actual speed chart'>",
+            f"<line class='speed-chart-axis' x1='{pad_left:.1f}' y1='{height - pad_bottom:.1f}' x2='{width - pad_right:.1f}' y2='{height - pad_bottom:.1f}' />",
+            f"<line class='speed-chart-axis' x1='{pad_left:.1f}' y1='{pad_top:.1f}' x2='{pad_left:.1f}' y2='{height - pad_bottom:.1f}' />",
+            f"<line class='speed-chart-grid' x1='{pad_left:.1f}' y1='{grid_y:.1f}' x2='{width - pad_right:.1f}' y2='{grid_y:.1f}' />",
+            f"<polyline class='speed-chart-target' points='{_attr(' '.join(target_points))}' />",
+            f"<polyline class='speed-chart-actual' points='{_attr(' '.join(actual_points))}' />",
+            f"<text class='speed-chart-label' x='{pad_left:.1f}' y='12'>speed km/h</text>",
+            f"<text class='speed-chart-label' x='{width - 96:.1f}' y='{height - 9:.1f}'>distance m</text>",
+            "</svg>",
+            "<div class='speed-profile-legend'>",
+            "<span><span class='speed-swatch' style='background:#2563eb'></span>target_speed_mps</span>",
+            "<span><span class='speed-swatch' style='background:#f97316'></span>speed_mps</span>",
+            "</div>",
+        ]
+    )
+
+
+def _target_speed_drop_table(drops: list[dict[str, Any]]) -> str:
+    headers = [
+        "time_sec",
+        "distance_m",
+        "track_s_m",
+        "corner_id",
+        "target_speed",
+        "speed_mps",
+        "speed_error_mps",
+        "acceleration_mps2",
+        "command_accel_mps2",
+    ]
+    rows = ["<div class='speed-drop-table'><table><thead><tr>", *[f"<th>{_e(header)}</th>" for header in headers], "</tr></thead><tbody>"]
+    for drop in drops[:40]:
+        rows.append("<tr>")
+        rows.append(f"<td>{_e(_format_number(drop.get('time_sec'), 3))}</td>")
+        rows.append(f"<td>{_e(_format_number(drop.get('distance_m'), 1))}</td>")
+        rows.append(f"<td>{_e(_format_number(drop.get('track_s_m'), 1))}</td>")
+        rows.append(f"<td>{_e(drop.get('corner_id'))}</td>")
+        target_text = f"{_format_speed_kmh(drop.get('from_target_speed_mps'))} -> {_format_speed_kmh(drop.get('target_speed_mps'))}"
+        rows.append(f"<td>{_e(target_text)}</td>")
+        rows.append(f"<td>{_e(_format_number(drop.get('speed_mps'), 2))}</td>")
+        rows.append(f"<td>{_e(_format_number(drop.get('speed_error_mps'), 2))}</td>")
+        rows.append(f"<td>{_e(_format_number(drop.get('acceleration_mps2'), 2))}</td>")
+        rows.append(f"<td>{_e(_format_number(drop.get('command_accel_mps2'), 2))}</td>")
+        rows.append("</tr>")
+    if not drops:
+        rows.append(f"<tr><td colspan='{len(headers)}'>No target speed drops detected.</td></tr>")
+    elif len(drops) > 40:
+        rows.append(f"<tr><td colspan='{len(headers)}'>{len(drops) - 40} additional drops omitted.</td></tr>")
+    rows.append("</tbody></table></div>")
+    return "\n".join(rows)
+
+
+def _sample_rows(rows: list[dict[str, Any]], max_count: int) -> list[dict[str, Any]]:
+    if len(rows) <= max_count:
+        return rows
+    step = max(1, len(rows) // max_count)
+    sampled = rows[::step]
+    if sampled[-1] is not rows[-1]:
+        sampled.append(rows[-1])
+    return sampled
+
+
+def _projector(
+    points: list[tuple[float, float]],
+    width: float,
+    height: float,
+    pad: float,
+):
+    min_x = min(point[0] for point in points)
+    max_x = max(point[0] for point in points)
+    min_y = min(point[1] for point in points)
+    max_y = max(point[1] for point in points)
+    span_x = max(max_x - min_x, 1e-6)
+    span_y = max(max_y - min_y, 1e-6)
+
+    def project(point: tuple[float, float]) -> tuple[float, float]:
+        x, y = point
+        px = pad + (x - min_x) / span_x * (width - pad * 2.0)
+        py = height - pad - (y - min_y) / span_y * (height - pad * 2.0)
+        return px, py
+
+    return project
+
+
+def _speed_color(value: float, min_value: float, max_value: float) -> str:
+    ratio = (value - min_value) / max(max_value - min_value, 1e-6)
+    if ratio < 0.25:
+        return "#ef4444"
+    if ratio < 0.5:
+        return "#f59e0b"
+    if ratio < 0.75:
+        return "#22c55e"
+    return "#2563eb"
+
+
 def _read_corner_summary(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
@@ -194,6 +555,20 @@ def _read_corner_summary(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             if not row.get("domain_id") or not row.get("corner_id") or not row.get("pass"):
+                continue
+            rows.append(row)
+    return rows
+
+
+def _read_awsim_section_summary(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, str]] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if not row.get("domain_id") or not row.get("lap") or not row.get("section"):
+                continue
+            if not row.get("duration_sec"):
                 continue
             rows.append(row)
     return rows
@@ -219,6 +594,24 @@ def _corner_split_cell(row: dict[str, str] | None) -> str:
     if elapsed and duration:
         return f"<div class='split-main'>{_e(elapsed)}</div><div class='split-sub'>+{_e(duration)}</div>"
     return _e(elapsed or duration)
+
+
+def _awsim_section_cell(row: dict[str, str] | None) -> str:
+    if row is None:
+        return ""
+    duration = _format_seconds(row.get("duration_sec"))
+    lap_exit = _format_duration(row.get("exit_lap_time_sec"))
+    min_speed = _format_speed_kmh(row.get("min_speed_mps"))
+    max_speed = _format_speed_kmh(row.get("max_speed_mps"))
+    subparts = []
+    if lap_exit:
+        subparts.append(f"lap {lap_exit}")
+    if min_speed or max_speed:
+        subparts.append(f"{min_speed}..{max_speed}")
+    sub = " / ".join(part for part in subparts if part)
+    if duration and sub:
+        return f"<div class='split-main'>{_e(duration)}</div><div class='split-sub'>{_e(sub)}</div>"
+    return _e(duration or sub)
 
 
 def _corner_map_panel(corner_ids: list[str], reference_rows: list[dict[str, str]]) -> str:
@@ -368,6 +761,20 @@ def _format_seconds(value: str | float | None) -> str:
     return f"{seconds:.3f}s"
 
 
+def _format_number(value: Any, digits: int) -> str:
+    number = _to_float(value)
+    if number is None:
+        return ""
+    return f"{number:.{digits}f}"
+
+
+def _format_speed_kmh(value: Any) -> str:
+    number = _to_float(value)
+    if number is None:
+        return ""
+    return f"{number * 3.6:.1f} km/h"
+
+
 def _to_float(value: str | float | None) -> float | None:
     if value is None or value == "":
         return None
@@ -382,6 +789,15 @@ def _corner_sort_key(value: str) -> tuple[str, int | str]:
     if suffix.isdigit():
         return prefix, int(suffix)
     return value, value
+
+
+def _section_sort_key(value: str) -> tuple[int, str]:
+    if value.isdigit():
+        return int(value), value
+    try:
+        return int(float(value)), value
+    except ValueError:
+        return 10**9, value
 
 
 def _artifact_links(run_dir: Path, domain_ids) -> str:

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="use_obstacle_avoidance" default="false"/>
+  <arg name="delay_enabled" default="true"/>
+  <arg name="delay_mode" default="state_shift_with_steer_lag"/>
+  <arg name="steering_delay_sec" default="0.20"/>
+  <arg name="prediction_dt" default="0.02"/>
+  <arg name="steering_time_constant_sec" default="0.30"/>
+  <arg name="wheelbase" default="1.087"/>
+  <arg name="use_reference_time_shift" default="true"/>
+  <arg name="use_steering_status" default="true"/>
+  <arg name="steering_status_timeout_sec" default="0.20"/>
+  <arg name="use_yaw_rate_fallback" default="true"/>
+  <arg name="use_command_history_fallback" default="true"/>
+  <arg name="min_velocity_for_yaw_prediction" default="0.20"/>
+  <arg name="debug_publish_period_sec" default="0.25"/>
+
+  <node pkg="delay_aware_mpc_ros" exec="delay_compensated_odometry_node"
+        name="delay_compensated_odometry" output="screen">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="enabled" value="$(var delay_enabled)"/>
+    <param name="mode" value="$(var delay_mode)"/>
+    <param name="steering_delay_sec" value="$(var steering_delay_sec)"/>
+    <param name="prediction_dt" value="$(var prediction_dt)"/>
+    <param name="steering_time_constant_sec" value="$(var steering_time_constant_sec)"/>
+    <param name="wheelbase" value="$(var wheelbase)"/>
+    <param name="use_reference_time_shift" value="$(var use_reference_time_shift)"/>
+    <param name="use_steering_status" value="$(var use_steering_status)"/>
+    <param name="steering_status_timeout_sec" value="$(var steering_status_timeout_sec)"/>
+    <param name="use_yaw_rate_fallback" value="$(var use_yaw_rate_fallback)"/>
+    <param name="use_command_history_fallback" value="$(var use_command_history_fallback)"/>
+    <param name="min_velocity_for_yaw_prediction" value="$(var min_velocity_for_yaw_prediction)"/>
+    <param name="debug_publish_period_sec" value="$(var debug_publish_period_sec)"/>
+  </node>
+
+  <node pkg="delay_aware_mpc_ros" exec="run_delay_aware_mpc_controller.bash"
+        name="delay_aware_mpc_controller" output="screen"
+        args="--config_path $(find-pkg-share delay_aware_mpc_ros)/config/delay_aware_config.yaml
+              --ref_vel_path $(find-pkg-share delay_aware_mpc_ros)/config/ref_vel.yaml">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="use_boost_acceleration" value="false"/>
+    <param name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
+    <param name="use_stats" value="false"/>
+    <remap from="/localization/kinematic_state" to="/delay_aware_mpc/localization/kinematic_state"/>
+  </node>
+</launch>

@@ -7,7 +7,9 @@
     <arg name="rosbag" default="false"/>
     <arg name="simulation" default="true"/>
     <arg name="use_sim_time" default="true"/>
-    <arg name="run_rviz" default="true"/>
+    <arg name="run_rviz" default="false"/>
+    <arg name="launch_vehicle_interface" default="true"/>
+    <arg name="control_method" default="mpc"/>
 
     <log message="Launching evaluation bundle (simulator + autoware)."/>
     <log message=" - domain_id: $(var domain_id)"/>
@@ -18,6 +20,8 @@
     <log message=" - simulation: $(var simulation)"/>
     <log message=" - use_sim_time: $(var use_sim_time)"/>
     <log message=" - run_rviz: $(var run_rviz)"/>
+    <log message=" - launch_vehicle_interface: $(var launch_vehicle_interface)"/>
+    <log message=" - control_method: $(var control_method)"/>
 
     <group>
         <group>
@@ -40,6 +44,8 @@
             <arg name="capture" value="$(var capture)"/>
             <arg name="rosbag" value="$(var rosbag)"/>
             <arg name="domain_id" value="$(var domain_id)"/>
+            <arg name="launch_vehicle_interface" value="$(var launch_vehicle_interface)"/>
+            <arg name="control_method" value="$(var control_method)"/>
         </include>
     </group>
 

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from evalwrap.metrics.event_detector import Event, events_from_counts, events_from_log_excerpts, events_from_rosbag
+from evalwrap.metrics.control_metrics import summarize_control_timeseries
 from evalwrap.metrics.judgement import judge_domain
 from evalwrap.parsers.details_parser import ParsedDetails
 from evalwrap.parsers.log_parser import ParsedLogs
@@ -31,6 +32,9 @@ class DomainMetrics:
     steer_oscillation_score: float | None = None
     max_accel_mps2: float | None = None
     max_decel_mps2: float | None = None
+    max_command_accel_mps2: float | None = None
+    max_command_decel_mps2: float | None = None
+    max_command_abs_steer_rad: float | None = None
     avg_path_error_m: float | None = None
     max_path_error_m: float | None = None
     trajectory_source: str | None = None
@@ -50,6 +54,7 @@ class DomainResult:
     vehicle_timeseries: list[dict[str, object]]
     control_timeseries: list[dict[str, object]]
     section_summary: list[dict[str, object]]
+    awsim_section_summary: list[dict[str, object]]
     corner_summary: list[dict[str, object]]
     trajectory_reference: list[dict[str, object]]
 
@@ -91,6 +96,7 @@ def build_domain_result(
     if not rosbag.available and rosbag.reason:
         warnings.append(rosbag.reason)
     rosbag_metrics = rosbag.metrics
+    control_metrics = summarize_control_timeseries([dict(item) for item in rosbag.control_timeseries])
     metrics = DomainMetrics(
         finish=summary.finish,
         total_time_sec=summary.total_time_sec,
@@ -107,6 +113,9 @@ def build_domain_result(
         steer_oscillation_score=_optional_float(rosbag_metrics.get("steer_oscillation_score")),
         max_accel_mps2=_optional_float(rosbag_metrics.get("max_accel_mps2")),
         max_decel_mps2=_optional_float(rosbag_metrics.get("max_decel_mps2")),
+        max_command_accel_mps2=_optional_float(control_metrics.get("max_command_accel_mps2")),
+        max_command_decel_mps2=_optional_float(control_metrics.get("max_command_decel_mps2")),
+        max_command_abs_steer_rad=_optional_float(control_metrics.get("max_command_abs_steer_rad")),
         avg_path_error_m=_optional_float(rosbag_metrics.get("avg_path_error_m")),
         max_path_error_m=_optional_float(rosbag_metrics.get("max_path_error_m")),
         trajectory_source=rosbag.trajectory_source,
@@ -127,6 +136,7 @@ def build_domain_result(
         vehicle_timeseries=[dict(item) for item in rosbag.vehicle_timeseries],
         control_timeseries=[dict(item) for item in rosbag.control_timeseries],
         section_summary=[dict(item) for item in rosbag.section_summary],
+        awsim_section_summary=[dict(item) for item in rosbag.awsim_section_summary],
         corner_summary=[dict(item) for item in rosbag.corner_summary],
         trajectory_reference=[dict(item) for item in rosbag.trajectory_reference],
     )
@@ -143,6 +153,7 @@ def write_processed_outputs(run_id: str, domains: list[DomainResult], processed_
     (processed_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     _write_lap_summary(run_id, domains, processed_dir / "lap_summary.csv")
     _write_section_summary(run_id, domains, processed_dir / "section_summary.csv")
+    _write_awsim_section_summary(run_id, domains, processed_dir / "awsim_section_summary.csv")
     _write_corner_summary(run_id, domains, processed_dir / "corner_summary.csv")
     _write_trajectory_reference(run_id, domains, processed_dir / "trajectory_reference.csv")
     _write_vehicle_timeseries(run_id, domains, processed_dir / "vehicle_timeseries.csv")
@@ -212,6 +223,32 @@ def _write_section_summary(run_id: str, domains: list[DomainResult], path: Path)
         writer.writeheader()
         for domain in domains:
             for row in domain.section_summary:
+                writer.writerow(_row_with_run_domain(row, run_id, domain.domain_id, fieldnames))
+
+
+def _write_awsim_section_summary(run_id: str, domains: list[DomainResult], path: Path) -> None:
+    fieldnames = [
+        "run_id",
+        "domain_id",
+        "lap",
+        "section",
+        "entry_time_sec",
+        "exit_time_sec",
+        "entry_lap_time_sec",
+        "exit_lap_time_sec",
+        "duration_sec",
+        "avg_speed_mps",
+        "max_speed_mps",
+        "min_speed_mps",
+        "avg_path_error_m",
+        "max_path_error_m",
+        "sample_count",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for domain in domains:
+            for row in domain.awsim_section_summary:
                 writer.writerow(_row_with_run_domain(row, run_id, domain.domain_id, fieldnames))
 
 

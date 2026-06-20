@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS domain_metrics (
   steer_oscillation_score REAL,
   max_accel_mps2 REAL,
   max_decel_mps2 REAL,
+  max_command_accel_mps2 REAL,
+  max_command_decel_mps2 REAL,
+  max_command_abs_steer_rad REAL,
   avg_path_error_m REAL,
   max_path_error_m REAL,
   judgement TEXT,
@@ -97,8 +100,9 @@ def save_run(db_path: Path, manifest: dict[str, Any], metrics: dict[str, Any], r
                 (run_id, domain_id, finish, total_time_sec, lap_count, best_lap_sec, avg_lap_sec,
                  penalty_count, collision_count, stuck_count, low_speed_time_sec, max_speed_mps, avg_speed_mps,
                  max_abs_steer_rad, steer_oscillation_score, max_accel_mps2, max_decel_mps2,
+                 max_command_accel_mps2, max_command_decel_mps2, max_command_abs_steer_rad,
                  avg_path_error_m, max_path_error_m, judgement)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     manifest["run_id"],
@@ -118,6 +122,9 @@ def save_run(db_path: Path, manifest: dict[str, Any], metrics: dict[str, Any], r
                     domain.get("steer_oscillation_score"),
                     domain.get("max_accel_mps2"),
                     domain.get("max_decel_mps2"),
+                    domain.get("max_command_accel_mps2"),
+                    domain.get("max_command_decel_mps2"),
+                    domain.get("max_command_abs_steer_rad"),
                     domain.get("avg_path_error_m"),
                     domain.get("max_path_error_m"),
                     domain.get("judgement"),
@@ -167,13 +174,16 @@ def leaderboard(db_path: Path, metric: str) -> list[sqlite3.Row]:
         "steer_oscillation_score",
         "max_accel_mps2",
         "max_decel_mps2",
+        "max_command_accel_mps2",
+        "max_command_decel_mps2",
+        "max_command_abs_steer_rad",
         "avg_path_error_m",
         "max_path_error_m",
     }
     if metric not in allowed:
         raise ValueError(f"unsupported metric: {metric}")
     init_db(db_path)
-    order = "DESC" if metric in {"max_speed_mps", "avg_speed_mps", "max_accel_mps2"} else "ASC"
+    order = "DESC" if metric in {"max_speed_mps", "avg_speed_mps", "max_accel_mps2", "max_command_accel_mps2"} else "ASC"
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         return list(
@@ -201,6 +211,9 @@ def _ensure_domain_metric_columns(conn: sqlite3.Connection) -> None:
         "low_speed_time_sec": "REAL",
         "max_accel_mps2": "REAL",
         "max_decel_mps2": "REAL",
+        "max_command_accel_mps2": "REAL",
+        "max_command_decel_mps2": "REAL",
+        "max_command_abs_steer_rad": "REAL",
         "avg_path_error_m": "REAL",
         "max_path_error_m": "REAL",
     }

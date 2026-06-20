@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
-from evalwrap.parsers.rosbag_parser import _apply_corner_id_rotation, build_analysis_from_series, parse_rosbag
+from evalwrap.parsers.rosbag_parser import (
+    _apply_corner_id_rotation,
+    _decode_ackermann_control_command,
+    build_analysis_from_series,
+    parse_rosbag,
+)
 
 
 def test_build_analysis_from_series_generates_timeseries_metrics_sections_and_events() -> None:
@@ -62,6 +68,78 @@ def test_parse_rosbag_gracefully_handles_missing_storage(tmp_path: Path) -> None
 
     assert not parsed.available
     assert parsed.reason == "rosbag2_autoware storage not found"
+
+
+def test_build_analysis_from_series_generates_awsim_section_summary() -> None:
+    odometry = [
+        {"time_sec": 10.0, "x_m": 0.0, "y_m": 0.0, "speed_mps": 2.0, "yaw_rate_rps": 0.0},
+        {"time_sec": 11.0, "x_m": 2.0, "y_m": 0.0, "speed_mps": 3.0, "yaw_rate_rps": 0.0},
+        {"time_sec": 12.0, "x_m": 5.0, "y_m": 0.0, "speed_mps": 4.0, "yaw_rate_rps": 0.0},
+        {"time_sec": 13.0, "x_m": 9.0, "y_m": 0.0, "speed_mps": 5.0, "yaw_rate_rps": 0.0},
+    ]
+    awsim_status = [
+        {"time_sec": 10.0, "vehicle_index": 1, "lap": 1, "lap_time_sec": 0.0, "section": 1},
+        {"time_sec": 11.0, "vehicle_index": 1, "lap": 1, "lap_time_sec": 1.0, "section": 1},
+        {"time_sec": 12.0, "vehicle_index": 1, "lap": 1, "lap_time_sec": 2.0, "section": 2},
+        {"time_sec": 13.0, "vehicle_index": 1, "lap": 1, "lap_time_sec": 3.0, "section": 2},
+    ]
+
+    parsed = build_analysis_from_series(odometry=odometry, awsim_status=awsim_status)
+
+    assert parsed.available
+    assert len(parsed.awsim_section_summary) == 2
+    first = parsed.awsim_section_summary[0]
+    assert first["lap"] == 1
+    assert first["section"] == 1
+    assert first["entry_time_sec"] == 0.0
+    assert first["exit_time_sec"] == 2.0
+    assert first["entry_lap_time_sec"] == 0.0
+    assert first["exit_lap_time_sec"] == 2.0
+    assert first["duration_sec"] == 2.0
+    assert first["avg_speed_mps"] == 3.0
+
+
+def test_awsim_section_summary_keeps_previous_lap_exit_time_at_lap_rollover() -> None:
+    odometry = [
+        {"time_sec": 20.0, "x_m": 0.0, "y_m": 0.0, "speed_mps": 4.0, "yaw_rate_rps": 0.0},
+        {"time_sec": 21.0, "x_m": 4.0, "y_m": 0.0, "speed_mps": 4.0, "yaw_rate_rps": 0.0},
+        {"time_sec": 22.0, "x_m": 8.0, "y_m": 0.0, "speed_mps": 4.0, "yaw_rate_rps": 0.0},
+    ]
+    awsim_status = [
+        {"time_sec": 20.0, "vehicle_index": 1, "lap": 1, "lap_time_sec": 8.0, "section": 9},
+        {"time_sec": 21.0, "vehicle_index": 1, "lap": 1, "lap_time_sec": 9.0, "section": 9},
+        {"time_sec": 22.0, "vehicle_index": 1, "lap": 2, "lap_time_sec": 0.2, "section": 1},
+    ]
+
+    parsed = build_analysis_from_series(odometry=odometry, awsim_status=awsim_status)
+
+    assert parsed.available
+    final_previous_lap_section = parsed.awsim_section_summary[0]
+    assert final_previous_lap_section["lap"] == 1
+    assert final_previous_lap_section["section"] == 9
+    assert final_previous_lap_section["exit_time_sec"] == 2.0
+    assert final_previous_lap_section["exit_lap_time_sec"] == 10.0
+
+
+def test_decode_ackermann_control_command_from_cdr_bytes() -> None:
+    raw = bytearray(48)
+    raw[0:4] = b"\x00\x01\x00\x00"
+    struct.pack_into("<f", raw, 20, -0.5)
+    struct.pack_into("<f", raw, 24, 1.25)
+    struct.pack_into("<f", raw, 36, 7.25)
+    struct.pack_into("<f", raw, 40, -0.125)
+    struct.pack_into("<f", raw, 44, 0.0)
+
+    decoded = _decode_ackermann_control_command(bytes(raw), 12.5)
+
+    assert decoded == {
+        "time_sec": 12.5,
+        "target_speed_mps": 7.25,
+        "accel_mps2": -0.125,
+        "steer_rad": -0.5,
+        "throttle": None,
+        "brake": None,
+    }
 
 
 def test_build_analysis_from_series_generates_corner_summary_from_trajectory_curvature() -> None:

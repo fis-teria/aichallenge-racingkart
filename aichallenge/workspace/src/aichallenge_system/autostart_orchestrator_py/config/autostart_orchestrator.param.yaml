@@ -13,9 +13,17 @@
     enable_debug_visualization: true
     rosbag_topics:
       - /control/command/control_cmd
+      - /control/command/actuation_cmd
+      - /awsim/status
       - /clock
       - /localization/acceleration
       - /localization/kinematic_state
+      - /planning/scenario_planning/trajectory
+      - /vehicle/status/velocity_status
+      - /vehicle/status/steering_status
+      - /sensing/camera/image_raw
+      - /sensing/camera/camera_info
+      - /sensing/lidar/scan
     rosbag_output: rosbag2_autoware
     rosbag_storage_id: mcap
     # Leave both empty to keep rosbag output as plain .mcap (no outer compression).

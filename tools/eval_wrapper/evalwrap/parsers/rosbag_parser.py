@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import struct
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,11 @@ STEERING_STATUS_TOPICS = {
 TRAJECTORY_TOPICS = {
     "/planning/scenario_planning/trajectory",
 }
+AWSIM_STATUS_TOPICS = {
+    "/awsim/status",
+}
+ACKERMANN_CONTROL_COMMAND_TYPE = "autoware_auto_control_msgs/msg/AckermannControlCommand"
+RawDecoder = Callable[[bytes, float], dict[str, float | None] | None]
 
 
 @dataclass
@@ -55,6 +62,7 @@ class ParsedRosbag:
     vehicle_timeseries: list[dict[str, float | int | None]] = field(default_factory=list)
     control_timeseries: list[dict[str, float | None]] = field(default_factory=list)
     section_summary: list[dict[str, float | int | None]] = field(default_factory=list)
+    awsim_section_summary: list[dict[str, float | int | None]] = field(default_factory=list)
     corner_summary: list[dict[str, float | int | str | None]] = field(default_factory=list)
     trajectory_reference: list[dict[str, float | int | str | None]] = field(default_factory=list)
     trajectory_source: str | None = None
@@ -96,12 +104,18 @@ def parse_rosbag(
     if not target_topics:
         return ParsedRosbag(available=False, reason="rosbag has no supported evaluation topics")
     message_types = {}
+    raw_decoders: dict[str, RawDecoder] = {}
     warnings: list[str] = []
     for topic_name in target_topics:
         try:
             message_types[topic_name] = get_message(topic_types[topic_name])
         except Exception as exc:  # noqa: BLE001
-            warnings.append(f"unsupported message type for {topic_name}: {topic_types[topic_name]} ({exc})")
+            raw_decoder = _raw_decoder_for(topic_types[topic_name])
+            if raw_decoder is None:
+                warnings.append(f"unsupported message type for {topic_name}: {topic_types[topic_name]} ({exc})")
+            else:
+                raw_decoders[topic_name] = raw_decoder
+                warnings.append(f"using raw decoder for {topic_name}: {topic_types[topic_name]} ({exc})")
 
     odometry: list[dict[str, float | None]] = []
     accel: list[dict[str, float | None]] = []
@@ -109,11 +123,24 @@ def parse_rosbag(
     steering_status: list[dict[str, float | None]] = []
     control: list[dict[str, float | None]] = []
     actuation: list[dict[str, float | None]] = []
+    awsim_status: list[dict[str, float | int | None]] = []
     trajectory_points: list[tuple[float, float]] = []
     trajectory_source: str | None = None
+    raw_decode_failed_topics: set[str] = set()
 
     while reader.has_next():
         topic_name, raw, stamp = reader.read_next()
+        time_sec = stamp * 1e-9
+        if topic_name in raw_decoders and topic_name not in message_types:
+            decoded = raw_decoders[topic_name](raw, time_sec)
+            if decoded is None:
+                if topic_name not in raw_decode_failed_topics:
+                    warnings.append(f"failed to raw-decode {topic_name}")
+                    raw_decode_failed_topics.add(topic_name)
+                continue
+            if topic_name in CONTROL_TOPICS:
+                control.append(decoded)
+            continue
         if topic_name not in message_types:
             continue
         try:
@@ -121,7 +148,6 @@ def parse_rosbag(
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"failed to deserialize {topic_name}: {exc}")
             continue
-        time_sec = stamp * 1e-9
         if topic_name in ODOMETRY_TOPICS:
             odometry.append(_extract_odometry(msg, time_sec))
         elif topic_name in ACCEL_TOPICS:
@@ -134,6 +160,10 @@ def parse_rosbag(
             control.append(_extract_control_cmd(msg, time_sec))
         elif topic_name in ACTUATION_TOPICS:
             actuation.append(_extract_actuation_cmd(msg, time_sec))
+        elif topic_name in AWSIM_STATUS_TOPICS:
+            status = _extract_awsim_status(msg, time_sec)
+            if status is not None:
+                awsim_status.append(status)
         elif topic_name in TRAJECTORY_TOPICS:
             points = _extract_trajectory_points(msg)
             if points:
@@ -151,6 +181,7 @@ def parse_rosbag(
         steering_status=steering_status,
         control=control,
         actuation=actuation,
+        awsim_status=awsim_status,
         trajectory_points=trajectory_points,
         trajectory_source=trajectory_source,
         thresholds=thresholds,
@@ -166,6 +197,7 @@ def build_analysis_from_series(
     steering_status: list[dict[str, float | None]] | None = None,
     control: list[dict[str, float | None]] | None = None,
     actuation: list[dict[str, float | None]] | None = None,
+    awsim_status: list[dict[str, float | int | None]] | None = None,
     trajectory_points: list[tuple[float, float]] | None = None,
     trajectory_source: str | None = None,
     thresholds: dict[str, float] | None = None,
@@ -179,6 +211,7 @@ def build_analysis_from_series(
     steering_status = _sorted_rows(steering_status or [])
     control = _sorted_rows(control or [])
     actuation = _sorted_rows(actuation or [])
+    awsim_status = _sorted_rows(awsim_status or [])
     trajectory_points = trajectory_points or []
 
     vehicle_rows = _merge_vehicle_rows(odometry, velocity_status, acceleration, steering_status, sync_tolerance)
@@ -191,7 +224,7 @@ def build_analysis_from_series(
         trajectory_profile = None
         trajectory_reference = []
 
-    if not vehicle_rows and not control_rows:
+    if not vehicle_rows and not control_rows and not awsim_status:
         return ParsedRosbag(
             available=False,
             reason="rosbag parsed but no usable time-series samples were found",
@@ -202,6 +235,7 @@ def build_analysis_from_series(
     metrics = _compute_metrics(vehicle_rows, control_rows, merged_thresholds)
     events = _detect_events(vehicle_rows, control_rows, metrics, merged_thresholds)
     sections = _build_section_summary(vehicle_rows, events)
+    awsim_sections = _build_awsim_section_summary(awsim_status, vehicle_rows)
     corners = _build_corner_summary(vehicle_rows, events, trajectory_profile)
     return ParsedRosbag(
         available=True,
@@ -210,6 +244,7 @@ def build_analysis_from_series(
         vehicle_timeseries=vehicle_rows,
         control_timeseries=control_rows,
         section_summary=sections,
+        awsim_section_summary=awsim_sections,
         corner_summary=corners,
         trajectory_reference=trajectory_reference,
         trajectory_source=trajectory_source,
@@ -270,6 +305,7 @@ def _target_topics(topic_types: dict[str, str]) -> set[str]:
         | VELOCITY_STATUS_TOPICS
         | STEERING_STATUS_TOPICS
         | TRAJECTORY_TOPICS
+        | AWSIM_STATUS_TOPICS
     )
     return set(topic_types).intersection(supported)
 
@@ -295,6 +331,32 @@ def _extract_control_cmd(msg: Any, time_sec: float) -> dict[str, float | None]:
     }
 
 
+def _raw_decoder_for(message_type: str) -> RawDecoder | None:
+    if message_type == ACKERMANN_CONTROL_COMMAND_TYPE:
+        return _decode_ackermann_control_command
+    return None
+
+
+def _decode_ackermann_control_command(raw: bytes, time_sec: float) -> dict[str, float | None] | None:
+    # ROS 2 CDR: 4-byte encapsulation header, then AckermannControlCommand fields.
+    if len(raw) < 48:
+        return None
+    try:
+        steering = struct.unpack_from("<f", raw, 20)[0]
+        target_speed = struct.unpack_from("<f", raw, 36)[0]
+        acceleration = struct.unpack_from("<f", raw, 40)[0]
+    except struct.error:
+        return None
+    return {
+        "time_sec": time_sec,
+        "target_speed_mps": target_speed,
+        "accel_mps2": acceleration,
+        "steer_rad": steering,
+        "throttle": None,
+        "brake": None,
+    }
+
+
 def _extract_actuation_cmd(msg: Any, time_sec: float) -> dict[str, float | None]:
     return {
         "time_sec": time_sec,
@@ -304,6 +366,22 @@ def _extract_actuation_cmd(msg: Any, time_sec: float) -> dict[str, float | None]
         "throttle": _first_float(msg, ("throttle", "throttle_cmd", "actuation.accel_cmd")),
         "brake": _first_float(msg, ("brake", "brake_cmd", "actuation.brake_cmd")),
     }
+
+
+def _extract_awsim_status(msg: Any, time_sec: float) -> dict[str, float | int | None] | None:
+    data = getattr(msg, "data", None)
+    if data is None or len(data) < 4:
+        return None
+    try:
+        return {
+            "time_sec": time_sec,
+            "vehicle_index": int(data[0]),
+            "lap": int(data[1]),
+            "lap_time_sec": float(data[2]),
+            "section": int(data[3]),
+        }
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_trajectory_points(msg: Any) -> list[tuple[float, float]]:
@@ -730,6 +808,89 @@ def _build_section_summary(
             }
         )
     return output
+
+
+def _build_awsim_section_summary(
+    awsim_status: list[dict[str, float | int | None]],
+    vehicle_rows: list[dict[str, float | int | None]],
+) -> list[dict[str, float | int | None]]:
+    rows = [
+        row
+        for row in awsim_status
+        if row.get("time_sec") is not None and row.get("lap") is not None and row.get("section") is not None
+    ]
+    if not rows:
+        return []
+
+    segments: list[
+        tuple[
+            dict[str, float | int | None],
+            dict[str, float | int | None],
+            dict[str, float | int | None],
+        ]
+    ] = []
+    start = rows[0]
+    previous = rows[0]
+    previous_key = (int(start["lap"]), int(start["section"]))
+    for row in rows[1:]:
+        key = (int(row["lap"]), int(row["section"]))
+        if key != previous_key:
+            segments.append((start, row, previous))
+            start = row
+            previous_key = key
+        previous = row
+    segments.append((start, previous, previous))
+
+    time_zero = float(rows[0]["time_sec"])
+    output: list[dict[str, float | int | None]] = []
+    for start_row, exit_row, previous_row in segments:
+        entry_abs = float(start_row["time_sec"])
+        exit_abs = float(exit_row["time_sec"])
+        lap = int(start_row["lap"])
+        section = int(start_row["section"])
+        vehicle_slice = [
+            vehicle
+            for vehicle in vehicle_rows
+            if vehicle.get("time_sec") is not None and entry_abs <= float(vehicle["time_sec"]) <= exit_abs
+        ]
+        speeds = [float(row["speed_mps"]) for row in vehicle_slice if row.get("speed_mps") is not None]
+        path_errors = [float(row["path_error_m"]) for row in vehicle_slice if row.get("path_error_m") is not None]
+        output.append(
+            {
+                "lap": lap,
+                "section": section,
+                "entry_time_sec": entry_abs - time_zero,
+                "exit_time_sec": exit_abs - time_zero,
+                "entry_lap_time_sec": float(start_row["lap_time_sec"])
+                if start_row.get("lap_time_sec") is not None
+                else None,
+                "exit_lap_time_sec": _awsim_exit_lap_time(lap, exit_row, previous_row),
+                "duration_sec": max(0.0, exit_abs - entry_abs),
+                "avg_speed_mps": _mean(speeds),
+                "max_speed_mps": max(speeds) if speeds else None,
+                "min_speed_mps": min(speeds) if speeds else None,
+                "avg_path_error_m": _mean(path_errors),
+                "max_path_error_m": max(path_errors) if path_errors else None,
+                "sample_count": len(vehicle_slice),
+            }
+        )
+    return output
+
+
+def _awsim_exit_lap_time(
+    lap: int,
+    exit_row: dict[str, float | int | None],
+    previous_row: dict[str, float | int | None],
+) -> float | None:
+    if int(exit_row["lap"]) == lap and exit_row.get("lap_time_sec") is not None:
+        return float(exit_row["lap_time_sec"])
+    if int(previous_row["lap"]) != lap or previous_row.get("lap_time_sec") is None:
+        return None
+    previous_time = previous_row.get("time_sec")
+    exit_time = exit_row.get("time_sec")
+    if previous_time is None or exit_time is None:
+        return float(previous_row["lap_time_sec"])
+    return float(previous_row["lap_time_sec"]) + max(0.0, float(exit_time) - float(previous_time))
 
 
 def _build_corner_summary(

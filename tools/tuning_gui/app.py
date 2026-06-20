@@ -47,6 +47,13 @@ LAUNCH_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/aichallenge_sub
 SYSTEM_LAUNCH_ROOT = Path("aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch")
 MPC_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros")
 MPC_CONFIG_PATH = MPC_ROOT / "config/config.yaml"
+DELAY_AWARE_MPC_CONFIG_PATH = Path(
+    "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_aware_config.yaml"
+)
+REFERENCE_CONFIG_PATHS = {
+    "mpc": MPC_CONFIG_PATH,
+    "delay_aware_mpc": DELAY_AWARE_MPC_CONFIG_PATH,
+}
 
 DESCRIPTION_DEFAULTS: dict[str, str] = {
     "common.save_config": "実行時の設定保存を有効にするフラグです。通常のチューニングではfalseのままでOKです。",
@@ -84,6 +91,22 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "v2x_obstacle_avoidance.vehicle_radius": "V2X車両を障害物として扱うときの半径[m]です。",
     "v2x_obstacle_avoidance.v_max_safety": "V2X速度推定の安全上限[m/s]です。異常に速い推定値を破棄します。",
     "v2x_obstacle_avoidance.position_jump_threshold": "V2X位置が瞬間的に飛んだと判定する距離[m]です。",
+}
+
+DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
+    "delay_enabled": "delay-aware odometry補償を有効にするフラグです。baseline比較ではfalseまたはmode=baselineを使います。",
+    "delay_mode": "遅延補償モードです。baseline, state_shift, state_shift_with_steer_lag, delay_augmentedを選べます。",
+    "steering_delay_sec": "ステアリング遅延として前方予測する時間[s]です。AWSIM想定値は0.20sです。",
+    "prediction_dt": "遅延中の車両運動を積分する刻み幅[s]です。小さいほど精細ですが計算量が増えます。",
+    "steering_time_constant_sec": "state_shift_with_steer_lagで使うステア一次遅れの時定数[s]です。",
+    "wheelbase": "遅延中のyaw予測に使うホイールベース[m]です。",
+    "use_reference_time_shift": "trueにすると遅延後poseをMPCへ渡し、参照path投影も遅延後基準になります。",
+    "use_steering_status": "/vehicle/status/steering_statusが新鮮な場合に実測ステアを優先して使います。",
+    "steering_status_timeout_sec": "steering_statusを新鮮とみなす最大経過時間[s]です。",
+    "use_yaw_rate_fallback": "steering_statusが使えない場合にyaw rateからステアを推定します。",
+    "use_command_history_fallback": "steering_status/yaw rateが使えない場合に過去の制御指令からステアを推定します。",
+    "min_velocity_for_yaw_prediction": "yaw rateからステア推定する最低速度[m/s]です。低速時の発散を避けます。",
+    "debug_publish_period_sec": "/delay_aware_mpc/debugと/delayed_poseをpublishする周期[s]です。",
 }
 
 CONTROL_DEFAULT_XMLS = [
@@ -146,6 +169,33 @@ CATALOG: dict[str, list[dict[str, str]]] = {
             "label": "MPC reference path",
             "path": "aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/env/final_ver3/traj_mincurv.csv",
             "kind": "csv",
+        },
+    ],
+    "delay_aware_mpc": [
+        {
+            "label": "Delay-aware MPC launch params",
+            "path": str(LAUNCH_ROOT / "launch/control/delay_aware_mpc.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Delay-aware MPC base YAML",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_aware_config.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Delay compensator YAML fallback",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_compensator.param.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Delay-aware MPC ref velocity YAML",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/ref_vel.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Delay-aware MPC C++ node",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/src/delay_compensated_odometry_node.cpp",
+            "kind": "text",
         },
     ],
     "pure_pursuit": [
@@ -310,7 +360,8 @@ def write_descriptions(descriptions: dict[str, dict[str, str]]) -> None:
 def catalog_files(control_method: str) -> list[dict[str, str]]:
     files: list[dict[str, str]] = []
     seen: set[str] = set()
-    for item in [*CATALOG["common"], *CATALOG.get(control_method, [])]:
+    method_items = CATALOG.get(control_method, [])
+    for item in [*method_items, *CATALOG["common"]]:
         path = str(rel_path(item["path"]))
         if path not in seen:
             entry = dict(item)
@@ -318,15 +369,15 @@ def catalog_files(control_method: str) -> list[dict[str, str]]:
             entry["exists"] = str(abs_path(path).exists()).lower()
             files.append(entry)
             seen.add(path)
-    if control_method == "mpc":
+    if control_method in REFERENCE_CONFIG_PATHS:
         try:
-            active_reference = current_mpc_reference_path()
+            active_reference = current_mpc_reference_path(reference_config_path(control_method))
         except Exception:
             active_reference = None
         if active_reference and active_reference not in seen:
             files.append(
                 {
-                    "label": "MPC active reference path",
+                    "label": f"{control_method} active reference path",
                     "path": active_reference,
                     "kind": "csv",
                     "exists": str(abs_path(active_reference).exists()).lower(),
@@ -340,10 +391,11 @@ def allowed_paths() -> set[str]:
     for items in CATALOG.values():
         for item in items:
             paths.add(str(rel_path(item["path"])))
-    try:
-        paths.add(current_mpc_reference_path())
-    except Exception:
-        pass
+    for config_path in REFERENCE_CONFIG_PATHS.values():
+        try:
+            paths.add(current_mpc_reference_path(config_path))
+        except Exception:
+            pass
     return paths
 
 
@@ -489,6 +541,8 @@ def default_description(kind: str, row: dict[str, Any]) -> str:
         attrs = row.get("attrs") if isinstance(row.get("attrs"), dict) else {}
         tag = str(row.get("tag") or "")
         name = str(attrs.get("name") or "")
+        if name in DELAY_AWARE_XML_DEFAULTS:
+            return DELAY_AWARE_XML_DEFAULTS[name]
         if tag == "arg":
             if name == "control_method":
                 return "使用する制御方式です。mpc、pure_pursuit、tiny_lidar_netなどを切り替えます。"
@@ -752,18 +806,34 @@ def file_diff(path: str, content: str | None = None) -> str:
     )
 
 
-def current_mpc_config() -> dict[str, Any]:
-    config_path = abs_path(MPC_CONFIG_PATH)
+def reference_config_path(control_method: str | Path | None = None) -> Path:
+    if isinstance(control_method, Path):
+        relative = rel_path(control_method)
+        if relative not in {rel_path(path) for path in REFERENCE_CONFIG_PATHS.values()}:
+            raise ValueError(f"unsupported reference config: {relative}")
+        return relative
+    if isinstance(control_method, str) and control_method.endswith((".yaml", ".yml")):
+        relative = rel_path(control_method)
+        if relative not in {rel_path(path) for path in REFERENCE_CONFIG_PATHS.values()}:
+            raise ValueError(f"unsupported reference config: {relative}")
+        return relative
+    method = control_method if isinstance(control_method, str) and control_method else selected_method()
+    return REFERENCE_CONFIG_PATHS.get(method, MPC_CONFIG_PATH)
+
+
+def current_mpc_config(config_path: str | Path | None = None) -> dict[str, Any]:
+    config_relative = reference_config_path(config_path)
+    config_path = abs_path(config_relative)
     if not config_path.exists():
-        raise FileNotFoundError(f"MPC config not found: {MPC_CONFIG_PATH}")
+        raise FileNotFoundError(f"MPC config not found: {config_relative}")
     data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError("MPC config is not a YAML mapping")
     return data
 
 
-def current_mpc_reference_path() -> str:
-    cfg = current_mpc_config()
+def current_mpc_reference_path(config_path: str | Path | None = None) -> str:
+    cfg = current_mpc_config(config_path)
     reference_path = cfg.get("reference_path") or {}
     csv_path = reference_path.get("csv_path")
     if not isinstance(csv_path, str) or not csv_path:
@@ -771,8 +841,8 @@ def current_mpc_reference_path() -> str:
     return str(rel_path(MPC_ROOT / csv_path))
 
 
-def current_mpc_map_yaml_path() -> str:
-    cfg = current_mpc_config()
+def current_mpc_map_yaml_path(config_path: str | Path | None = None) -> str:
+    cfg = current_mpc_config(config_path)
     map_cfg = cfg.get("map") or {}
     yaml_path = map_cfg.get("yaml_path")
     if not isinstance(yaml_path, str) or not yaml_path:
@@ -780,13 +850,13 @@ def current_mpc_map_yaml_path() -> str:
     return str(rel_path(MPC_ROOT / yaml_path))
 
 
-def available_reference_paths() -> list[dict[str, Any]]:
+def available_reference_paths(config_path: str | Path | None = None) -> list[dict[str, Any]]:
     roots = [abs_path(MPC_ROOT / "env"), abs_path(MPC_ROOT / "maps")]
     paths: list[Path] = []
     for root in roots:
         if root.exists():
             paths.extend(root.glob("**/*.csv"))
-    active = current_mpc_reference_path()
+    active = current_mpc_reference_path(config_path)
     result = []
     for path in sorted(set(paths), key=lambda p: str(p.relative_to(REPO_ROOT))):
         relative = str(path.relative_to(REPO_ROOT))
@@ -800,8 +870,8 @@ def available_reference_paths() -> list[dict[str, Any]]:
     return result
 
 
-def read_map_yaml(path: str | None = None) -> dict[str, Any]:
-    relative = str(rel_path(path or current_mpc_map_yaml_path()))
+def read_map_yaml(path: str | None = None, config_path: str | Path | None = None) -> dict[str, Any]:
+    relative = str(rel_path(path or current_mpc_map_yaml_path(config_path)))
     map_yaml = abs_path(relative)
     data = yaml.safe_load(map_yaml.read_text(encoding="utf-8")) or {}
     image_name = str(data.get("image", ""))
@@ -878,8 +948,8 @@ def make_png(width: int, height: int, raw_rows: bytes, color_type: int) -> bytes
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw_rows, 9)) + chunk(b"IEND", b"")
 
 
-def load_reference_path(path: str | None = None) -> dict[str, Any]:
-    relative = str(rel_path(path or current_mpc_reference_path()))
+def load_reference_path(path: str | None = None, config_path: str | Path | None = None) -> dict[str, Any]:
+    relative = str(rel_path(path or current_mpc_reference_path(config_path)))
     target = abs_path(relative)
     rows = list(csv.DictReader(target.read_text(encoding="utf-8").splitlines()))
     points = []
@@ -930,14 +1000,15 @@ def path_stats(points: list[dict[str, Any]]) -> dict[str, Any]:
     return {"count": len(points), "length_m": length, "min_segment_m": min_segment}
 
 
-def path_editor_state(path: str | None = None) -> dict[str, Any]:
-    source = load_reference_path(path)
+def path_editor_state(path: str | None = None, config_path: str | Path | None = None) -> dict[str, Any]:
+    active_config_path = reference_config_path(config_path)
+    source = load_reference_path(path, active_config_path)
     return {
-        "config_path": str(rel_path(MPC_CONFIG_PATH)),
-        "circular": mpc_reference_is_circular(),
-        "map": read_map_yaml(),
+        "config_path": str(active_config_path),
+        "circular": mpc_reference_is_circular(active_config_path),
+        "map": read_map_yaml(config_path=active_config_path),
         "source": source,
-        "available_paths": available_reference_paths(),
+        "available_paths": available_reference_paths(active_config_path),
         "default_target_path": default_reference_target(source["path"]),
     }
 
@@ -956,11 +1027,15 @@ def is_manual_reference_path(path: Path) -> bool:
 
 
 def save_reference_path(body: dict[str, Any]) -> dict[str, Any]:
-    source_path = str(body.get("source_path") or current_mpc_reference_path())
+    config_path = reference_config_path(str(body.get("config_path") or "") or None)
+    source_path = str(body.get("source_path") or current_mpc_reference_path(config_path))
     target_path = str(body.get("target_path") or default_reference_target(source_path))
     target_relative = validate_reference_target(target_path)
     points = normalize_path_points(body.get("points") or [])
-    csv_text, computed_points, warnings = build_reference_path_csv(points, circular=mpc_reference_is_circular())
+    csv_text, computed_points, warnings = build_reference_path_csv(
+        points,
+        circular=mpc_reference_is_circular(config_path),
+    )
     target = abs_path(target_relative)
     old = target.read_text(encoding="utf-8") if target.exists() else ""
     changed = old != csv_text
@@ -970,7 +1045,7 @@ def save_reference_path(body: dict[str, Any]) -> dict[str, Any]:
         target.write_text(csv_text, encoding="utf-8")
     config_changed = False
     if body.get("switch_config"):
-        config_changed = update_mpc_reference_path(target_relative)
+        config_changed = update_mpc_reference_path(target_relative, config_path)
     if changed or config_changed:
         state = read_state()
         state["dirty_since"] = now_iso()
@@ -979,6 +1054,7 @@ def save_reference_path(body: dict[str, Any]) -> dict[str, Any]:
     return {
         "changed": changed,
         "config_changed": config_changed,
+        "config_path": str(config_path),
         "path": target_relative,
         "package_path": str(Path(target_relative).relative_to(MPC_ROOT)),
         "backup": str(backup.relative_to(REPO_ROOT)) if backup else None,
@@ -1114,15 +1190,15 @@ def normalize_angle(value: float) -> float:
     return value
 
 
-def mpc_reference_is_circular() -> bool:
-    cfg = current_mpc_config()
+def mpc_reference_is_circular(config_path: str | Path | None = None) -> bool:
+    cfg = current_mpc_config(config_path)
     reference_path = cfg.get("reference_path") or {}
     return bool(reference_path.get("circular", True))
 
 
-def update_mpc_reference_path(target_relative: str) -> bool:
+def update_mpc_reference_path(target_relative: str, config_path: str | Path | None = None) -> bool:
     target_package_path = str(Path(target_relative).relative_to(MPC_ROOT))
-    config_relative = str(rel_path(MPC_CONFIG_PATH))
+    config_relative = str(reference_config_path(config_path))
     config_path = abs_path(config_relative)
     text = config_path.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
@@ -1821,7 +1897,8 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/path-editor":
                 params = parse_qs(parsed.query)
                 path = params.get("path", [None])[0]
-                self._json(path_editor_state(path))
+                config_path = params.get("config_path", [None])[0]
+                self._json(path_editor_state(path, config_path))
             elif parsed.path == "/api/path-editor/map.png":
                 params = parse_qs(parsed.query)
                 relative = rel_path(unquote(params.get("path", [""])[0]))
@@ -1910,7 +1987,9 @@ class Handler(BaseHTTPRequestHandler):
                     start_command("build", result["control_method"], False, "auto rebuild after preset restore")
                 self._json(result)
             elif parsed.path == "/api/path-editor/load":
-                self._json(path_editor_state(str(body.get("path", "") or current_mpc_reference_path())))
+                config_path = str(body.get("config_path") or "") or None
+                path = str(body.get("path", "") or current_mpc_reference_path(config_path))
+                self._json(path_editor_state(path, config_path))
             elif parsed.path == "/api/path-editor/save":
                 with command_lock:
                     running = active_process is not None and active_process.poll() is None
