@@ -14,7 +14,7 @@ delay_aware_mpc:
   mode: "state_shift_with_steer_lag"
   steering_delay_sec: 0.20
   prediction_dt: 0.02
-  steering_time_constant_sec: 0.30
+  steering_time_constant_sec: 0.40
   use_reference_time_shift: true
   use_steering_status: true
   steering_status_timeout_sec: 0.20
@@ -82,6 +82,8 @@ mpc:
   # Keep this at 0 to avoid double compensation against the baseline MPC offset.
   wp_id_offset: 0
   use_max_kappa_pred: true
+  lateral_target_mode: "reference_path"
+  wall_margin_m: 0.15
   use_curvature_speed_profile: true
   use_ref_vel_as_speed_cap: true
   speed_profile_debug_publish_period_sec: 0.25

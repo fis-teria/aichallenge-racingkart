@@ -108,6 +108,10 @@ def cfg_bool(config, name: str, default: bool) -> bool:
 def cfg_float(config, name: str, default: float) -> float:
     return float(getattr(config, name, default))
 
+
+def cfg_str(config, name: str, default: str) -> str:
+    return str(getattr(config, name, default))
+
 @dataclasses.dataclass
 class MPCConfig:
     N: int
@@ -126,6 +130,8 @@ class MPCConfig:
     steer_low_pass_gain: float
     wp_id_offset: int
     use_max_kappa_pred: bool
+    lateral_target_mode: str
+    wall_margin_m: float
     use_curvature_speed_profile: bool
     use_ref_vel_as_speed_cap: bool
     speed_profile_debug_publish_period_sec: float
@@ -265,6 +271,8 @@ class MPCController(Node):
             self.declare_parameter("accel_low_pass_gain", mpc_cfg.accel_low_pass_gain)
             self.declare_parameter("steer_low_pass_gain", mpc_cfg.steer_low_pass_gain)
             self.declare_parameter("wp_id_offset", mpc_cfg.wp_id_offset)
+            self.declare_parameter("lateral_target_mode", mpc_cfg.lateral_target_mode)
+            self.declare_parameter("wall_margin_m", mpc_cfg.wall_margin_m)
             self.declare_parameter("use_curvature_speed_profile", mpc_cfg.use_curvature_speed_profile)
             self.declare_parameter("use_ref_vel_as_speed_cap", mpc_cfg.use_ref_vel_as_speed_cap)
             self.declare_parameter(
@@ -353,6 +361,16 @@ class MPCController(Node):
                     mpc_cfg.wp_id_offset = param.value
                     self._mpc.update_wp_id_offset(param.value)
                     self.get_logger().warn(f"wp_id_offset was updated to '{param.value}'")
+
+                elif param.name == "lateral_target_mode" and param.type_ == Parameter.Type.STRING:
+                    mpc_cfg.lateral_target_mode = param.value
+                    self._mpc.update_lateral_target_mode(param.value)
+                    self.get_logger().warn(f"lateral_target_mode was updated to '{param.value}'")
+
+                elif param.name == "wall_margin_m" and param.type_ == Parameter.Type.DOUBLE:
+                    mpc_cfg.wall_margin_m = param.value
+                    self._mpc.update_wall_margin_m(param.value)
+                    self.get_logger().warn(f"wall_margin_m was updated to '{param.value}'")
 
                 elif param.name == "use_curvature_speed_profile" and param.type_ == Parameter.Type.BOOL:
                     mpc_cfg.use_curvature_speed_profile = param.value
@@ -486,6 +504,8 @@ class MPCController(Node):
                 cfg_mpc.steer_low_pass_gain,
                 cfg_mpc.wp_id_offset,
                 cfg_mpc.use_max_kappa_pred,
+                cfg_str(cfg_mpc, "lateral_target_mode", "center_of_corridor"),
+                cfg_float(cfg_mpc, "wall_margin_m", 0.0),
                 cfg_bool(cfg_mpc, "use_curvature_speed_profile", True),
                 cfg_bool(cfg_mpc, "use_ref_vel_as_speed_cap", True),
                 cfg_float(cfg_mpc, "speed_profile_debug_publish_period_sec", 0.25),
@@ -523,7 +543,9 @@ class MPCController(Node):
                 mpc_cfg.wp_id_offset,
                 self.USE_OBSTACLE_AVOIDANCE,
                 self._cfg.reference_path.use_path_constraints_topic,
-                mpc_cfg.use_max_kappa_pred)
+                mpc_cfg.use_max_kappa_pred,
+                mpc_cfg.lateral_target_mode,
+                mpc_cfg.wall_margin_m)
 
             return mpc_cfg, mpc
 
@@ -665,6 +687,8 @@ class MPCController(Node):
                 "command_speed_mps": command_speed_mps,
                 "use_curvature_speed_profile": self._mpc_cfg.use_curvature_speed_profile,
                 "use_ref_vel_as_speed_cap": self._mpc_cfg.use_ref_vel_as_speed_cap,
+                "lateral_target_mode": self._mpc_cfg.lateral_target_mode,
+                "wall_margin_m": self._mpc_cfg.wall_margin_m,
                 "use_grade_accel_feedforward": self._mpc_cfg.use_grade_accel_feedforward,
                 "grade_percent": self._last_grade_percent,
                 "grade_accel_base_mps2": self._last_grade_accel_base_mps2,

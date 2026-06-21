@@ -9,7 +9,7 @@
     <arg name="use_sim_time" default="true"/>
     <arg name="run_rviz" default="false"/>
     <arg name="launch_vehicle_interface" default="true"/>
-    <arg name="control_method" default="mpc"/>
+    <arg name="control_method" default="delay_aware_mpc"/>
 
     <log message="Launching evaluation bundle (simulator + autoware)."/>
     <log message=" - domain_id: $(var domain_id)"/>

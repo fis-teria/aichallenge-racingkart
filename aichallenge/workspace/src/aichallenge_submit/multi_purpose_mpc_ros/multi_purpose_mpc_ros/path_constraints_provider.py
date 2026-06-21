@@ -33,6 +33,18 @@ from multi_purpose_mpc_ros.obstacle_manager import ObstacleManager
 from multi_purpose_mpc_ros_msgs.msg import PathConstraints, BorderCells
 
 
+def cfg_bool(config, name: str, default: bool) -> bool:
+    return bool(getattr(config, name, default))
+
+
+def cfg_float(config, name: str, default: float) -> float:
+    return float(getattr(config, name, default))
+
+
+def cfg_str(config, name: str, default: str) -> str:
+    return str(getattr(config, name, default))
+
+
 @dataclasses.dataclass
 class MPCConfig:
     N: int
@@ -44,7 +56,12 @@ class MPCConfig:
     a_max: float
     ay_max: float
     delta_max: float
+    steer_rate_max: float
     control_rate: float
+    wp_id_offset: int
+    use_max_kappa_pred: bool
+    lateral_target_mode: str
+    wall_margin_m: float
 
 
 class PathConstraintsProvider(Node):
@@ -180,7 +197,12 @@ class PathConstraintsProvider(Node):
                 cfg_mpc.a_max,
                 cfg_mpc.ay_max,
                 np.deg2rad(cfg_mpc.delta_max_deg),
-                cfg_mpc.control_rate)
+                cfg_mpc.steer_rate_max,
+                cfg_mpc.control_rate,
+                cfg_mpc.wp_id_offset,
+                cfg_bool(cfg_mpc, "use_max_kappa_pred", True),
+                cfg_str(cfg_mpc, "lateral_target_mode", "center_of_corridor"),
+                cfg_float(cfg_mpc, "wall_margin_m", 0.0))
 
             state_constraints = {
                 "xmin": np.array([-np.inf, -np.inf, -np.inf]),
@@ -197,8 +219,13 @@ class PathConstraintsProvider(Node):
                 state_constraints,
                 input_constraints,
                 mpc_cfg.ay_max,
+                mpc_cfg.steer_rate_max,
+                mpc_cfg.wp_id_offset,
                 True,
-                True)
+                True,
+                mpc_cfg.use_max_kappa_pred,
+                mpc_cfg.lateral_target_mode,
+                mpc_cfg.wall_margin_m)
             return mpc_cfg, mpc
 
         def compute_speed_profile(car: BicycleModel, mpc_config: MPCConfig) -> None:

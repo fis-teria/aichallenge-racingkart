@@ -400,6 +400,8 @@ def _write_speed_profile_debug_timeseries(run_id: str, domains: list[DomainResul
         "command_speed_mps",
         "use_curvature_speed_profile",
         "use_ref_vel_as_speed_cap",
+        "lateral_target_mode",
+        "wall_margin_m",
         "use_grade_accel_feedforward",
         "grade_percent",
         "grade_accel_base_mps2",

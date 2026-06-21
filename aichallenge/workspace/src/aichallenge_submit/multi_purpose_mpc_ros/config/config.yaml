@@ -57,6 +57,8 @@ mpc:
   steer_low_pass_gain: 1.0
   wp_id_offset: 2
   use_max_kappa_pred: true
+  lateral_target_mode: "reference_path"
+  wall_margin_m: 0.25
   use_curvature_speed_profile: true
   use_ref_vel_as_speed_cap: true
   speed_profile_debug_publish_period_sec: 0.25
@@ -75,8 +77,8 @@ mpc:
   ## Lap1: 53s, Lap2: 47s
 
   v_max: 35.0   # km/h
-  ay_max: 20  # m/s^2, maximum lateral acceleration in curves
-  Q: [1000000.0, 100000000.0, 100000.0]
+  ay_max: 30  # m/s^2, maximum lateral acceleration in curves
+  Q: [10000000.0, 100000000.0, 100000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##
