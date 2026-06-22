@@ -28,7 +28,9 @@ source /autoware/install/setup.bash
 cd ./workspace
 
 # NOTE: gyro_odometer exists in the Autoware underlay, so allow overriding in this overlay workspace.
-colcon build --symlink-install --allow-overriding gyro_odometer --cmake-args -DCMAKE_BUILD_TYPE=Release
+COLCON_PARALLEL_WORKERS="${COLCON_PARALLEL_WORKERS:-1}"
+echo "[build_autoware] COLCON_PARALLEL_WORKERS=${COLCON_PARALLEL_WORKERS}"
+colcon build --parallel-workers "${COLCON_PARALLEL_WORKERS}" --symlink-install --allow-overriding gyro_odometer --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 echo "[build_autoware] Build successful."
 

@@ -16,7 +16,7 @@
     <arg name="awsim_extra_args" default=""/>
     <arg name="awsim_prime_render_offload" default="1"/>
     <arg name="awsim_vk_layer_optimus" default="NVIDIA_only"/>
-    <arg name="awsim_vk_icd_filenames" default=""/>
+    <arg name="awsim_vk_icd_filenames" default="/etc/vulkan/icd.d/nvidia_icd.json"/>
     <arg name="control_method" default="mpc"/>
 
     <log message="Launching evaluation bundle (simulator + autoware)."/>

@@ -15,9 +15,15 @@ x-autoware-base: &autoware-base
     - SIM_MODE=${SIM_MODE:-}
     - __NV_PRIME_RENDER_OFFLOAD=${__NV_PRIME_RENDER_OFFLOAD:-1}
     - __VK_LAYER_NV_optimus=${__VK_LAYER_NV_optimus:-NVIDIA_only}
-    - VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-}
-    - CMD=${CMD:-}
+    - VK_ICD_FILENAMES
     - CONTROL_METHOD=${CONTROL_METHOD:-}
+    - LAUNCH_AWSIM=${LAUNCH_AWSIM:-true}
+    - RUN_RVIZ=${RUN_RVIZ:-true}
+    - AWSIM_VEHICLES=${AWSIM_VEHICLES:-1}
+    - AWSIM_LAPS=${AWSIM_LAPS:-6}
+    - AWSIM_TIMEOUT=${AWSIM_TIMEOUT:-600}
+    - AWSIM_EXTRA_ARGS=${AWSIM_EXTRA_ARGS:-}
+    - CMD=${CMD:-}
     - CAPTURE=${CAPTURE:-}
     - ROSBAG=${ROSBAG:-}
     - COLCON_TRACE=${COLCON_TRACE:-}
@@ -89,11 +95,11 @@ services:
 
   # Autoware service
   autoware-build:
-    <<: *autoware-base 
+    <<: *autoware-base
     command: ["bash", "-lc", "exec /aichallenge/build_autoware.bash ${HOST_UID:-} ${HOST_GID:-}"]
 
   simulator:
-    <<: *autoware-base 
+    <<: *autoware-base
     command: ["bash", "-lc", "exec env PULSE_SERVER=unix:/run/user/${HOST_UID:-1000}/pulse/native /aichallenge/run_simulator.bash ${SIM_MODE:-} >\"${LOG_DIR:-/output}/awsim.log\" 2>&1"]
 
   autoware-command:
@@ -140,5 +146,5 @@ services:
 
 #### remote visualization services ####
   rviz2:
-    <<: *autoware-base 
+    <<: *autoware-base
     command: ["bash", "-lc", "exec /aichallenge/utils/run_rviz.bash remote"]

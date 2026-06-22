@@ -62,11 +62,17 @@ RUN git clone --depth 1 https://github.com/AutomotiveAIChallenge/aichallenge-rac
  && tar zxf /tmp/s.tgz -C /aichallenge/workspace/src \
  && rm /tmp/s.tgz
 COPY aichallenge/run_evaluation.bash /aichallenge/run_evaluation.bash
+COPY aichallenge/utils/fix_ownership.bash /tmp/fix_ownership.bash
 COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml
 COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml
 COPY aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/config/autostart_orchestrator.param.yaml /aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/config/autostart_orchestrator.param.yaml
 COPY aichallenge/workspace/src/aichallenge_tools/bag_manager_py/config/bag_manager.param.yaml /aichallenge/workspace/src/aichallenge_tools/bag_manager_py/config/bag_manager.param.yaml
 COPY aichallenge/simulator/ /aichallenge/simulator/
+
+RUN mkdir -p /aichallenge/utils \
+ && cp /tmp/fix_ownership.bash /aichallenge/utils/fix_ownership.bash \
+ && chmod +x /aichallenge/utils/fix_ownership.bash \
+ && rm /tmp/fix_ownership.bash
 
 
 RUN bash -c ' \
