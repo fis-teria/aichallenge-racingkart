@@ -4,6 +4,9 @@
     <arg name="vehicles" default="2"/>
     <arg name="laps" default="6"/>
     <arg name="timeout" default="600"/>
+    <arg name="awsim_prime_render_offload" default="1"/>
+    <arg name="awsim_vk_layer_optimus" default="NVIDIA_only"/>
+    <arg name="awsim_vk_icd_filenames" default="/usr/share/vulkan/icd.d/nvidia_icd.json"/>
 
     <group>
         <set_env name="ROS_DOMAIN_ID" value="0"/>
@@ -11,7 +14,7 @@
             name="aichallenge_awsim_eval"
             cwd="$(var log_dir)"
             output="both"
-            cmd="/aichallenge/simulator/AWSIM/AWSIM.x86_64 --start-mode sync --vehicles $(var vehicles) --laps $(var laps) --timeout $(var timeout)"/>
+            cmd="env __NV_PRIME_RENDER_OFFLOAD=$(var awsim_prime_render_offload) __VK_LAYER_NV_optimus=$(var awsim_vk_layer_optimus) VK_ICD_FILENAMES=$(var awsim_vk_icd_filenames) /aichallenge/simulator/AWSIM/AWSIM.x86_64 -force-vulkan --start-mode sync --vehicles $(var vehicles) --laps $(var laps) --timeout $(var timeout)"/>
         <include file="$(find-pkg-share aichallenge_system_launch)/launch/mode/awsim_state_manager.launch.xml"/>
     </group>
 </launch>

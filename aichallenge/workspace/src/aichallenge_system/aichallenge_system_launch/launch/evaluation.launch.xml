@@ -9,6 +9,9 @@
     <arg name="use_sim_time" default="true"/>
     <arg name="run_rviz" default="false"/>
     <arg name="launch_vehicle_interface" default="true"/>
+    <arg name="awsim_prime_render_offload" default="1"/>
+    <arg name="awsim_vk_layer_optimus" default="NVIDIA_only"/>
+    <arg name="awsim_vk_icd_filenames" default=""/>
     <arg name="control_method" default="delay_aware_mpc"/>
 
     <log message="Launching evaluation bundle (simulator + autoware)."/>
@@ -21,6 +24,9 @@
     <log message=" - use_sim_time: $(var use_sim_time)"/>
     <log message=" - run_rviz: $(var run_rviz)"/>
     <log message=" - launch_vehicle_interface: $(var launch_vehicle_interface)"/>
+    <log message=" - awsim_prime_render_offload: $(var awsim_prime_render_offload)"/>
+    <log message=" - awsim_vk_layer_optimus: $(var awsim_vk_layer_optimus)"/>
+    <log message=" - awsim_vk_icd_filenames: $(var awsim_vk_icd_filenames)"/>
     <log message=" - control_method: $(var control_method)"/>
 
     <group>
@@ -30,7 +36,7 @@
                 name="aichallenge_awsim_eval"
                 cwd="$(var log_dir)"
                 output="both"
-                cmd="/aichallenge/simulator/AWSIM/AWSIM.x86_64 -force-vulkan --start-mode sync --vehicles 1 --laps 6 --timeout 600"/>
+                cmd="env __NV_PRIME_RENDER_OFFLOAD=$(var awsim_prime_render_offload) __VK_LAYER_NV_optimus=$(var awsim_vk_layer_optimus) VK_ICD_FILENAMES=$(var awsim_vk_icd_filenames) /aichallenge/simulator/AWSIM/AWSIM.x86_64 -force-vulkan --start-mode sync --vehicles 1 --laps 6 --timeout 600"/>
             <include file="$(find-pkg-share aichallenge_system_launch)/launch/mode/awsim_state_manager.launch.xml"/>
         </group>
     </group>

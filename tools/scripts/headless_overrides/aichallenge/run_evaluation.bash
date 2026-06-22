@@ -23,6 +23,12 @@ awsim_vehicles="${AWSIM_VEHICLES:-1}"
 awsim_laps="${AWSIM_LAPS:-6}"
 awsim_timeout="${AWSIM_TIMEOUT:-600}"
 awsim_extra_args="${AWSIM_EXTRA_ARGS:-}"
+awsim_prime_render_offload="${__NV_PRIME_RENDER_OFFLOAD:-1}"
+awsim_vk_layer_optimus="${__VK_LAYER_NV_optimus:-NVIDIA_only}"
+awsim_vk_icd_filenames="${VK_ICD_FILENAMES:-}"
+if [[ -z ${awsim_vk_icd_filenames} && -f /usr/share/vulkan/icd.d/nvidia_icd.json ]]; then
+    awsim_vk_icd_filenames="/usr/share/vulkan/icd.d/nvidia_icd.json"
+fi
 
 launch_args=(
     "domain_id:=${domain_id}"
@@ -38,6 +44,9 @@ launch_args=(
     "awsim_laps:=${awsim_laps}"
     "awsim_timeout:=${awsim_timeout}"
     "awsim_extra_args:=${awsim_extra_args}"
+    "awsim_prime_render_offload:=${awsim_prime_render_offload}"
+    "awsim_vk_layer_optimus:=${awsim_vk_layer_optimus}"
+    "awsim_vk_icd_filenames:=${awsim_vk_icd_filenames}"
 )
 
 if [[ -n "${CONTROL_METHOD:-}" ]]; then

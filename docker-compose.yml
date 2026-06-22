@@ -13,6 +13,9 @@ x-autoware-base: &autoware-base
     - TZ=Asia/Tokyo
     - RUN_MODE=${RUN_MODE:-}
     - SIM_MODE=${SIM_MODE:-}
+    - __NV_PRIME_RENDER_OFFLOAD=${__NV_PRIME_RENDER_OFFLOAD:-1}
+    - __VK_LAYER_NV_optimus=${__VK_LAYER_NV_optimus:-NVIDIA_only}
+    - VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-}
     - CMD=${CMD:-}
     - CONTROL_METHOD=${CONTROL_METHOD:-}
     - CAPTURE=${CAPTURE:-}

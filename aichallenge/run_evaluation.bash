@@ -17,6 +17,12 @@ export ROS_LOG_DIR="${ROS_HOME}/log"
 exec > >(tee -a "${log_file}") 2>&1
 
 sim_mode="${SIM_MODE:-eval}"
+awsim_prime_render_offload="${__NV_PRIME_RENDER_OFFLOAD:-1}"
+awsim_vk_layer_optimus="${__VK_LAYER_NV_optimus:-NVIDIA_only}"
+awsim_vk_icd_filenames="${VK_ICD_FILENAMES:-}"
+if [[ -z ${awsim_vk_icd_filenames} && -f /usr/share/vulkan/icd.d/nvidia_icd.json ]]; then
+    awsim_vk_icd_filenames="/usr/share/vulkan/icd.d/nvidia_icd.json"
+fi
 launch_args=(
     "domain_id:=${domain_id}"
     "sim_mode:=${sim_mode}"
@@ -26,6 +32,9 @@ launch_args=(
     "simulation:=true"
     "use_sim_time:=true"
     "run_rviz:=true"
+    "awsim_prime_render_offload:=${awsim_prime_render_offload}"
+    "awsim_vk_layer_optimus:=${awsim_vk_layer_optimus}"
+    "awsim_vk_icd_filenames:=${awsim_vk_icd_filenames}"
 )
 
 if [[ -n "${CONTROL_METHOD:-}" ]]; then
