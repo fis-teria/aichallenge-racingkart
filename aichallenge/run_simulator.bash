@@ -36,7 +36,7 @@ fi
 
 echo "[INFO] Starting AWSIM in '${mode}' mode"
 
-declare -a opts=("--start-mode" "${start_mode}" "--vehicles" "${vehicles}" "--laps" "${laps}" "--timeout" "${timeout}")
+declare -a opts=("-force-vulkan" "--start-mode" "${start_mode}" "--vehicles" "${vehicles}" "--laps" "${laps}" "--timeout" "${timeout}")
 declare -a extra_args
 read -r -a extra_args <<<"${awsim_extra_args}"
 opts+=("${extra_args[@]}")

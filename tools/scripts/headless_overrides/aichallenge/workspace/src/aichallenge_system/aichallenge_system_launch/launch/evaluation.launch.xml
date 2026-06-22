@@ -39,7 +39,7 @@
             name="aichallenge_awsim_eval"
             cwd="$(var log_dir)"
             output="both"
-            cmd="/aichallenge/simulator/AWSIM/AWSIM.x86_64 --start-mode sync --vehicles $(var awsim_vehicles) --laps $(var awsim_laps) --timeout $(var awsim_timeout) $(var awsim_extra_args)"/>
+            cmd="/aichallenge/simulator/AWSIM/AWSIM.x86_64 -force-vulkan --start-mode sync --vehicles $(var awsim_vehicles) --laps $(var awsim_laps) --timeout $(var awsim_timeout) $(var awsim_extra_args)"/>
     </group>
 
     <group if="$(var launch_awsim_state_manager)">
