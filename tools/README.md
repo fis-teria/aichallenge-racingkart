@@ -55,6 +55,8 @@ tools/scripts/apply_headless_overrides.sh --restore --backup-dir tools/scripts/b
 
 このパッチで上書きする主な内容:
 
+- `Makefile` は GUI の `gate` ボタンから呼ぶ `make gate1`〜`make gate3` を追加し、
+  Safety Gate シナリオを `make dev` と同じAWSIM/Autoware起動経路で実行します。
 - `docker-compose.yml` は `CONTROL_METHOD`、`LAUNCH_AWSIM`、`RUN_RVIZ`、
   `AWSIM_START_MODE`、`AWSIM_START_COUNT_SECONDS`、`AWSIM_VEHICLES`、
   `AWSIM_LAPS`、`AWSIM_TIMEOUT`、`AWSIM_EXTRA_ARGS` を Autoware/AWSIM

@@ -1,4 +1,5 @@
 # Repo-root relative files copied by tools/scripts/setup.sh.
+Makefile
 docker-compose.yml
 aichallenge/build_autoware.bash
 aichallenge/run_autoware.bash
