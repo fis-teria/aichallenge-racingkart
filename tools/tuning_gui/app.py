@@ -286,6 +286,8 @@ class CommandState:
     note: str
     headless: bool
     npc_count: int
+    simulator_options: dict[str, Any]
+    safety_gate: str | None
     status: str
     started_at: str
     finished_at: str | None
@@ -298,6 +300,43 @@ class CommandState:
 command_lock = threading.Lock()
 active_process: subprocess.Popen[str] | None = None
 active_state: CommandState | None = None
+
+SAFETY_GATES: dict[str, dict[str, Any]] = {
+    "gate1": {
+        "label": "gate1 障害物停止",
+        "scenario": "SafetyGate/scenario1.yaml",
+        "vehicles": 4,
+    },
+    "gate2": {
+        "label": "gate2 追い越し",
+        "scenario": "SafetyGate/scenario2.yaml",
+        "vehicles": 4,
+    },
+    "gate3": {
+        "label": "gate3 車線維持",
+        "scenario": "SafetyGate/scenario3.yaml",
+        "vehicles": 1,
+    },
+}
+
+SIMULATOR_BOOL_OPTIONS = {
+    "camera": "--camera",
+    "lidar": "--lidar",
+    "sound": "--sound",
+    "collisions": "--collisions",
+    "wall_recovery": "--wall-recovery",
+    "ranking": "--ranking",
+    "manual_mode": "--manual-mode",
+}
+
+AWSIM_FIXED_OPTIONS = {
+    "-force-vulkan",
+    "--start-mode",
+    "--start-count-seconds",
+    "--vehicles",
+    "--laps",
+    "--timeout",
+}
 
 
 def now_iso() -> str:
@@ -1320,6 +1359,218 @@ def normalize_npc_count(value: Any) -> int:
     return count
 
 
+def _clean_option_text(value: Any, field: str, limit: int = 240) -> str:
+    text = str(value or "").strip()
+    if "\n" in text or "\r" in text or "\0" in text:
+        raise ValueError(f"{field} must be a single line")
+    return text[:limit]
+
+
+def _choice(value: Any, allowed: set[str], field: str) -> str:
+    text = _clean_option_text(value, field, 80)
+    if text and text not in allowed:
+        raise ValueError(f"unknown {field}: {text}")
+    return text
+
+
+def _int_option(value: Any, field: str, minimum: int, maximum: int) -> str:
+    text = _clean_option_text(value, field, 40)
+    if not text:
+        return ""
+    try:
+        number = int(text)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an integer") from exc
+    if not minimum <= number <= maximum:
+        raise ValueError(f"{field} must be between {minimum} and {maximum}")
+    return str(number)
+
+
+def _float_option(value: Any, field: str, minimum: float | None = None, maximum: float | None = None) -> str:
+    text = _clean_option_text(value, field, 40)
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a number") from exc
+    if minimum is not None and number < minimum:
+        raise ValueError(f"{field} must be >= {minimum}")
+    if maximum is not None and number > maximum:
+        raise ValueError(f"{field} must be <= {maximum}")
+    return text
+
+
+def _laps_option(value: Any) -> str:
+    text = _clean_option_text(value, "laps", 40)
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in {"unlimited", "inf", "0"}:
+        return lowered
+    try:
+        number = int(text)
+    except ValueError as exc:
+        raise ValueError("laps must be an integer or unlimited") from exc
+    if number < 0:
+        raise ValueError("laps must be >= 0")
+    return str(number)
+
+
+def normalize_safety_gate(value: Any, required: bool = False) -> str | None:
+    gate_id = _clean_option_text(value, "safety_gate", 40)
+    if not gate_id:
+        if required:
+            raise ValueError("safety_gate is required")
+        return None
+    if gate_id not in SAFETY_GATES:
+        raise ValueError(f"unknown safety gate: {gate_id}")
+    return gate_id
+
+
+def normalize_simulator_options(raw: Any) -> dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    return {
+        "start_mode": _choice(data.get("start_mode"), {"off", "sync", "count"}, "start_mode"),
+        "start_count_seconds": _int_option(data.get("start_count_seconds"), "start_count_seconds", 0, 10),
+        "laps": _laps_option(data.get("laps")),
+        "timeout": _float_option(data.get("timeout"), "timeout", 0.0, None),
+        "simulator_npcs": _int_option(data.get("simulator_npcs"), "simulator_npcs", 0, 3),
+        "boosts": _int_option(data.get("boosts"), "boosts", 0, 5),
+        "camera": _choice(data.get("camera"), {"true", "false"}, "camera"),
+        "lidar": _choice(data.get("lidar"), {"true", "false"}, "lidar"),
+        "sound": _choice(data.get("sound"), {"true", "false"}, "sound"),
+        "collisions": _choice(data.get("collisions"), {"true", "false"}, "collisions"),
+        "wall_recovery": _choice(data.get("wall_recovery"), {"true", "false"}, "wall_recovery"),
+        "ranking": _choice(data.get("ranking"), {"true", "false"}, "ranking"),
+        "steer_source": _choice(
+            data.get("steer_source"),
+            {"ackermann", "actuation", "actuation-longitudinal-only"},
+            "steer_source",
+        ),
+        "manual_mode": _choice(data.get("manual_mode"), {"true", "false"}, "manual_mode"),
+        "scenario": _clean_option_text(data.get("scenario"), "scenario"),
+        "vehicle_poses": _clean_option_text(data.get("vehicle_poses"), "vehicle_poses"),
+        "json_path": _clean_option_text(data.get("json_path"), "json_path"),
+        "replay0": _clean_option_text(data.get("replay0"), "replay0"),
+        "multiplay_mode": _choice(data.get("multiplay_mode"), {"server", "client", "host"}, "multiplay_mode"),
+        "multiplay_address": _clean_option_text(data.get("multiplay_address"), "multiplay_address", 160),
+        "multiplay_port": _int_option(data.get("multiplay_port"), "multiplay_port", 1, 65535),
+        "multiplay_name": _clean_option_text(data.get("multiplay_name"), "multiplay_name", 80),
+        "multiplay_send_hz": _float_option(data.get("multiplay_send_hz"), "multiplay_send_hz", 0.1, 1000.0),
+        "raw_args": _clean_option_text(data.get("raw_args"), "raw_args", 1000),
+    }
+
+
+def awsim_option_keys_from_tokens(tokens: list[str]) -> list[str]:
+    keys: list[str] = []
+    for token in tokens:
+        if token.startswith("--"):
+            keys.append(token)
+        elif token.startswith("-") and token != "-" and not token[1:].replace(".", "", 1).isdigit():
+            keys.append(token)
+    return keys
+
+
+def awsim_option_keys_from_text(text: str) -> list[str]:
+    return awsim_option_keys_from_tokens(str(text or "").split())
+
+
+def validate_raw_awsim_args(raw_args: str, reserved_options: set[str]) -> None:
+    raw_keys = awsim_option_keys_from_text(raw_args)
+    duplicate_raw = {key for key in raw_keys if raw_keys.count(key) > 1}
+    duplicate_reserved = set(raw_keys) & reserved_options
+    duplicates = sorted(duplicate_raw | duplicate_reserved)
+    if duplicates:
+        joined = ", ".join(duplicates)
+        raise ValueError(f"raw_args duplicates AWSIM options already managed by GUI/launch: {joined}")
+
+
+def simulator_option_args(
+    options: dict[str, Any],
+    allow_scenario: bool = True,
+    include_session_options: bool = True,
+    skip_options: set[str] | None = None,
+    blocked_raw_options: set[str] | None = None,
+) -> str:
+    args: list[str] = []
+    skip_options = skip_options or set()
+    blocked_raw_options = blocked_raw_options or set()
+
+    def add(name: str, value: Any) -> None:
+        text = str(value or "").strip()
+        if text:
+            args.extend([name, text])
+
+    if include_session_options:
+        add("--start-mode", options.get("start_mode"))
+        add("--start-count-seconds", options.get("start_count_seconds"))
+        add("--laps", options.get("laps"))
+        add("--timeout", options.get("timeout"))
+    add("--npcs", options.get("simulator_npcs"))
+    add("--boosts", options.get("boosts"))
+    add("--steer-source", options.get("steer_source"))
+
+    for key, name in SIMULATOR_BOOL_OPTIONS.items():
+        if key in skip_options:
+            continue
+        add(name, options.get(key))
+
+    if allow_scenario:
+        add("--scenario", options.get("scenario"))
+    add("--vehicle-poses", options.get("vehicle_poses"))
+    add("--json_path", options.get("json_path"))
+    add("--replay0", options.get("replay0"))
+
+    add("--multiplay", options.get("multiplay_mode"))
+    add("--multiplay-address", options.get("multiplay_address"))
+    add("--multiplay-port", options.get("multiplay_port"))
+    add("--multiplay-name", options.get("multiplay_name"))
+    add("--multiplay-send-hz", options.get("multiplay_send_hz"))
+
+    parts: list[str] = []
+    if args:
+        parts.append(" ".join(args))
+    if options.get("raw_args"):
+        reserved_options = set(AWSIM_FIXED_OPTIONS)
+        reserved_options.update(awsim_option_keys_from_tokens(args))
+        reserved_options.update(blocked_raw_options)
+        if not allow_scenario:
+            reserved_options.add("--scenario")
+        validate_raw_awsim_args(str(options["raw_args"]), reserved_options)
+        parts.append(str(options["raw_args"]))
+    return " ".join(parts).strip()
+
+
+def awsim_extra_args(
+    headless: bool,
+    options: dict[str, Any],
+    allow_scenario: bool = True,
+    include_session_options: bool = True,
+) -> str:
+    parts: list[str] = []
+    skip_options: set[str] = set()
+    blocked_raw_options: set[str] = set()
+    if headless:
+        parts.append(AWSIM_HEADLESS_ARGS)
+        skip_options.update({"camera", "lidar"})
+        blocked_raw_options.update(awsim_option_keys_from_text(AWSIM_HEADLESS_ARGS))
+    option_args = simulator_option_args(
+        options,
+        allow_scenario=allow_scenario,
+        include_session_options=include_session_options,
+        skip_options=skip_options,
+        blocked_raw_options=blocked_raw_options,
+    )
+    if option_args:
+        parts.append(option_args)
+    return " ".join(parts).strip()
+
+
+def env_assignments(pairs: dict[str, str]) -> str:
+    return "".join(f"{key}={shell_quote(value)} " for key, value in pairs.items() if value is not None)
+
+
 def evalwrap_label(method: str, note: str, headless: bool, npc_count: int) -> str:
     profile = "headless-eval" if headless else "gui-eval"
     if npc_count:
@@ -1335,19 +1586,17 @@ def command_for(
     note: str = "",
     headless: bool = False,
     npc_count: int = 0,
+    simulator_options: dict[str, Any] | None = None,
+    safety_gate: str | None = None,
 ) -> str:
     npc_count = normalize_npc_count(npc_count)
+    simulator_options = normalize_simulator_options(simulator_options)
     total_vehicles = npc_count + 1
-    method_prefix = f"CONTROL_METHOD={shell_quote(method)} "
-    eval_prefix = eval_env_prefix(method, headless, total_vehicles)
+    eval_prefix = eval_env_prefix(method, headless, total_vehicles, simulator_options)
     if action == "build":
         return "make autoware-build"
     if action == "dev":
-        run = (
-            command_for_headless_dev(method, total_vehicles)
-            if headless
-            else f"ROSBAG=true {method_prefix}make {dev_target(total_vehicles)}"
-        )
+        run = command_for_dev(method, total_vehicles, headless, simulator_options)
         return f"make autoware-build && {run}" if build_first else run
     if action == "eval":
         label = evalwrap_label(method, note, headless, npc_count)
@@ -1359,6 +1608,23 @@ def command_for(
         return run
     if action == "quick-eval":
         run = f"{eval_prefix}make eval"
+        return f"make autoware-build && {run}" if build_first else run
+    if action == "gate":
+        gate_id = normalize_safety_gate(safety_gate, required=True)
+        gate_extra_args = awsim_extra_args(
+            headless,
+            simulator_options,
+            allow_scenario=False,
+            include_session_options=False,
+        )
+        pairs = {"CONTROL_METHOD": method}
+        if simulator_options.get("timeout"):
+            pairs["AWSIM_TIMEOUT"] = str(simulator_options["timeout"])
+        if simulator_options.get("start_count_seconds"):
+            pairs["AWSIM_START_COUNT_SECONDS"] = str(simulator_options["start_count_seconds"])
+        pairs["AWSIM_EXTRA_ARGS"] = ""
+        pairs["GATE_EXTRA_ARGS"] = gate_extra_args
+        run = f"{env_assignments(pairs)}make {gate_id}"
         return f"make autoware-build && {run}" if build_first else run
     if action == "ingest":
         label = evalwrap_label(method, note, headless, npc_count).replace("-eval", "-log")
@@ -1380,27 +1646,44 @@ def dev_target(total_vehicles: int) -> str:
 AWSIM_HEADLESS_ARGS = "-batchmode -nographics --camera false --lidar false"
 
 
-def eval_env_prefix(method: str, headless: bool, total_vehicles: int) -> str:
+def eval_env_prefix(method: str, headless: bool, total_vehicles: int, simulator_options: dict[str, Any]) -> str:
     if not 1 <= total_vehicles <= 4:
         raise ValueError("total vehicles must be between 1 and 4")
     pairs = {
         "CONTROL_METHOD": method,
         "AWSIM_VEHICLES": str(total_vehicles),
     }
-    if headless:
-        pairs["AWSIM_EXTRA_ARGS"] = AWSIM_HEADLESS_ARGS
-    return "".join(f"{key}={shell_quote(value)} " for key, value in pairs.items())
+    if simulator_options.get("start_mode"):
+        pairs["AWSIM_START_MODE"] = str(simulator_options["start_mode"])
+    if simulator_options.get("start_count_seconds"):
+        pairs["AWSIM_START_COUNT_SECONDS"] = str(simulator_options["start_count_seconds"])
+    if simulator_options.get("laps"):
+        pairs["AWSIM_LAPS"] = str(simulator_options["laps"])
+    if simulator_options.get("timeout"):
+        pairs["AWSIM_TIMEOUT"] = str(simulator_options["timeout"])
+    extra_args = awsim_extra_args(headless, simulator_options, include_session_options=False)
+    pairs["AWSIM_EXTRA_ARGS"] = extra_args
+    return env_assignments(pairs)
 
 
-def command_for_headless_dev(method: str, total_vehicles: int) -> str:
+def command_for_dev(method: str, total_vehicles: int, headless: bool, simulator_options: dict[str, Any]) -> str:
     if not 1 <= total_vehicles <= 4:
         raise ValueError("total vehicles must be between 1 and 4")
-    return (
-        "ROSBAG=true "
-        f"CONTROL_METHOD={shell_quote(method)} "
-        f"AWSIM_EXTRA_ARGS={shell_quote(AWSIM_HEADLESS_ARGS)} "
-        f"make {dev_target(total_vehicles)}"
-    )
+    pairs = {
+        "ROSBAG": "true",
+        "CONTROL_METHOD": method,
+    }
+    if simulator_options.get("start_mode"):
+        pairs["AWSIM_START_MODE"] = str(simulator_options["start_mode"])
+    if simulator_options.get("start_count_seconds"):
+        pairs["AWSIM_START_COUNT_SECONDS"] = str(simulator_options["start_count_seconds"])
+    if simulator_options.get("laps"):
+        pairs["AWSIM_LAPS"] = str(simulator_options["laps"])
+    if simulator_options.get("timeout"):
+        pairs["AWSIM_TIMEOUT"] = str(simulator_options["timeout"])
+    extra_args = awsim_extra_args(headless, simulator_options, include_session_options=False)
+    pairs["AWSIM_EXTRA_ARGS"] = extra_args
+    return f"{env_assignments(pairs)}make {dev_target(total_vehicles)}"
 
 
 def shell_quote(value: str) -> str:
@@ -1414,19 +1697,23 @@ def start_command(
     note: str,
     headless: bool = False,
     npc_count: int = 0,
+    simulator_options: dict[str, Any] | None = None,
+    safety_gate: str | None = None,
 ) -> CommandState:
     global active_process, active_state
     if method not in parse_control_methods():
         raise ValueError(f"unknown control_method: {method}")
     npc_count = normalize_npc_count(npc_count)
+    simulator_options = normalize_simulator_options(simulator_options)
+    safety_gate = normalize_safety_gate(safety_gate, required=(action == "gate"))
     with command_lock:
         if active_process is not None and active_process.poll() is None:
             raise RuntimeError("command is already running")
         ensure_dirs()
         command_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         log_path = COMMAND_DIR / f"{command_id}-{action}.log"
-        snapshot_dir = snapshot_files(command_id, method) if action in {"dev", "eval", "quick-eval", "ingest", "build"} else None
-        command = command_for(action, method, build_first, note, headless, npc_count)
+        snapshot_dir = snapshot_files(command_id, method) if action in {"dev", "eval", "quick-eval", "ingest", "build", "gate"} else None
+        command = command_for(action, method, build_first, note, headless, npc_count, simulator_options, safety_gate)
         log = log_path.open("w", encoding="utf-8", buffering=1)
         log.write(f"$ {command}\n")
         process = subprocess.Popen(
@@ -1446,6 +1733,8 @@ def start_command(
             note=note,
             headless=headless,
             npc_count=npc_count,
+            simulator_options=simulator_options,
+            safety_gate=safety_gate,
             status="running",
             started_at=now_iso(),
             finished_at=None,
@@ -1478,7 +1767,7 @@ def _watch_command(process: subprocess.Popen[str], log: Any, state: CommandState
         if state.action == "build" and returncode == 0:
             store["last_build_at"] = state.finished_at
             store.pop("dirty_since", None)
-        elif state.action in {"dev", "eval", "quick-eval", "ingest"} and returncode == 0:
+        elif state.action in {"dev", "eval", "quick-eval", "ingest", "gate"} and returncode == 0:
             store["last_run_at"] = state.finished_at
             if "make autoware-build" in state.command or (
                 state.action == "eval" and "--skip-build" not in state.command
@@ -1837,6 +2126,10 @@ def app_state() -> dict[str, Any]:
         "last_run_at": state.get("last_run_at"),
         "command": command_status(),
         "presets": list_presets(),
+        "safety_gates": [
+            {"id": gate_id, **gate}
+            for gate_id, gate in SAFETY_GATES.items()
+        ],
     }
 
 
@@ -1972,7 +2265,9 @@ class Handler(BaseHTTPRequestHandler):
                 note = str(body.get("note", ""))
                 headless = bool(body.get("headless", False))
                 npc_count = normalize_npc_count(body.get("npc_count", 0))
-                state = start_command(action, method, build_first, note, headless, npc_count)
+                simulator_options = normalize_simulator_options(body.get("simulator_options"))
+                safety_gate = normalize_safety_gate(body.get("safety_gate"), required=(action == "gate"))
+                state = start_command(action, method, build_first, note, headless, npc_count, simulator_options, safety_gate)
                 self._json(asdict(state))
             elif parsed.path == "/api/stop":
                 stop_active_command()

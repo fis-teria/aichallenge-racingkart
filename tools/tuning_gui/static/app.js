@@ -38,6 +38,36 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const THEME_KEY = "tuning-gui-theme";
+const RUN_SETTINGS_KEY = "tuning-gui-run-settings";
+const RUN_SETTING_IDS = [
+  "runHeadless",
+  "npcCount",
+  "safetyGate",
+  "simStartMode",
+  "simStartCountSeconds",
+  "simLaps",
+  "simTimeout",
+  "simNpcVehicles",
+  "simBoosts",
+  "simCamera",
+  "simLidar",
+  "simSound",
+  "simCollisions",
+  "simWallRecovery",
+  "simRanking",
+  "simSteerSource",
+  "simManualMode",
+  "simScenario",
+  "simVehiclePoses",
+  "simReplay0",
+  "simJsonPath",
+  "simRawArgs",
+  "multiMode",
+  "multiAddress",
+  "multiPort",
+  "multiName",
+  "multiSendHz",
+];
 const XML_PRIORITY_COLUMNS = [
   "name",
   "default",
@@ -113,6 +143,113 @@ function valueOr(value, fallback) {
   return value === null || value === undefined ? fallback : value;
 }
 
+function inputValue(id) {
+  const el = $(id);
+  return el ? String(el.value || "").trim() : "";
+}
+
+function readSavedRunSettings() {
+  try {
+    return JSON.parse(localStorage.getItem(RUN_SETTINGS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function restoreRunSettings() {
+  const saved = readSavedRunSettings();
+  for (const id of RUN_SETTING_IDS) {
+    const el = $(id);
+    if (!el || !(id in saved)) continue;
+    if (el.type === "checkbox") {
+      el.checked = Boolean(saved[id]);
+    } else {
+      el.value = saved[id];
+    }
+  }
+}
+
+function saveRunSettings() {
+  const payload = {};
+  for (const id of RUN_SETTING_IDS) {
+    const el = $(id);
+    if (!el) continue;
+    payload[id] = el.type === "checkbox" ? el.checked : el.value;
+  }
+  localStorage.setItem(RUN_SETTINGS_KEY, JSON.stringify(payload));
+}
+
+function collectSimulatorOptions() {
+  return {
+    start_mode: inputValue("simStartMode"),
+    start_count_seconds: inputValue("simStartCountSeconds"),
+    laps: inputValue("simLaps"),
+    timeout: inputValue("simTimeout"),
+    simulator_npcs: inputValue("simNpcVehicles"),
+    boosts: inputValue("simBoosts"),
+    camera: inputValue("simCamera"),
+    lidar: inputValue("simLidar"),
+    sound: inputValue("simSound"),
+    collisions: inputValue("simCollisions"),
+    wall_recovery: inputValue("simWallRecovery"),
+    ranking: inputValue("simRanking"),
+    steer_source: inputValue("simSteerSource"),
+    manual_mode: inputValue("simManualMode"),
+    scenario: inputValue("simScenario"),
+    vehicle_poses: inputValue("simVehiclePoses"),
+    replay0: inputValue("simReplay0"),
+    json_path: inputValue("simJsonPath"),
+    raw_args: inputValue("simRawArgs"),
+    multiplay_mode: inputValue("multiMode"),
+    multiplay_address: inputValue("multiAddress"),
+    multiplay_port: inputValue("multiPort"),
+    multiplay_name: inputValue("multiName"),
+    multiplay_send_hz: inputValue("multiSendHz"),
+  };
+}
+
+function renderSafetyGates(data) {
+  const select = $("safetyGate");
+  if (!select) return;
+  const saved = readSavedRunSettings();
+  const selected = select.value || saved.safetyGate || "gate1";
+  select.innerHTML = "";
+  for (const gate of data.safety_gates || []) {
+    const option = document.createElement("option");
+    option.value = gate.id;
+    option.textContent = gate.label || gate.id;
+    option.selected = gate.id === selected;
+    select.appendChild(option);
+  }
+  if (select.options.length && !select.value) {
+    select.value = select.options[0].value;
+  }
+}
+
+function setSettingsTab(tab) {
+  const target = tab || "simulator";
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.settingsTab === target);
+  });
+  document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.settingsPanel === target);
+  });
+}
+
+function setRunSettingsMenu(open) {
+  const menu = $("runSettingsMenu");
+  const toggle = $("runSettingsToggle");
+  if (!menu || !toggle) return;
+  menu.hidden = !open;
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function toggleRunSettingsMenu() {
+  const menu = $("runSettingsMenu");
+  if (!menu) return;
+  setRunSettingsMenu(menu.hidden);
+}
+
 async function loadState() {
   const data = await api("/api/state");
   state.app = data;
@@ -161,6 +298,7 @@ function renderState() {
     presetSelect.appendChild(option);
   }
 
+  renderSafetyGates(data);
   renderStatus(data.command);
 }
 
@@ -188,8 +326,21 @@ function renderStatus(commandState) {
     $(id).disabled = locked || pathActive;
   }
   $("stopCommand").disabled = !locked;
-  $("runHeadless").disabled = locked;
-  $("npcCount").disabled = locked;
+  updateRunSettingsAvailability(locked);
+}
+
+function updateRunSettingsAvailability(locked = false) {
+  const headless = $("runHeadless") && $("runHeadless").checked;
+  for (const id of RUN_SETTING_IDS) {
+    const el = $(id);
+    if (el) el.disabled = locked;
+  }
+  for (const id of ["simCamera", "simLidar"]) {
+    const el = $(id);
+    if (!el) continue;
+    el.disabled = locked || headless;
+    el.title = headless ? "AWSIMヘッドレス中はcamera/LiDARをoffとして起動します" : "";
+  }
 }
 
 function setCommandLog(text) {
@@ -1245,6 +1396,12 @@ async function run(action) {
   const note = $("runNote").value;
   const headless = $("runHeadless").checked;
   const npcCount = Number($("npcCount").value || 0);
+  const safetyGate = $("safetyGate").value;
+  const simulatorOptions = collectSimulatorOptions();
+  saveRunSettings();
+  if (action === "gate" && !safetyGate) {
+    throw new Error("Safety Gateを選んでね");
+  }
   const data = await api("/api/run", {
     method: "POST",
     body: JSON.stringify({
@@ -1254,6 +1411,8 @@ async function run(action) {
       note,
       headless,
       npc_count: npcCount,
+      safety_gate: safetyGate,
+      simulator_options: simulatorOptions,
     }),
   });
   toast(`${action} を開始したよ`);
@@ -1622,6 +1781,33 @@ function escapeHtml(value) {
 
 function bind() {
   applyTheme(currentTheme());
+  restoreRunSettings();
+  setSettingsTab("simulator");
+  for (const id of RUN_SETTING_IDS) {
+    const el = $(id);
+    if (!el) continue;
+    el.addEventListener(el.tagName === "INPUT" ? "input" : "change", () => {
+      saveRunSettings();
+      updateRunSettingsAvailability(Boolean(state.app && state.app.command && state.app.command.running));
+    });
+  }
+  updateRunSettingsAvailability(false);
+  $("runSettingsToggle").addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleRunSettingsMenu();
+  });
+  $("runSettingsMenu").addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    button.addEventListener("click", () => setSettingsTab(button.dataset.settingsTab));
+  });
+  document.addEventListener("click", () => setRunSettingsMenu(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      setRunSettingsMenu(false);
+    }
+  });
   $("themeToggle").addEventListener("change", () => {
     applyTheme($("themeToggle").checked ? "dark" : "light");
   });
@@ -1650,6 +1836,7 @@ function bind() {
   $("saveFileBuild").addEventListener("click", () => saveFile(true).catch((e) => toast(e.message)));
   $("runBuild").addEventListener("click", () => run("build").catch((e) => toast(e.message)));
   $("runDev").addEventListener("click", () => run("dev").catch((e) => toast(e.message)));
+  $("runGate").addEventListener("click", () => run("gate").catch((e) => toast(e.message)));
   $("runEval").addEventListener("click", () => run("eval").catch((e) => toast(e.message)));
   $("runQuickEval").addEventListener("click", () => run("quick-eval").catch((e) => toast(e.message)));
   $("runIngest").addEventListener("click", () => run("ingest").catch((e) => toast(e.message)));

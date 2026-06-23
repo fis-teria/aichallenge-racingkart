@@ -22,6 +22,11 @@ tools/evalwrap ingest --label manual --path output/latest
 tools/run_tuning_gui.bash --background
 ```
 
+## 初心者向け資料
+
+- [Tuning GUI 変更点ガイド ROS 2 初心者向け](docs/tuning_gui_changes_for_ros2_beginners.md)
+- [evalwrap レポート出力ガイド ROS 2 初心者向け](docs/evalwrap_report_outputs_for_ros2_beginners.md)
+
 ## tuning GUI ヘッドレス連携パッチ
 
 `tuning_gui` から control method、AWSIM ヘッドレス、NPC 台数を切り替えるには、
@@ -51,12 +56,16 @@ tools/scripts/apply_headless_overrides.sh --restore --backup-dir tools/scripts/b
 このパッチで上書きする主な内容:
 
 - `docker-compose.yml` は `CONTROL_METHOD`、`LAUNCH_AWSIM`、`RUN_RVIZ`、
-  `AWSIM_VEHICLES`、`AWSIM_LAPS`、`AWSIM_TIMEOUT`、`AWSIM_EXTRA_ARGS`
-  を Autoware コンテナへ渡します。
+  `AWSIM_START_MODE`、`AWSIM_START_COUNT_SECONDS`、`AWSIM_VEHICLES`、
+  `AWSIM_LAPS`、`AWSIM_TIMEOUT`、`AWSIM_EXTRA_ARGS` を Autoware/AWSIM
+  コンテナへ渡します。
 - `aichallenge/run_evaluation.bash` は上記の環境変数を
   `evaluation.launch.xml` の launch 引数へ変換します。ヘッドレス時は
   `AWSIM_EXTRA_ARGS='-batchmode -nographics --camera false --lidar false'`
   を渡し、AWSIM を起動したまま画面描画と重いセンサ描画を抑えます。
+- `aichallenge/run_simulator.bash` は dev 側のAWSIM起動でも
+  `AWSIM_START_MODE`、`AWSIM_VEHICLES`、`AWSIM_LAPS`、`AWSIM_TIMEOUT`
+  を受け取り、Tuning GUIのSafety GateやSimulator設定と同じ起動経路を使います。
 - `aichallenge/run_autoware.bash` は `CONTROL_METHOD` を通常 dev 起動にも
   渡します。`aichallenge/build_autoware.bash` は
   `COLCON_PARALLEL_WORKERS` を見て、重い環境では並列数を絞れるようにしています。

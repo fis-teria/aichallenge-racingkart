@@ -84,13 +84,15 @@ body {
 }
 
 .top-actions {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
 h1,
-h2 {
+h2,
+h3 {
   margin: 0;
   line-height: 1.2;
   font-weight: 700;
@@ -102,6 +104,10 @@ h1 {
 
 h2 {
   font-size: 15px;
+}
+
+h3 {
+  font-size: 13px;
 }
 
 p {
@@ -286,6 +292,57 @@ input {
 .theme-toggle input:focus-visible + .toggle-track {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
+}
+
+.settings-menu {
+  position: relative;
+}
+
+.settings-toggle {
+  min-width: 118px;
+}
+
+.settings-menu-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 20;
+  width: min(720px, calc(100vw - 24px));
+  max-height: min(74vh, 720px);
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 16px 42px var(--shadow);
+}
+
+.settings-menu-panel[hidden] {
+  display: none;
+}
+
+.settings-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.settings-tab.active {
+  border-color: var(--blue);
+  background: var(--active);
+}
+
+.settings-pane {
+  display: none;
+}
+
+.settings-pane.active {
+  display: block;
+}
+
+.settings-pane .check {
+  margin-top: 10px;
 }
 
 .button-row {
@@ -505,6 +562,18 @@ input {
   margin-top: 10px;
 }
 
+.run-subsection {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.run-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 8px;
+}
+
 .file-list {
   display: grid;
   gap: 6px;
@@ -717,6 +786,15 @@ a {
 }
 
 @media (max-width: 1100px) {
+  .topbar {
+    align-items: flex-start;
+  }
+
+  .top-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
   .layout {
     grid-template-columns: 1fr;
     height: auto;
@@ -739,5 +817,32 @@ a {
   .path-side {
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    flex-direction: column;
+  }
+
+  .top-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .settings-menu {
+    position: static;
+  }
+
+  .settings-menu-panel {
+    position: fixed;
+    inset: 72px 12px auto;
+    width: auto;
+    max-height: calc(100vh - 92px);
+  }
+
+  .settings-tabs,
+  .run-settings-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -16,6 +16,190 @@
         <p id="repoRoot"></p>
       </div>
       <div class="top-actions">
+        <div class="settings-menu">
+          <button id="runSettingsToggle" class="settings-toggle" type="button" aria-expanded="false" aria-controls="runSettingsMenu">
+            Run Settings
+          </button>
+          <div id="runSettingsMenu" class="settings-menu-panel" hidden>
+            <div class="settings-tabs" role="tablist" aria-label="Run settings">
+              <button class="settings-tab active" type="button" data-settings-tab="simulator">Simulator</button>
+              <button class="settings-tab" type="button" data-settings-tab="safety">Safety Gate</button>
+              <button class="settings-tab" type="button" data-settings-tab="multiplay">Multiplay</button>
+            </div>
+
+            <section class="settings-pane active" data-settings-panel="simulator">
+              <h3>Simulator</h3>
+              <label class="check">
+                <input id="runHeadless" type="checkbox">
+                <span>AWSIMヘッドレス</span>
+              </label>
+              <label class="field">
+                <span>追加Autoware車両</span>
+                <select id="npcCount">
+                  <option value="0">0台</option>
+                  <option value="1">1台</option>
+                  <option value="2">2台</option>
+                  <option value="3">3台</option>
+                </select>
+              </label>
+              <div class="run-settings-grid">
+                <label class="field">
+                  <span>start</span>
+                  <select id="simStartMode">
+                    <option value="">default</option>
+                    <option value="off">off</option>
+                    <option value="sync">sync</option>
+                    <option value="count">count</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>count sec</span>
+                  <input id="simStartCountSeconds" type="number" min="0" max="10" step="1" placeholder="10">
+                </label>
+                <label class="field">
+                  <span>laps</span>
+                  <input id="simLaps" type="text" placeholder="6 / unlimited">
+                </label>
+                <label class="field">
+                  <span>timeout</span>
+                  <input id="simTimeout" type="number" min="0" step="1" placeholder="600">
+                </label>
+                <label class="field">
+                  <span>NPC車両</span>
+                  <input id="simNpcVehicles" type="number" min="0" max="3" step="1" placeholder="0">
+                </label>
+                <label class="field">
+                  <span>boosts</span>
+                  <input id="simBoosts" type="number" min="0" max="5" step="1" placeholder="5">
+                </label>
+                <label class="field">
+                  <span>camera</span>
+                  <select id="simCamera">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>LiDAR</span>
+                  <select id="simLidar">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>sound</span>
+                  <select id="simSound">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>collision</span>
+                  <select id="simCollisions">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>wall rec.</span>
+                  <select id="simWallRecovery">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>ranking</span>
+                  <select id="simRanking">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>steer</span>
+                  <select id="simSteerSource">
+                    <option value="">default</option>
+                    <option value="ackermann">ackermann</option>
+                    <option value="actuation">actuation</option>
+                    <option value="actuation-longitudinal-only">actuation-longitudinal-only</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>manual</span>
+                  <select id="simManualMode">
+                    <option value="">default</option>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </label>
+              </div>
+              <label class="field">
+                <span>scenario path</span>
+                <input id="simScenario" type="text" placeholder="Scenarios/scenario1.yaml">
+              </label>
+              <label class="field">
+                <span>vehicle poses</span>
+                <input id="simVehiclePoses" type="text" placeholder="poses.yaml">
+              </label>
+              <label class="field">
+                <span>replay0</span>
+                <input id="simReplay0" type="text" placeholder="result-details.json">
+              </label>
+              <label class="field">
+                <span>json path</span>
+                <input id="simJsonPath" type="text" placeholder="config.json">
+              </label>
+              <label class="field">
+                <span>raw args</span>
+                <input id="simRawArgs" type="text" placeholder="--endless true">
+              </label>
+            </section>
+
+            <section class="settings-pane" data-settings-panel="safety">
+              <h3>Safety Gate</h3>
+              <label class="field">
+                <span>scenario</span>
+                <select id="safetyGate"></select>
+              </label>
+            </section>
+
+            <section class="settings-pane" data-settings-panel="multiplay">
+              <h3>Multiplay</h3>
+              <div class="run-settings-grid">
+                <label class="field">
+                  <span>mode</span>
+                  <select id="multiMode">
+                    <option value="">off</option>
+                    <option value="server">server</option>
+                    <option value="client">client</option>
+                    <option value="host">host</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>port</span>
+                  <input id="multiPort" type="number" min="1" max="65535" step="1" placeholder="50051">
+                </label>
+                <label class="field">
+                  <span>send Hz</span>
+                  <input id="multiSendHz" type="number" min="0.1" step="0.1" placeholder="50.0">
+                </label>
+                <label class="field">
+                  <span>name</span>
+                  <input id="multiName" type="text" placeholder="player">
+                </label>
+              </div>
+              <label class="field">
+                <span>address</span>
+                <input id="multiAddress" type="text" placeholder="localhost">
+              </label>
+            </section>
+          </div>
+        </div>
         <label class="theme-toggle" title="theme">
           <input id="themeToggle" type="checkbox">
           <span class="toggle-track"><span class="toggle-thumb"></span></span>
@@ -197,19 +381,6 @@
             <input id="buildFirst" type="checkbox" checked>
             <span>実行前に更新ビルド</span>
           </label>
-          <label class="check">
-            <input id="runHeadless" type="checkbox">
-            <span>AWSIMヘッドレス</span>
-          </label>
-          <label class="field">
-            <span>NPC台数</span>
-            <select id="npcCount">
-              <option value="0">0台</option>
-              <option value="1">1台</option>
-              <option value="2">2台</option>
-              <option value="3">3台</option>
-            </select>
-          </label>
           <label class="field">
             <span>run note</span>
             <input id="runNote" type="text" placeholder="試行メモ">
@@ -217,6 +388,7 @@
           <div class="run-grid">
             <button id="runBuild">build</button>
             <button id="runDev">dev</button>
+            <button id="runGate">gate</button>
             <button id="runEval">evalwrap</button>
             <button id="runQuickEval">quick eval</button>
             <button id="runIngest">log化</button>

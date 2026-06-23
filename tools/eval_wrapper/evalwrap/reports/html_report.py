@@ -41,8 +41,17 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
         "<section><h2>Section Splits</h2>",
         _split_table(run_dir),
         "</section>",
-        "<section><h2>Target Speed Profile</h2>",
+        "<section><h2>Speed Profile</h2>",
         _target_speed_profile_section(run_dir),
+        "</section>",
+        "<section><h2>Track Diagnostics</h2>",
+        _track_diagnostics_section(run_dir),
+        "</section>",
+        "<section><h2>Control Response</h2>",
+        _control_response_section(run_dir),
+        "</section>",
+        "<section><h2>Corner Performance</h2>",
+        _corner_performance_section(run_dir),
         "</section>",
         "<section><h2>Grade & Acceleration Profile</h2>",
         _grade_profile_section(run_dir),
@@ -107,15 +116,22 @@ th { background: #f1f5f9; }
 	.speed-profile-domain:first-child { margin-top: 0; }
 	.speed-profile-title { margin: 0 0 10px; font-size: 15px; color: #334155; }
 	.speed-profile-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr); gap: 16px; align-items: start; }
+	.analysis-grid { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 16px; align-items: start; }
+	.analysis-card { min-width: 0; }
+	.analysis-card-title { margin: 0 0 8px; font-size: 13px; color: #475569; }
 	.speed-panel { min-width: 0; }
 	.speed-map-svg, .speed-chart-svg { display: block; width: 100%; height: auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; }
 	.speed-map-base { fill: none; stroke: #cbd5e1; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 	.speed-map-segment { fill: none; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
 	.speed-drop-marker { fill: #ef4444; stroke: #ffffff; stroke-width: 1.5; }
+	.event-marker { stroke: #ffffff; stroke-width: 1.4; }
+	.corner-perf-segment { fill: none; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
 	.speed-chart-axis { stroke: #94a3b8; stroke-width: 1; }
 	.speed-chart-grid { stroke: #e5e7eb; stroke-width: 1; }
 	.speed-chart-target { fill: none; stroke: #2563eb; stroke-width: 2.2; stroke-linejoin: round; }
 	.speed-chart-actual { fill: none; stroke: #f97316; stroke-width: 1.8; stroke-linejoin: round; }
+	.speed-chart-command { fill: none; stroke: #7c3aed; stroke-width: 1.8; stroke-linejoin: round; }
+	.speed-chart-yaw { fill: none; stroke: #0f766e; stroke-width: 1.8; stroke-linejoin: round; }
 	.speed-chart-label { fill: #475569; font-size: 11px; }
 	.grade-profile-domain { margin-top: 18px; }
 	.grade-profile-domain:first-child { margin-top: 0; }
@@ -135,6 +151,7 @@ th { background: #f1f5f9; }
 	  .corner-map-panel { position: static; }
 	  .corner-map-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 	  .speed-profile-layout { grid-template-columns: 1fr; }
+	  .analysis-grid { grid-template-columns: 1fr; }
 	}
 	</style>
 	"""
@@ -283,7 +300,7 @@ def _target_speed_profile_section(run_dir: Path) -> str:
                     "<article class='speed-profile-domain'>",
                     f"<h3 class='speed-profile-title'>{_e(domain_id)}</h3>",
                     "<div class='speed-profile-layout'>",
-                    f"<div class='speed-panel'>{_target_speed_map_svg(profile_rows, drops)}</div>",
+                    f"<div class='speed-panel'>{_target_speed_map_svg(profile_rows, drops, f'actual-speed-{domain_id}')}</div>",
                     f"<div class='speed-panel'>{_target_speed_chart_svg(profile_rows)}</div>",
                     "</div>",
                     _target_speed_drop_table(drops),
@@ -294,6 +311,134 @@ def _target_speed_profile_section(run_dir: Path) -> str:
     if not parts:
         return "<p>No target speed profile rows could be matched to vehicle position.</p>"
     return "\n".join(parts)
+
+
+def _track_diagnostics_section(run_dir: Path) -> str:
+    processed_dir = run_dir / "processed"
+    vehicle_rows = _read_csv_rows(processed_dir / "vehicle_timeseries.csv")
+    control_rows = _read_csv_rows(processed_dir / "control_timeseries.csv")
+    speed_debug_rows = _read_csv_rows(processed_dir / "speed_profile_debug.csv")
+    event_rows = _read_csv_rows(processed_dir / "events.csv")
+    if not vehicle_rows:
+        return "<p>No vehicle time-series data was generated.</p>"
+
+    domain_ids = sorted({row.get("domain_id", "") for row in vehicle_rows if row.get("domain_id")})
+    parts: list[str] = []
+    for domain_id in domain_ids:
+        profile_rows = _target_speed_profile_rows(
+            [row for row in vehicle_rows if row.get("domain_id") == domain_id],
+            [row for row in control_rows if row.get("domain_id") == domain_id],
+        )
+        if len(profile_rows) < 2:
+            continue
+        _attach_speed_debug(profile_rows, [row for row in speed_debug_rows if row.get("domain_id") == domain_id])
+        markers = _event_marker_rows([row for row in event_rows if row.get("domain_id") == domain_id], profile_rows)
+        parts.append(
+            "\n".join(
+                [
+                    "<article class='speed-profile-domain'>",
+                    f"<h3 class='speed-profile-title'>{_e(domain_id)}</h3>",
+                    "<div class='analysis-grid'>",
+                    _analysis_card("Speed Error Map", _speed_error_map_svg(profile_rows, f"speed-error-{domain_id}")),
+                    _analysis_card("Path Error Map", _path_error_map_svg(profile_rows, f"path-error-{domain_id}")),
+                    _analysis_card("Speed Limit Source Map", _speed_source_map_svg(profile_rows, f"speed-source-{domain_id}")),
+                    _analysis_card("Event Marker Map", _event_marker_map_svg(profile_rows, markers, f"event-map-{domain_id}")),
+                    "</div>",
+                    "</article>",
+                ]
+            )
+        )
+    if not parts:
+        return "<p>No diagnostic rows could be matched to vehicle position.</p>"
+    return "\n".join(parts)
+
+
+def _control_response_section(run_dir: Path) -> str:
+    processed_dir = run_dir / "processed"
+    vehicle_rows = _read_csv_rows(processed_dir / "vehicle_timeseries.csv")
+    control_rows = _read_csv_rows(processed_dir / "control_timeseries.csv")
+    if not vehicle_rows or not control_rows:
+        return "<p>No control response data was generated.</p>"
+
+    domain_ids = sorted({row.get("domain_id", "") for row in vehicle_rows if row.get("domain_id")})
+    parts: list[str] = []
+    for domain_id in domain_ids:
+        rows = _target_speed_profile_rows(
+            [row for row in vehicle_rows if row.get("domain_id") == domain_id],
+            [row for row in control_rows if row.get("domain_id") == domain_id],
+        )
+        if len(rows) < 2:
+            continue
+        parts.append(
+            "\n".join(
+                [
+                    "<article class='speed-profile-domain'>",
+                    f"<h3 class='speed-profile-title'>{_e(domain_id)}</h3>",
+                    "<div class='analysis-grid'>",
+                    _analysis_card("Acceleration Response", _accel_response_chart_svg(rows)),
+                    _analysis_card("Steering Response", _steering_response_chart_svg(rows)),
+                    "</div>",
+                    "</article>",
+                ]
+            )
+        )
+    if not parts:
+        return "<p>No control response rows could be matched to vehicle position.</p>"
+    return "\n".join(parts)
+
+
+def _corner_performance_section(run_dir: Path) -> str:
+    processed_dir = run_dir / "processed"
+    corner_rows = _read_corner_summary(processed_dir / "corner_summary.csv")
+    reference_rows = _read_trajectory_reference(processed_dir / "trajectory_reference.csv")
+    if not corner_rows or not reference_rows:
+        return "<p>No corner performance data was generated.</p>"
+
+    domain_ids = sorted({row.get("domain_id", "") for row in corner_rows if row.get("domain_id")})
+    parts: list[str] = []
+    for domain_id in domain_ids:
+        summaries = _corner_performance_rows([row for row in corner_rows if row.get("domain_id") == domain_id])
+        refs = [row for row in reference_rows if row.get("domain_id") == domain_id]
+        if not summaries or not refs:
+            continue
+        parts.append(
+            "\n".join(
+                [
+                    "<article class='speed-profile-domain'>",
+                    f"<h3 class='speed-profile-title'>{_e(domain_id)}</h3>",
+                    "<div class='analysis-grid'>",
+                    _analysis_card(
+                        "Corner Duration",
+                        _corner_metric_map_svg(refs, summaries, "avg_duration_sec", "duration", _format_seconds, f"corner-duration-{domain_id}"),
+                    ),
+                    _analysis_card(
+                        "Corner Minimum Speed",
+                        _corner_metric_map_svg(refs, summaries, "min_speed_mps", "min speed", _format_speed_kmh, f"corner-speed-{domain_id}"),
+                    ),
+                    _analysis_card(
+                        "Corner Path Error",
+                        _corner_metric_map_svg(refs, summaries, "avg_path_error_m", "avg path error", _format_meters, f"corner-error-{domain_id}"),
+                    ),
+                    _analysis_card("Corner Summary", _corner_performance_table(summaries)),
+                    "</div>",
+                    "</article>",
+                ]
+            )
+        )
+    if not parts:
+        return "<p>Corner performance rows were generated, but no chartable corners were found.</p>"
+    return "\n".join(parts)
+
+
+def _analysis_card(title: str, body: str) -> str:
+    return "\n".join(
+        [
+            "<div class='analysis-card'>",
+            f"<h4 class='analysis-card-title'>{_e(title)}</h4>",
+            body,
+            "</div>",
+        ]
+    )
 
 
 def _grade_profile_section(run_dir: Path) -> str:
@@ -372,14 +517,232 @@ def _target_speed_profile_rows(
                 "distance_m": _to_float(vehicle.get("distance_m")),
                 "track_s_m": _to_float(vehicle.get("track_s_m")),
                 "corner_id": vehicle.get("corner_id") or "",
+                "trajectory_curvature_1pm": _to_float(vehicle.get("trajectory_curvature_1pm")),
                 "speed_mps": _to_float(vehicle.get("speed_mps")),
                 "acceleration_mps2": _to_float(vehicle.get("acceleration_mps2")),
+                "steering_rad": _to_float(vehicle.get("steering_rad")),
+                "yaw_rate_rps": _to_float(vehicle.get("yaw_rate_rps")),
+                "path_error_m": _to_float(vehicle.get("path_error_m")),
                 "target_speed_mps": target_speed,
                 "command_accel_mps2": _to_float(control.get("accel_mps2")),
                 "command_steer_rad": _to_float(control.get("steer_rad")),
             }
         )
     return profile_rows
+
+
+def _attach_speed_debug(rows: list[dict[str, Any]], speed_debug_rows: list[dict[str, str]]) -> None:
+    debug_rows = sorted(speed_debug_rows, key=lambda row: _to_float(row.get("time_sec")) or 0.0)
+    for row in rows:
+        time_sec = row.get("time_sec")
+        if not isinstance(time_sec, (int, float)):
+            continue
+        debug = _nearest_csv_row(debug_rows, float(time_sec), tolerance_sec=0.4)
+        if debug is None:
+            continue
+        row["speed_source"] = debug.get("source") or ""
+        row["curvature_speed_mps"] = _to_float(debug.get("curvature_speed_mps"))
+        row["section_cap_mps"] = _to_float(debug.get("section_cap_mps"))
+        row["global_cap_mps"] = _to_float(debug.get("global_cap_mps"))
+        row["command_speed_mps"] = _to_float(debug.get("command_speed_mps"))
+        row["wall_margin_m"] = _to_float(debug.get("wall_margin_m"))
+
+
+def _event_marker_rows(event_rows: list[dict[str, str]], profile_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    markers: list[dict[str, Any]] = []
+    for event in event_rows:
+        time_sec = _to_float(event.get("time_sec"))
+        if time_sec is None:
+            continue
+        row = _nearest_profile_row(profile_rows, time_sec, tolerance_sec=2.0)
+        if row is None:
+            continue
+        markers.append(
+            {
+                "time_sec": time_sec,
+                "x_m": row.get("x_m"),
+                "y_m": row.get("y_m"),
+                "event_type": event.get("event_type") or "event",
+                "severity": event.get("severity") or "",
+                "description": event.get("description") or "",
+            }
+        )
+    return markers
+
+
+def _nearest_csv_row(rows: list[dict[str, str]], time_sec: float, tolerance_sec: float) -> dict[str, str] | None:
+    best: dict[str, str] | None = None
+    best_delta = tolerance_sec
+    for row in rows:
+        row_time = _to_float(row.get("time_sec"))
+        if row_time is None:
+            continue
+        delta = abs(row_time - time_sec)
+        if delta <= best_delta:
+            best = row
+            best_delta = delta
+    return best
+
+
+def _nearest_profile_row(rows: list[dict[str, Any]], time_sec: float, tolerance_sec: float) -> dict[str, Any] | None:
+    best: dict[str, Any] | None = None
+    best_delta = tolerance_sec
+    for row in rows:
+        row_time = row.get("time_sec")
+        if not isinstance(row_time, (int, float)):
+            continue
+        delta = abs(float(row_time) - time_sec)
+        if delta <= best_delta:
+            best = row
+            best_delta = delta
+    return best
+
+
+def _corner_performance_rows(rows: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        corner_id = row.get("corner_id")
+        if corner_id:
+            grouped.setdefault(corner_id, []).append(row)
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for corner_id, items in grouped.items():
+        durations = [_to_float(row.get("duration_sec")) for row in items]
+        min_speeds = [_to_float(row.get("min_speed_mps")) for row in items]
+        avg_errors = [_to_float(row.get("avg_path_error_m")) for row in items]
+        max_errors = [_to_float(row.get("max_path_error_m")) for row in items]
+        events = [_to_float(row.get("event_count")) for row in items]
+        durations = [value for value in durations if value is not None]
+        min_speeds = [value for value in min_speeds if value is not None]
+        avg_errors = [value for value in avg_errors if value is not None]
+        max_errors = [value for value in max_errors if value is not None]
+        events = [value for value in events if value is not None]
+        summaries[corner_id] = {
+            "corner_id": corner_id,
+            "passes": len(items),
+            "avg_duration_sec": sum(durations) / len(durations) if durations else None,
+            "min_speed_mps": min(min_speeds) if min_speeds else None,
+            "avg_path_error_m": sum(avg_errors) / len(avg_errors) if avg_errors else None,
+            "max_path_error_m": max(max_errors) if max_errors else None,
+            "event_count": int(sum(events)) if events else 0,
+        }
+    return summaries
+
+
+def _corner_metric_map_svg(
+    reference_rows: list[dict[str, str]],
+    summaries: dict[str, dict[str, Any]],
+    metric_key: str,
+    metric_label: str,
+    formatter,
+    gradient_id: str,
+) -> str:
+    points = [
+        {
+            "x_m": _to_float(row.get("x_m")),
+            "y_m": _to_float(row.get("y_m")),
+            "corner_id": row.get("corner_id") or "",
+        }
+        for row in reference_rows
+    ]
+    points = [
+        row
+        for row in points
+        if isinstance(row.get("x_m"), (int, float)) and isinstance(row.get("y_m"), (int, float))
+    ]
+    if len(points) < 2:
+        return "<div class='corner-map-empty'>No corner map data.</div>"
+    metric_values = [
+        float(summary[metric_key])
+        for summary in summaries.values()
+        if isinstance(summary.get(metric_key), (int, float))
+    ]
+    if not metric_values:
+        return f"<div class='corner-map-empty'>No {metric_label} data.</div>"
+    min_value = min(metric_values)
+    max_value = max(metric_values)
+    color_fn = (
+        (lambda item: _speed_color(item, min_value, max_value))
+        if metric_key == "min_speed_mps"
+        else (lambda item: _error_color(item - min_value, max(max_value - min_value, 1e-6)))
+    )
+    width = 620.0
+    height = 420.0
+    pad = 18.0
+    project = _projector([(float(row["x_m"]), float(row["y_m"])) for row in points], width, height, pad)
+    base_points = " ".join(
+        f"{x:.2f},{y:.2f}"
+        for x, y in (project((float(row["x_m"]), float(row["y_m"]))) for row in points)
+    )
+    gradients: list[str] = []
+    segments: list[str] = []
+    prefix = _safe_id(gradient_id)
+    for idx, (first, second) in enumerate(zip(points, points[1:])):
+        corner_id = str(first.get("corner_id") or second.get("corner_id") or "")
+        summary = summaries.get(corner_id)
+        if not summary or not isinstance(summary.get(metric_key), (int, float)):
+            continue
+        value = float(summary[metric_key])
+        x1, y1 = project((float(first["x_m"]), float(first["y_m"])))
+        x2, y2 = project((float(second["x_m"]), float(second["y_m"])))
+        color = color_fn(value)
+        grad_id = f"{prefix}-grad-{idx}"
+        gradients.append(
+            "<linearGradient "
+            f"id='{_attr(grad_id)}' gradientUnits='userSpaceOnUse' "
+            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}'>"
+            f"<stop offset='0%' stop-color='{_attr(color)}'/>"
+            f"<stop offset='100%' stop-color='{_attr(color)}'/>"
+            "</linearGradient>"
+        )
+        title = f"{corner_id} {metric_label} {formatter(value)}"
+        segments.append(
+            "<line class='corner-perf-segment' "
+            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}' "
+            f"stroke='url(#{_attr(grad_id)})'><title>{_e(title)}</title></line>"
+        )
+    return "\n".join(
+        [
+            f"<svg class='speed-map-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='{_attr(metric_label)} corner map'>",
+            "<defs>",
+            *gradients,
+            "</defs>",
+            f"<polyline class='speed-map-base' points='{_attr(base_points)}' />",
+            *segments,
+            "</svg>",
+            _map_legend(
+                [
+                    ("low", formatter(min_value), color_fn(min_value)),
+                    ("high", formatter(max_value), color_fn(max_value)),
+                ]
+            ),
+        ]
+    )
+
+
+def _corner_performance_table(summaries: dict[str, dict[str, Any]]) -> str:
+    headers = [
+        "corner_id",
+        "passes",
+        "avg_duration_sec",
+        "min_speed_mps",
+        "avg_path_error_m",
+        "max_path_error_m",
+        "event_count",
+    ]
+    rows = ["<div class='speed-drop-table'><table><thead><tr>", *[f"<th>{_e(header)}</th>" for header in headers], "</tr></thead><tbody>"]
+    for corner_id, summary in sorted(summaries.items(), key=lambda item: _corner_sort_key(item[0])):
+        rows.append("<tr>")
+        rows.append(f"<td>{_e(corner_id)}</td>")
+        rows.append(f"<td>{_e(summary.get('passes'))}</td>")
+        rows.append(f"<td>{_e(_format_seconds(summary.get('avg_duration_sec')))}</td>")
+        rows.append(f"<td>{_e(_format_speed_kmh(summary.get('min_speed_mps')))}</td>")
+        rows.append(f"<td>{_e(_format_meters(summary.get('avg_path_error_m')))}</td>")
+        rows.append(f"<td>{_e(_format_meters(summary.get('max_path_error_m')))}</td>")
+        rows.append(f"<td>{_e(summary.get('event_count'))}</td>")
+        rows.append("</tr>")
+    rows.append("</tbody></table></div>")
+    return "\n".join(rows)
 
 
 def _grade_profile_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -577,42 +940,30 @@ def _target_speed_drops(rows: list[dict[str, Any]], min_drop_mps: float = 0.2) -
     return drops
 
 
-def _target_speed_map_svg(rows: list[dict[str, Any]], drops: list[dict[str, Any]]) -> str:
-    sampled = _sample_rows(rows, 900)
-    points = [(float(row["x_m"]), float(row["y_m"])) for row in sampled]
-    if len(points) < 2:
-        return "<div class='corner-map-empty'>No map data.</div>"
-    width = 620.0
-    height = 420.0
-    pad = 18.0
-    project = _projector(points, width, height, pad)
-    speed_values = [float(row["speed_mps"]) for row in rows if isinstance(row.get("speed_mps"), (int, float))]
-    if not speed_values:
+def _target_speed_map_svg(rows: list[dict[str, Any]], drops: list[dict[str, Any]], gradient_id: str) -> str:
+    value_rows = [row for row in rows if isinstance(row.get("speed_mps"), (int, float))]
+    if not value_rows:
         return "<div class='corner-map-empty'>No actual speed map data.</div>"
-    min_speed = min(speed_values)
-    max_speed = max(speed_values)
-    base_points = " ".join(f"{x:.2f},{y:.2f}" for x, y in (project(point) for point in points))
-    segments: list[str] = []
-    for first, second in zip(sampled, sampled[1:]):
-        first_point = (float(first["x_m"]), float(first["y_m"]))
-        second_point = (float(second["x_m"]), float(second["y_m"]))
-        x1, y1 = project(first_point)
-        x2, y2 = project(second_point)
-        if abs(x2 - x1) < 0.05 and abs(y2 - y1) < 0.05:
-            continue
-        speed = first.get("speed_mps")
-        if not isinstance(speed, (int, float)):
-            continue
-        color = _speed_color(float(speed), min_speed, max_speed)
-        title = (
-            f"speed {_format_speed_kmh(speed)} / "
-            f"target {_format_speed_kmh(first.get('target_speed_mps'))}"
-        )
-        segments.append(
-            "<line class='speed-map-segment' "
-            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}' stroke='{_attr(color)}'>"
-            f"<title>{_e(title)}</title></line>"
-        )
+    min_speed, max_speed = _value_range(value_rows, "speed_mps")
+    map_svg = _metric_track_map_svg(
+        rows,
+        "speed_mps",
+        "actual speed map",
+        "actual speed",
+        _format_speed_kmh,
+        lambda value: _speed_color(value, min_speed, max_speed),
+        gradient_id,
+        legend=[
+            ("actual min", _format_speed_kmh(min_speed), _speed_color(min_speed, min_speed, max_speed)),
+            ("actual max", _format_speed_kmh(max_speed), _speed_color(max_speed, min_speed, max_speed)),
+            ("target drop", "", "#ef4444"),
+        ],
+    )
+    if map_svg.startswith("<div"):
+        return map_svg
+    sampled = _sample_rows(_map_rows(rows), 900)
+    points = [(float(row["x_m"]), float(row["y_m"])) for row in sampled]
+    project = _projector(points, 620.0, 420.0, 18.0)
     drop_markers = []
     for drop in drops[:80]:
         x_m = drop.get("x_m")
@@ -626,74 +977,300 @@ def _target_speed_map_svg(rows: list[dict[str, Any]], drops: list[dict[str, Any]
             f"actual {_format_speed_kmh(drop.get('speed_mps'))}"
         )
         drop_markers.append(f"<circle class='speed-drop-marker'><title>{_e(label)}</title></circle>".replace("<circle", f"<circle cx='{x:.2f}' cy='{y:.2f}' r='4.2'"))
+    return map_svg.replace("</svg>", "\n".join([*drop_markers, "</svg>"]), 1)
+
+
+def _speed_error_map_svg(rows: list[dict[str, Any]], gradient_id: str) -> str:
+    for row in rows:
+        actual = row.get("speed_mps")
+        target = row.get("target_speed_mps")
+        row["speed_error_mps"] = (
+            float(actual) - float(target)
+            if isinstance(actual, (int, float)) and isinstance(target, (int, float))
+            else None
+        )
+    values = [abs(float(row["speed_error_mps"])) for row in rows if isinstance(row.get("speed_error_mps"), (int, float))]
+    if not values:
+        return "<div class='corner-map-empty'>No speed error map data.</div>"
+    max_abs = max(max(values), 0.1)
+    return _metric_track_map_svg(
+        rows,
+        "speed_error_mps",
+        "speed error map",
+        "actual-target",
+        _format_signed_speed,
+        lambda value: _diverging_color(value, max_abs),
+        gradient_id,
+        legend=[
+            ("below target", _format_signed_speed(-max_abs), _diverging_color(-max_abs, max_abs)),
+            ("on target", _format_signed_speed(0.0), _diverging_color(0.0, max_abs)),
+            ("above target", _format_signed_speed(max_abs), _diverging_color(max_abs, max_abs)),
+        ],
+    )
+
+
+def _path_error_map_svg(rows: list[dict[str, Any]], gradient_id: str) -> str:
+    values = [abs(float(row["path_error_m"])) for row in rows if isinstance(row.get("path_error_m"), (int, float))]
+    if not values:
+        return "<div class='corner-map-empty'>No path error map data.</div>"
+    max_error = max(max(values), 0.1)
+    return _metric_track_map_svg(
+        rows,
+        "path_error_m",
+        "path error map",
+        "path error",
+        _format_meters,
+        lambda value: _error_color(abs(value), max_error),
+        gradient_id,
+        legend=[
+            ("low", _format_meters(0.0), _error_color(0.0, max_error)),
+            ("high", _format_meters(max_error), _error_color(max_error, max_error)),
+        ],
+    )
+
+
+def _speed_source_map_svg(rows: list[dict[str, Any]], gradient_id: str) -> str:
+    source_rows = [row for row in rows if row.get("speed_source")]
+    if len(source_rows) < 2:
+        return "<div class='corner-map-empty'>No speed source map data.</div>"
+    return _categorical_track_map_svg(
+        rows,
+        "speed_source",
+        "speed limit source map",
+        "source",
+        _source_color,
+        gradient_id,
+    )
+
+
+def _event_marker_map_svg(rows: list[dict[str, Any]], markers: list[dict[str, Any]], gradient_id: str) -> str:
+    sampled = _sample_rows(_map_rows(rows), 900)
+    points = [(float(row["x_m"]), float(row["y_m"])) for row in sampled]
+    if len(points) < 2:
+        return "<div class='corner-map-empty'>No event map data.</div>"
+    width = 620.0
+    height = 420.0
+    pad = 18.0
+    project = _projector(points, width, height, pad)
+    base_points = " ".join(f"{x:.2f},{y:.2f}" for x, y in (project(point) for point in points))
+    circles = []
+    for marker in markers[:120]:
+        x_m = marker.get("x_m")
+        y_m = marker.get("y_m")
+        if not isinstance(x_m, (int, float)) or not isinstance(y_m, (int, float)):
+            continue
+        x, y = project((float(x_m), float(y_m)))
+        severity = str(marker.get("severity") or "")
+        event_type = str(marker.get("event_type") or "event")
+        color = _event_color(severity, event_type)
+        title = f"{event_type} {severity} at t={_format_number(marker.get('time_sec'), 3)}"
+        circles.append(
+            "<circle class='event-marker' "
+            f"cx='{x:.2f}' cy='{y:.2f}' r='5.0' fill='{_attr(color)}'><title>{_e(title)}</title></circle>"
+        )
+    if not circles:
+        circles.append("<text class='speed-chart-label' x='18' y='28'>No events were detected.</text>")
     return "\n".join(
         [
-            f"<svg class='speed-map-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='actual speed map'>",
+            f"<svg class='speed-map-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='event marker map' data-map-id='{_attr(gradient_id)}'>",
             f"<polyline class='speed-map-base' points='{_attr(base_points)}' />",
-            *segments,
-            *drop_markers,
+            *circles,
             "</svg>",
             "<div class='speed-profile-legend'>",
-            f"<span><span class='speed-swatch' style='background:{_speed_color(min_speed, min_speed, max_speed)}'></span>actual {_e(_format_speed_kmh(min_speed))}</span>",
-            f"<span><span class='speed-swatch' style='background:{_speed_color(max_speed, min_speed, max_speed)}'></span>actual {_e(_format_speed_kmh(max_speed))}</span>",
-            "<span><span class='speed-swatch' style='background:#ef4444'></span>target drop</span>",
+            "<span><span class='speed-swatch' style='background:#dc2626'></span>critical/error</span>",
+            "<span><span class='speed-swatch' style='background:#f59e0b'></span>warning</span>",
+            "<span><span class='speed-swatch' style='background:#2563eb'></span>event</span>",
             "</div>",
         ]
     )
 
 
-def _grade_map_svg(rows: list[dict[str, Any]]) -> str:
-    sampled = _sample_rows(
-        [
-            row
-            for row in rows
-            if isinstance(row.get("x_m"), (int, float))
-            and isinstance(row.get("y_m"), (int, float))
-            and isinstance(row.get("grade_percent"), (int, float))
-        ],
-        900,
-    )
+def _metric_track_map_svg(
+    rows: list[dict[str, Any]],
+    value_key: str,
+    aria_label: str,
+    value_label: str,
+    formatter,
+    color_fn,
+    gradient_id: str,
+    legend: list[tuple[str, str, str]],
+) -> str:
+    sampled = _sample_rows(_map_rows(rows), 900)
     points = [(float(row["x_m"]), float(row["y_m"])) for row in sampled]
     if len(points) < 2:
-        return "<div class='corner-map-empty'>No grade map data.</div>"
+        return "<div class='corner-map-empty'>No map data.</div>"
     width = 620.0
     height = 420.0
     pad = 18.0
     project = _projector(points, width, height, pad)
-    grade_values = [float(row["grade_percent"]) for row in sampled]
-    min_grade = min(grade_values)
-    max_grade = max(grade_values)
-    max_abs_grade = max(abs(min_grade), abs(max_grade), 1e-6)
     base_points = " ".join(f"{x:.2f},{y:.2f}" for x, y in (project(point) for point in points))
+    gradients: list[str] = []
     segments: list[str] = []
-    for first, second in zip(sampled, sampled[1:]):
+    prefix = _safe_id(gradient_id)
+    for idx, (first, second) in enumerate(zip(sampled, sampled[1:])):
         first_point = (float(first["x_m"]), float(first["y_m"]))
         second_point = (float(second["x_m"]), float(second["y_m"]))
         x1, y1 = project(first_point)
         x2, y2 = project(second_point)
         if abs(x2 - x1) < 0.05 and abs(y2 - y1) < 0.05:
             continue
-        grade = first.get("grade_percent")
-        if not isinstance(grade, (int, float)):
+        first_value = first.get(value_key)
+        second_value = second.get(value_key)
+        if not isinstance(first_value, (int, float)) or not isinstance(second_value, (int, float)):
             continue
-        color = _grade_color(float(grade), max_abs_grade)
+        grad_id = f"{prefix}-grad-{idx}"
+        first_color = color_fn(float(first_value))
+        second_color = color_fn(float(second_value))
+        gradients.append(
+            "<linearGradient "
+            f"id='{_attr(grad_id)}' gradientUnits='userSpaceOnUse' "
+            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}'>"
+            f"<stop offset='0%' stop-color='{_attr(first_color)}'/>"
+            f"<stop offset='100%' stop-color='{_attr(second_color)}'/>"
+            "</linearGradient>"
+        )
+        title = f"{value_label} {formatter(first_value)} -> {formatter(second_value)}"
         segments.append(
             "<line class='speed-map-segment' "
-            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}' stroke='{_attr(color)}'>"
-            f"<title>grade {_e(_format_percent(grade))}</title></line>"
+            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}' "
+            f"stroke='url(#{_attr(grad_id)})'><title>{_e(title)}</title></line>"
         )
     return "\n".join(
         [
-            f"<svg class='speed-map-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='grade map'>",
+            f"<svg class='speed-map-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='{_attr(aria_label)}'>",
+            "<defs>",
+            *gradients,
+            "</defs>",
             f"<polyline class='speed-map-base' points='{_attr(base_points)}' />",
             *segments,
             "</svg>",
-            "<div class='speed-profile-legend'>",
-            f"<span><span class='speed-swatch' style='background:{_grade_color(min_grade, max_abs_grade)}'></span>{_e(_format_percent(min_grade))}</span>",
-            f"<span><span class='speed-swatch' style='background:{_grade_color(0.0, max_abs_grade)}'></span>{_e(_format_percent(0.0))}</span>",
-            f"<span><span class='speed-swatch' style='background:{_grade_color(max_grade, max_abs_grade)}'></span>{_e(_format_percent(max_grade))}</span>",
-            "</div>",
+            _map_legend(legend),
         ]
+    )
+
+
+def _categorical_track_map_svg(
+    rows: list[dict[str, Any]],
+    value_key: str,
+    aria_label: str,
+    value_label: str,
+    color_fn,
+    gradient_id: str,
+) -> str:
+    sampled = _sample_rows(_map_rows(rows), 900)
+    points = [(float(row["x_m"]), float(row["y_m"])) for row in sampled]
+    if len(points) < 2:
+        return "<div class='corner-map-empty'>No map data.</div>"
+    width = 620.0
+    height = 420.0
+    pad = 18.0
+    project = _projector(points, width, height, pad)
+    base_points = " ".join(f"{x:.2f},{y:.2f}" for x, y in (project(point) for point in points))
+    gradients: list[str] = []
+    segments: list[str] = []
+    sources: dict[str, str] = {}
+    prefix = _safe_id(gradient_id)
+    for idx, (first, second) in enumerate(zip(sampled, sampled[1:])):
+        first_value = str(first.get(value_key) or "")
+        second_value = str(second.get(value_key) or first_value)
+        if not first_value:
+            continue
+        first_point = (float(first["x_m"]), float(first["y_m"]))
+        second_point = (float(second["x_m"]), float(second["y_m"]))
+        x1, y1 = project(first_point)
+        x2, y2 = project(second_point)
+        if abs(x2 - x1) < 0.05 and abs(y2 - y1) < 0.05:
+            continue
+        grad_id = f"{prefix}-grad-{idx}"
+        first_color = color_fn(first_value)
+        second_color = color_fn(second_value)
+        sources.setdefault(first_value, first_color)
+        if second_value:
+            sources.setdefault(second_value, second_color)
+        gradients.append(
+            "<linearGradient "
+            f"id='{_attr(grad_id)}' gradientUnits='userSpaceOnUse' "
+            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}'>"
+            f"<stop offset='0%' stop-color='{_attr(first_color)}'/>"
+            f"<stop offset='100%' stop-color='{_attr(second_color)}'/>"
+            "</linearGradient>"
+        )
+        title = f"{value_label} {first_value}"
+        segments.append(
+            "<line class='speed-map-segment' "
+            f"x1='{x1:.2f}' y1='{y1:.2f}' x2='{x2:.2f}' y2='{y2:.2f}' "
+            f"stroke='url(#{_attr(grad_id)})'><title>{_e(title)}</title></line>"
+        )
+    legend = [(source, "", color) for source, color in sorted(sources.items())]
+    return "\n".join(
+        [
+            f"<svg class='speed-map-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='{_attr(aria_label)}'>",
+            "<defs>",
+            *gradients,
+            "</defs>",
+            f"<polyline class='speed-map-base' points='{_attr(base_points)}' />",
+            *segments,
+            "</svg>",
+            _map_legend(legend),
+        ]
+    )
+
+
+def _map_legend(items: list[tuple[str, str, str]]) -> str:
+    spans = []
+    for label, value, color in items:
+        text = f"{label} {value}".strip()
+        spans.append(f"<span><span class='speed-swatch' style='background:{_attr(color)}'></span>{_e(text)}</span>")
+    return "\n".join(["<div class='speed-profile-legend'>", *spans, "</div>"])
+
+
+def _map_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if isinstance(row.get("x_m"), (int, float)) and isinstance(row.get("y_m"), (int, float))
+    ]
+
+
+def _value_range(rows: list[dict[str, Any]], key: str, minimum_span: float = 1e-6) -> tuple[float, float]:
+    values = [float(row[key]) for row in rows if isinstance(row.get(key), (int, float))]
+    if not values:
+        return 0.0, minimum_span
+    min_value = min(values)
+    max_value = max(values)
+    if max_value - min_value < minimum_span:
+        center = (min_value + max_value) / 2.0
+        return center - minimum_span / 2.0, center + minimum_span / 2.0
+    return min_value, max_value
+
+
+def _grade_map_svg(rows: list[dict[str, Any]]) -> str:
+    value_rows = [
+        row
+        for row in rows
+        if isinstance(row.get("x_m"), (int, float))
+        and isinstance(row.get("y_m"), (int, float))
+        and isinstance(row.get("grade_percent"), (int, float))
+    ]
+    if len(value_rows) < 2:
+        return "<div class='corner-map-empty'>No grade map data.</div>"
+    values = [float(row["grade_percent"]) for row in value_rows]
+    min_grade = min(values)
+    max_grade = max(values)
+    max_abs_grade = max(abs(min_grade), abs(max_grade), 1e-6)
+    return _metric_track_map_svg(
+        value_rows,
+        "grade_percent",
+        "grade map",
+        "grade",
+        _format_percent,
+        lambda value: _grade_color(value, max_abs_grade),
+        f"grade-map-{id(rows)}",
+        legend=[
+            ("downhill", _format_percent(min_grade), _grade_color(min_grade, max_abs_grade)),
+            ("flat", _format_percent(0.0), _grade_color(0.0, max_abs_grade)),
+            ("uphill", _format_percent(max_grade), _grade_color(max_grade, max_abs_grade)),
+        ],
     )
 
 
@@ -753,6 +1330,213 @@ def _target_speed_chart_svg(rows: list[dict[str, Any]]) -> str:
             "</div>",
         ]
     )
+
+
+def _accel_response_chart_svg(rows: list[dict[str, Any]]) -> str:
+    sampled = _sample_rows(rows, 850)
+    chart_rows = [
+        row
+        for row in sampled
+        if isinstance(row.get("distance_m"), (int, float))
+        and (
+            isinstance(row.get("acceleration_mps2"), (int, float))
+            or isinstance(row.get("command_accel_mps2"), (int, float))
+        )
+    ]
+    if len(chart_rows) < 2:
+        return "<div class='corner-map-empty'>No acceleration response data.</div>"
+    values = [
+        float(value)
+        for row in chart_rows
+        for value in (row.get("acceleration_mps2"), row.get("command_accel_mps2"))
+        if isinstance(value, (int, float))
+    ]
+    min_y, max_y = _padded_range([*values, 0.0], minimum_span=0.5)
+    return _single_panel_chart_svg(
+        chart_rows,
+        min_y,
+        max_y,
+        "acceleration response chart",
+        "accel m/s^2",
+        [
+            ("acceleration_mps2", "speed-chart-actual", "acceleration_mps2", "#f97316"),
+            ("command_accel_mps2", "speed-chart-command", "command_accel_mps2", "#7c3aed"),
+        ],
+    )
+
+
+def _steering_response_chart_svg(rows: list[dict[str, Any]]) -> str:
+    sampled = _sample_rows(rows, 850)
+    chart_rows = [
+        row
+        for row in sampled
+        if isinstance(row.get("distance_m"), (int, float))
+        and (
+            isinstance(row.get("steering_rad"), (int, float))
+            or isinstance(row.get("command_steer_rad"), (int, float))
+            or isinstance(row.get("yaw_rate_rps"), (int, float))
+        )
+    ]
+    if len(chart_rows) < 2:
+        return "<div class='corner-map-empty'>No steering response data.</div>"
+
+    steer_values = [
+        float(value)
+        for row in chart_rows
+        for value in (row.get("steering_rad"), row.get("command_steer_rad"))
+        if isinstance(value, (int, float))
+    ]
+    yaw_values = [float(row["yaw_rate_rps"]) for row in chart_rows if isinstance(row.get("yaw_rate_rps"), (int, float))]
+    min_steer, max_steer = _padded_range([*steer_values, 0.0], minimum_span=0.05)
+    min_yaw, max_yaw = _padded_range([*yaw_values, 0.0], minimum_span=0.05)
+    return _dual_panel_chart_svg(
+        chart_rows,
+        min_steer,
+        max_steer,
+        min_yaw,
+        max_yaw,
+        "steering response chart",
+        "steer rad",
+        "yaw rate rad/s",
+        [
+            ("steering_rad", "speed-chart-actual", "steering_rad", "#f97316"),
+            ("command_steer_rad", "speed-chart-command", "command_steer_rad", "#7c3aed"),
+        ],
+        [("yaw_rate_rps", "speed-chart-yaw", "yaw_rate_rps", "#0f766e")],
+    )
+
+
+def _single_panel_chart_svg(
+    rows: list[dict[str, Any]],
+    min_y: float,
+    max_y: float,
+    aria_label: str,
+    y_label: str,
+    series: list[tuple[str, str, str, str]],
+) -> str:
+    width = 760.0
+    height = 260.0
+    pad_left = 48.0
+    pad_right = 18.0
+    pad_top = 18.0
+    pad_bottom = 34.0
+    min_x, max_x = _chart_x_range(rows)
+
+    def project_x(value: float) -> float:
+        return pad_left + (value - min_x) / max(max_x - min_x, 1e-6) * (width - pad_left - pad_right)
+
+    def project_y(value: float) -> float:
+        return height - pad_bottom - (value - min_y) / max(max_y - min_y, 1e-6) * (height - pad_top - pad_bottom)
+
+    polylines = []
+    for key, css_class, label, _color in series:
+        points = _series_points(rows, key, project_x, project_y)
+        if points:
+            polylines.append(f"<polyline class='{_attr(css_class)}' points='{_attr(points)}' />")
+    zero_y = project_y(0.0)
+    return "\n".join(
+        [
+            f"<svg class='speed-chart-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='{_attr(aria_label)}'>",
+            f"<line class='speed-chart-axis' x1='{pad_left:.1f}' y1='{height - pad_bottom:.1f}' x2='{width - pad_right:.1f}' y2='{height - pad_bottom:.1f}' />",
+            f"<line class='speed-chart-axis' x1='{pad_left:.1f}' y1='{pad_top:.1f}' x2='{pad_left:.1f}' y2='{height - pad_bottom:.1f}' />",
+            f"<line class='grade-chart-zero' x1='{pad_left:.1f}' y1='{zero_y:.1f}' x2='{width - pad_right:.1f}' y2='{zero_y:.1f}' />",
+            *polylines,
+            f"<text class='speed-chart-label' x='{pad_left:.1f}' y='13'>{_e(y_label)}</text>",
+            f"<text class='speed-chart-label' x='{width - 106:.1f}' y='{height - 9:.1f}'>distance m</text>",
+            "</svg>",
+            _map_legend([(label, "", color) for _key, _class, label, color in series]),
+        ]
+    )
+
+
+def _dual_panel_chart_svg(
+    rows: list[dict[str, Any]],
+    min_top_y: float,
+    max_top_y: float,
+    min_bottom_y: float,
+    max_bottom_y: float,
+    aria_label: str,
+    top_label: str,
+    bottom_label: str,
+    top_series: list[tuple[str, str, str, str]],
+    bottom_series: list[tuple[str, str, str, str]],
+) -> str:
+    width = 760.0
+    height = 340.0
+    pad_left = 48.0
+    pad_right = 18.0
+    pad_top = 18.0
+    pad_bottom = 34.0
+    gap = 28.0
+    panel_height = (height - pad_top - pad_bottom - gap) / 2.0
+    top_start = pad_top
+    top_end = top_start + panel_height
+    bottom_start = top_end + gap
+    bottom_end = bottom_start + panel_height
+    min_x, max_x = _chart_x_range(rows)
+
+    def project_x(value: float) -> float:
+        return pad_left + (value - min_x) / max(max_x - min_x, 1e-6) * (width - pad_left - pad_right)
+
+    def project_y(value: float, min_value: float, max_value: float, top: float, bottom: float) -> float:
+        return bottom - (value - min_value) / max(max_value - min_value, 1e-6) * (bottom - top)
+
+    polylines = []
+    for key, css_class, _label, _color in top_series:
+        points = _series_points(
+            rows,
+            key,
+            project_x,
+            lambda value: project_y(value, min_top_y, max_top_y, top_start, top_end),
+        )
+        if points:
+            polylines.append(f"<polyline class='{_attr(css_class)}' points='{_attr(points)}' />")
+    for key, css_class, _label, _color in bottom_series:
+        points = _series_points(
+            rows,
+            key,
+            project_x,
+            lambda value: project_y(value, min_bottom_y, max_bottom_y, bottom_start, bottom_end),
+        )
+        if points:
+            polylines.append(f"<polyline class='{_attr(css_class)}' points='{_attr(points)}' />")
+    top_zero = project_y(0.0, min_top_y, max_top_y, top_start, top_end)
+    bottom_zero = project_y(0.0, min_bottom_y, max_bottom_y, bottom_start, bottom_end)
+    legend = [(label, "", color) for _key, _class, label, color in [*top_series, *bottom_series]]
+    return "\n".join(
+        [
+            f"<svg class='speed-chart-svg' viewBox='0 0 {width:.0f} {height:.0f}' role='img' aria-label='{_attr(aria_label)}'>",
+            f"<line class='speed-chart-axis' x1='{pad_left:.1f}' y1='{top_end:.1f}' x2='{width - pad_right:.1f}' y2='{top_end:.1f}' />",
+            f"<line class='speed-chart-axis' x1='{pad_left:.1f}' y1='{top_start:.1f}' x2='{pad_left:.1f}' y2='{top_end:.1f}' />",
+            f"<line class='grade-chart-zero' x1='{pad_left:.1f}' y1='{top_zero:.1f}' x2='{width - pad_right:.1f}' y2='{top_zero:.1f}' />",
+            f"<line class='speed-chart-axis' x1='{pad_left:.1f}' y1='{bottom_end:.1f}' x2='{width - pad_right:.1f}' y2='{bottom_end:.1f}' />",
+            f"<line class='speed-chart-axis' x1='{pad_left:.1f}' y1='{bottom_start:.1f}' x2='{pad_left:.1f}' y2='{bottom_end:.1f}' />",
+            f"<line class='grade-chart-zero' x1='{pad_left:.1f}' y1='{bottom_zero:.1f}' x2='{width - pad_right:.1f}' y2='{bottom_zero:.1f}' />",
+            *polylines,
+            f"<text class='speed-chart-label' x='{pad_left:.1f}' y='13'>{_e(top_label)}</text>",
+            f"<text class='speed-chart-label' x='{pad_left:.1f}' y='{bottom_start - 6:.1f}'>{_e(bottom_label)}</text>",
+            f"<text class='speed-chart-label' x='{width - 106:.1f}' y='{height - 9:.1f}'>distance m</text>",
+            "</svg>",
+            _map_legend(legend),
+        ]
+    )
+
+
+def _chart_x_range(rows: list[dict[str, Any]]) -> tuple[float, float]:
+    values = [float(row["distance_m"]) for row in rows if isinstance(row.get("distance_m"), (int, float))]
+    if not values:
+        return 0.0, 1.0
+    return min(values), max(values)
+
+
+def _series_points(rows: list[dict[str, Any]], key: str, project_x, project_y) -> str:
+    points = []
+    for row in rows:
+        distance = row.get("distance_m")
+        value = row.get(key)
+        if isinstance(distance, (int, float)) and isinstance(value, (int, float)):
+            points.append(f"{project_x(float(distance)):.2f},{project_y(float(value)):.2f}")
+    return " ".join(points)
 
 
 def _target_speed_drop_table(drops: list[dict[str, Any]]) -> str:
@@ -822,31 +1606,104 @@ def _projector(
 
 
 def _speed_color(value: float, min_value: float, max_value: float) -> str:
-    ratio = (value - min_value) / max(max_value - min_value, 1e-6)
-    if ratio < 0.25:
-        return "#ef4444"
-    if ratio < 0.5:
-        return "#f59e0b"
-    if ratio < 0.75:
-        return "#22c55e"
-    return "#2563eb"
+    ratio = _clamp01((value - min_value) / max(max_value - min_value, 1e-6))
+    return _multi_stop_color(
+        ratio,
+        [
+            (0.0, "#dc2626"),
+            (0.34, "#f59e0b"),
+            (0.67, "#16a34a"),
+            (1.0, "#2563eb"),
+        ],
+    )
 
 
 def _grade_color(value: float, max_abs_value: float) -> str:
-    ratio = min(abs(value) / max(max_abs_value, 1e-6), 1.0)
-    if abs(value) <= max_abs_value * 0.08:
-        return "#64748b"
-    if value < 0.0:
-        if ratio < 0.45:
-            return "#38bdf8"
-        if ratio < 0.75:
-            return "#2563eb"
-        return "#1d4ed8"
-    if ratio < 0.45:
-        return "#facc15"
-    if ratio < 0.75:
-        return "#f97316"
-    return "#dc2626"
+    ratio = _clamp01((value / max(max_abs_value, 1e-6) + 1.0) / 2.0)
+    return _multi_stop_color(
+        ratio,
+        [
+            (0.0, "#1d4ed8"),
+            (0.5, "#64748b"),
+            (0.75, "#f59e0b"),
+            (1.0, "#dc2626"),
+        ],
+    )
+
+
+def _diverging_color(value: float, max_abs_value: float) -> str:
+    ratio = _clamp01((value / max(max_abs_value, 1e-6) + 1.0) / 2.0)
+    return _multi_stop_color(
+        ratio,
+        [
+            (0.0, "#dc2626"),
+            (0.5, "#64748b"),
+            (1.0, "#2563eb"),
+        ],
+    )
+
+
+def _error_color(value: float, max_value: float) -> str:
+    ratio = _clamp01(value / max(max_value, 1e-6))
+    return _multi_stop_color(
+        ratio,
+        [
+            (0.0, "#16a34a"),
+            (0.55, "#f59e0b"),
+            (1.0, "#dc2626"),
+        ],
+    )
+
+
+def _source_color(source: str) -> str:
+    normalized = str(source or "").lower()
+    if "section" in normalized:
+        return "#7c3aed"
+    if "curvature" in normalized:
+        return "#2563eb"
+    if "global" in normalized:
+        return "#16a34a"
+    if "wall" in normalized:
+        return "#dc2626"
+    return "#64748b"
+
+
+def _event_color(severity: str, event_type: str) -> str:
+    normalized = f"{severity} {event_type}".lower()
+    if any(word in normalized for word in ("critical", "error", "collision", "stuck")):
+        return "#dc2626"
+    if any(word in normalized for word in ("warn", "hard_brake", "path_error", "high_accel")):
+        return "#f59e0b"
+    return "#2563eb"
+
+
+def _multi_stop_color(ratio: float, stops: list[tuple[float, str]]) -> str:
+    ratio = _clamp01(ratio)
+    ordered = sorted(stops, key=lambda item: item[0])
+    if ratio <= ordered[0][0]:
+        return ordered[0][1]
+    for (left_pos, left_color), (right_pos, right_color) in zip(ordered, ordered[1:]):
+        if ratio <= right_pos:
+            local = (ratio - left_pos) / max(right_pos - left_pos, 1e-6)
+            return _blend_hex(left_color, right_color, local)
+    return ordered[-1][1]
+
+
+def _blend_hex(left: str, right: str, ratio: float) -> str:
+    ratio = _clamp01(ratio)
+    left_rgb = _hex_to_rgb(left)
+    right_rgb = _hex_to_rgb(right)
+    blended = tuple(round(left_rgb[idx] + (right_rgb[idx] - left_rgb[idx]) * ratio) for idx in range(3))
+    return "#" + "".join(f"{channel:02x}" for channel in blended)
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    text = value.strip().lstrip("#")
+    return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
 def _read_corner_summary(path: Path) -> list[dict[str, str]]:
@@ -1076,6 +1933,20 @@ def _format_speed_kmh(value: Any) -> str:
     return f"{number * 3.6:.1f} km/h"
 
 
+def _format_signed_speed(value: Any) -> str:
+    number = _to_float(value)
+    if number is None:
+        return ""
+    return f"{number * 3.6:+.1f} km/h"
+
+
+def _format_meters(value: Any) -> str:
+    number = _to_float(value)
+    if number is None:
+        return ""
+    return f"{number:.2f} m"
+
+
 def _format_percent(value: Any) -> str:
     number = _to_float(value)
     if number is None:
@@ -1165,3 +2036,9 @@ def _attr(value: Any) -> str:
     if value is None:
         return ""
     return html.escape(str(value), quote=True)
+
+
+def _safe_id(value: str) -> str:
+    text = "".join(char if char.isalnum() else "-" for char in value)
+    text = "-".join(part for part in text.split("-") if part)
+    return text or "map"

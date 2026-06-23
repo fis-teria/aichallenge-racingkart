@@ -12,10 +12,10 @@ def test_generate_run_report_renders_corner_split_table(tmp_path: Path) -> None:
     (processed_dir / "corner_summary.csv").write_text(
         "\n".join(
             [
-                "run_id,domain_id,corner_id,pass,entry_time_sec,exit_time_sec,duration_sec",
-                "run,d1,corner_01,1,4.0,5.25,1.25",
-                "run,d1,corner_02,1,8.0,9.5,1.5",
-                "run,d1,corner_01,2,68.0,69.125,1.125",
+                "run_id,domain_id,corner_id,pass,entry_time_sec,exit_time_sec,duration_sec,min_speed_mps,avg_path_error_m,max_path_error_m,event_count",
+                "run,d1,corner_01,1,4.0,5.25,1.25,5.2,0.14,0.22,1",
+                "run,d1,corner_02,1,8.0,9.5,1.5,4.8,0.18,0.31,0",
+                "run,d1,corner_01,2,68.0,69.125,1.125,5.4,0.12,0.20,0",
             ]
         )
         + "\n",
@@ -61,6 +61,29 @@ def test_generate_run_report_renders_corner_split_table(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+    (processed_dir / "speed_profile_debug.csv").write_text(
+        "\n".join(
+            [
+                "run_id,domain_id,time_sec,wp_id,source,target_speed_mps,curvature_speed_mps,section_cap_mps,global_cap_mps,actual_speed_mps,command_speed_mps",
+                "run,d1,1.0,10,global,8.0,9.0,,8.0,7.0,1.0",
+                "run,d1,2.0,20,curvature,8.0,8.0,,9.0,7.5,0.0",
+                "run,d1,3.0,30,section,5.0,8.0,5.0,9.0,6.5,0.0",
+                "run,d1,4.0,40,section,5.0,8.0,5.0,9.0,5.2,0.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (processed_dir / "events.csv").write_text(
+        "\n".join(
+            [
+                "run_id,domain_id,time_sec,lap,section,event_type,severity,description",
+                "run,d1,3.0,1,1,path_error,warning,path error exceeded threshold",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (processed_dir / "grade_profile.csv").write_text(
         "\n".join(
             [
@@ -91,11 +114,31 @@ def test_generate_run_report_renders_corner_split_table(tmp_path: Path) -> None:
     assert "Corner Map" in html
     assert "data-corner-map='corner_01'" in html
     assert "corner-map-highlight" in html
-    assert "Target Speed Profile" in html
+    assert "Speed Profile" in html
     assert "speed-map-segment" in html
+    assert "linearGradient" in html
     assert "actual speed map" in html
-    assert "actual 18.7 km/h" in html
+    assert "actual min 18.7 km/h" in html
     assert "28.8 km/h -&gt; 18.0 km/h" in html
+    assert "Track Diagnostics" in html
+    assert "Speed Error Map" in html
+    assert "speed error map" in html
+    assert "Path Error Map" in html
+    assert "path error map" in html
+    assert "Speed Limit Source Map" in html
+    assert "speed limit source map" in html
+    assert "Event Marker Map" in html
+    assert "event marker map" in html
+    assert "path_error warning" in html
+    assert "Control Response" in html
+    assert "Acceleration Response" in html
+    assert "acceleration response chart" in html
+    assert "Steering Response" in html
+    assert "steering response chart" in html
+    assert "Corner Performance" in html
+    assert "Corner Duration" in html
+    assert "Corner Minimum Speed" in html
+    assert "Corner Path Error" in html
     assert "Grade & Acceleration Profile" in html
     assert "grade map" in html
     assert "grade-chart-grade" in html

@@ -46,9 +46,14 @@ tools/run_tuning_gui.bash --restart
 - `dev` は `ROSBAG=true CONTROL_METHOD=<selected>` 付きで実行され、先に `make autoware-build` を走らせることもできます。走行後に `log化` を押すと、最新の `output/latest` を evalwrap ingest して Motion Log に表示できます。
 - `AWSIMヘッドレス` を使う前に、AI Challenge 本体側の起動ファイルへ `tools/scripts/setup.sh --apply` でヘッドレス連携パッチを適用してください。
 - `AWSIMヘッドレス` を有効にした `dev` は、AWSIMサービスを起動したまま `AWSIM_EXTRA_ARGS='-batchmode -nographics --camera false --lidar false'` を渡し、AWSIM画面や重いセンサ描画を抑えます。シミュレーション時刻 `/clock` は出るので、カートは通常のdevと同じく動けます。
-- `NPC台数` は自車以外の追加車両数です。通常 `dev` では `0台` が `make dev`、`1台`〜`3台` が `make dev2`〜`make dev4` に対応します。`AWSIMヘッドレス` の場合も同じターゲットを使い、AWSIMの車両数は通常通り `dev2`〜`dev4` 側で指定されます。
+- `追加Autoware車両` は自車以外に起動する追加Autoware台数です。通常 `dev` では `0台` が `make dev`、`1台`〜`3台` が `make dev2`〜`make dev4` に対応します。`AWSIMヘッドレス` の場合も同じターゲットを使い、AWSIMの車両数は通常通り `dev2`〜`dev4` 側で指定されます。
+- ヘッダーの `Run Settings` から `Simulator`、`Safety Gate`、`Multiplay` の設定を開けます。
+- `Safety Gate` の `gate` ボタンは `make gate1`〜`make gate3` を呼び出し、AWSIMの `SafetyGate/scenario*.yaml` を使って障害物停止、追い越し、車線維持のシナリオを実行します。
+- `Simulator` の各項目は `AWSIM_EXTRA_ARGS` や `AWSIM_START_MODE` / `AWSIM_LAPS` / `AWSIM_TIMEOUT` としてAWSIM起動オプションへ変換されます。
+- `raw args` はGUIやlaunchが管理する `--camera`、`--laps`、`--scenario` などと重複すると起動前にエラーになります。
+- `Multiplay` は `--multiplay`、`--multiplay-address`、`--multiplay-port`、`--multiplay-name`、`--multiplay-send-hz` を組み立てます。
 - `evalwrap` は `CONTROL_METHOD=<selected>` 付きで `tools/evalwrap run --label ...` を実行します。update-build チェックボックスを有効にすると、提出アーカイブの再生成、eval イメージの再ビルド、`make eval` の実行、レポート収集まで行います。
-- `AWSIMヘッドレス` を有効にした `evalwrap` / `quick eval` は、評価launch内のAWSIMを起動したまま `AWSIM_EXTRA_ARGS='-batchmode -nographics --camera false --lidar false'` を渡します。`NPC台数` は `AWSIM_VEHICLES=1〜4` として渡されます。
+- `AWSIMヘッドレス` を有効にした `evalwrap` / `quick eval` は、評価launch内のAWSIMを起動したまま `AWSIM_EXTRA_ARGS='-batchmode -nographics --camera false --lidar false'` を渡します。`追加Autoware車両` は `AWSIM_VEHICLES=1〜4` として渡されます。
 - `quick eval` は、短時間のローカル確認向けに軽量な直接 `make eval` 経路を残しています。こちらも先に `make autoware-build` を実行できます。
 - 実行メモは evalwrap の label/note として渡されます。空の場合、GUI は `<control_method>-gui-eval`、AWSIMヘッドレスでは `<control_method>-headless-eval` を使い、NPC台数がある場合は `-<n>npc` を付けます。
 - `evalwrap` または `log化` の後、速度・加速度・操舵角は `analysis/runs/<run_id>/processed/motion_log.csv` に出力され、GUI の Motion Log パネルで確認できます。

@@ -55,6 +55,10 @@ analysis/experiments.sqlite
 公式 JSON ファイルが見つからない場合でもクラッシュせず、`partial` 実行として
 記録します。
 
+HTML レポートには、実速度/目標速度、速度誤差、経路誤差、速度制限ソース、
+イベント位置、加減速応答、操舵応答、コーナー別性能の図を出力します。
+コース上の連続値マップは SVG の線分グラデーションで描画します。
+
 ## 参照軌道フォールバック
 
 rosbag に `/planning/scenario_planning/trajectory` が含まれていない場合、

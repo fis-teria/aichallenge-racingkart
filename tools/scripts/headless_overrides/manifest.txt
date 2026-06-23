@@ -3,6 +3,7 @@ docker-compose.yml
 aichallenge/build_autoware.bash
 aichallenge/run_autoware.bash
 aichallenge/run_evaluation.bash
+aichallenge/run_simulator.bash
 aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/aichallenge_submit.launch.xml
 aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml
 aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml
