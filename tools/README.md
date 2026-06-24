@@ -27,6 +27,83 @@ tools/run_tuning_gui.bash --background
 - [Tuning GUI 変更点ガイド ROS 2 初心者向け](docs/tuning_gui_changes_for_ros2_beginners.md)
 - [evalwrap レポート出力ガイド ROS 2 初心者向け](docs/evalwrap_report_outputs_for_ros2_beginners.md)
 
+## 2026 更新メモ
+
+AI Challenge 2026 では、上流側の `Makefile`、`docker-compose.yml`、
+`aichallenge/run_simulator.bash`、`aichallenge/run_evaluation.bash`、
+autostart 周辺、評価用 launch 構成が更新されています。そのため、2025/旧環境向けに
+作った headless/GUI 連携差分を 2026 の上流へそのまま `cherry-pick` すると
+衝突します。
+
+2026 環境へ入れる場合は、次のどちらかで導入してください。
+
+- すでに 2026 上流とローカル差分を解決済みのブランチを使う。
+- 既存の AI Challenge 2026 チェックアウトへ、この `tools/` の
+  `tools/scripts/setup.sh` から上書きパッチを適用する。
+
+このツール群で 2026 向けに共有している主な内容:
+
+- tuning GUI から `CONTROL_METHOD`、AWSIM ヘッドレス、NPC 台数、周回数、
+  timeout を渡すための起動系上書きファイル。
+- `delay_aware_mpc` などの control method を dev/eval の launch 経路へ通す設定。
+- GUI eval 後に `evalwrap` で `result-summary.json`、`result-details.json`、
+  rosbag、motion log、HTML レポートを回収・比較するためのローカル評価補助。
+- 2026 上流の compose/setup 変更と共存しやすいようにした
+  headless override の適用・復元手順。
+
+### 2026 ブランチを使う場合
+
+2026 上流とローカル差分を解決済みの作業ブランチがある場合は、そのブランチを使うのが
+一番安全です。
+
+```bash
+cd aichallenge-racingkart
+git fetch origin
+git checkout codex/investigate-2026-merge
+git pull --ff-only
+tools/evalwrap doctor
+tools/run_tuning_gui.bash --background
+```
+
+GUI から build/eval した後は、最新 run を取り込んで比較できます。
+
+```bash
+tools/evalwrap ingest --label gui-eval --path output/latest
+tools/evalwrap leaderboard --metric best_lap_sec
+```
+
+### 既存の 2026 チェックアウトを更新する場合
+
+`aichallenge_support_tools` から `tools/` を直接コピーして使う場合の例です。
+生成物やバックアップはコピー対象から外します。
+
+```bash
+cd aichallenge-racingkart
+rsync -a --delete \
+  --exclude '.git/' \
+  --exclude '.pytest_cache/' \
+  --exclude '__pycache__/' \
+  --exclude 'scripts/backups/' \
+  --exclude 'tuning_gui/.state/' \
+  --exclude 'tuning_gui/backups/' \
+  --exclude 'tuning_gui/history/' \
+  --exclude 'tuning_gui/runtime/' \
+  ../aichallenge_support_tools/tools/ tools/
+tools/scripts/setup.sh --dry-run
+tools/scripts/setup.sh --apply --yes
+```
+
+`tools/` を Git サブモジュールとして管理している場合は、サブモジュールを更新してから
+同じ setup を実行します。
+
+```bash
+cd aichallenge-racingkart
+git submodule update --init --recursive
+git -C tools pull --ff-only
+tools/scripts/setup.sh --dry-run
+tools/scripts/setup.sh --apply --yes
+```
+
 ## tuning GUI ヘッドレス連携パッチ
 
 `tuning_gui` から control method、AWSIM ヘッドレス、NPC 台数を切り替えるには、
