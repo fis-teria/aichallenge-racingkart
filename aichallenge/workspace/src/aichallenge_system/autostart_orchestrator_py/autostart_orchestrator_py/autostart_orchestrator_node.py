@@ -95,7 +95,9 @@ class AutostartOrchestrator(Node):
         self.declare_parameter("enable_motion_analytics", True)
         self.declare_parameter("motion_analytics_cmd", "ros2 run aichallenge_system_launch motion_analytics.py")
         self.declare_parameter("motion_analytics_input_dir", "")
+        # 0 or negative => wait forever (legacy behavior).
         self.declare_parameter("initial_pose_service_timeout_sec", 120.0)
+        # capture停止(別スレッド)のjoin上限秒。0以下で無限待ち。
         self.declare_parameter("capture_stop_timeout_sec", 60.0)
 
         vehicle_state_topic = str(self.get_parameter("vehicle_state_topic").value).strip()
@@ -478,6 +480,8 @@ class AutostartOrchestrator(Node):
                 f"waiting service and calling {self.get_parameter('initial_pose_service').value}"
                 + (f" (timeout {timeout_sec:.0f}s)" if timeout_arg is not None else ""),
             )
+            # One deadline bounds the whole step: wait_for_service consumes part of it
+            # and the trigger call only gets the remainder.
             deadline = None if timeout_arg is None else time.monotonic() + timeout_arg
             if self._wait_for_service(self._cli_initial_pose, timeout_sec=timeout_arg):
                 remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -531,6 +535,8 @@ class AutostartOrchestrator(Node):
 
         future.add_done_callback(_done)
         if not event.wait(timeout=timeout_sec):
+            # Drop the unresolved future so we don't leak a pending request,
+            # and report timeout so callers can fall through to next step.
             try:
                 client.remove_pending_request(future)
             except Exception:  # noqa: BLE001
@@ -759,7 +765,9 @@ class AutostartOrchestrator(Node):
         timeout = self._capture_stop_timeout()
         thread.join(timeout=timeout)
         if thread.is_alive():
-            self.get_logger().warn(f"capture stop did not finish within {timeout}s; continuing")
+            self.get_logger().warn(
+                f"capture stop did not finish within {timeout}s; continuing"
+            )
         with self._capture_stop_lock:
             if self._capture_stop_thread is thread:
                 self._capture_stop_thread = None
@@ -767,6 +775,9 @@ class AutostartOrchestrator(Node):
     def _finalize_recordings(
         self, enable_rosbag: bool, enable_capture: bool, enable_motion_analytics: bool
     ) -> None:
+        # capture停止を別スレッドで起動し、rosbag停止→motion_analytics(直列)と並列に走らせる。
+        # rosbag/motion が例外を投げても finally で必ず capture を join してから戻る
+        # （戻った時点で _shutdown / latestリンク更新が安全になる）。
         if enable_capture:
             self._start_capture_stop_async()
         try:
@@ -805,7 +816,11 @@ class AutostartOrchestrator(Node):
             return False
 
     def _ensure_latest_root(self, output_dir: Path) -> Optional[Path]:
-        if output_dir.name.startswith("d") and output_dir.name[1:].isdigit():
+        # Derive output_root relative to cwd so we stay portable across mount layouts.
+        # Single mode:   cwd == <run_dir>/d<N>  -> output_root = parent.parent
+        # Parallel mode: cwd == <run_dir>       -> output_root = parent
+        name = output_dir.name
+        if name.startswith("d") and name[1:].isdigit():
             output_root = output_dir.parent.parent
         else:
             output_root = output_dir.parent
@@ -877,6 +892,8 @@ class AutostartOrchestrator(Node):
             run_dir = output_dir.parent
             capture_target = self._latest_file_by_pattern(output_dir / "capture", "cap-*.mp4")
             rosbag_target = self._resolve_rosbag_target(output_dir)
+            # AWSIM writes result-summary.json (shared across vehicles) at its cwd.
+            # In parallel mode that is output_dir; in single mode it is run_dir.
             result_summary_target = self._latest_existing(
                 [output_dir / "result-summary.json", run_dir / "result-summary.json"]
             )
@@ -1029,6 +1046,8 @@ class AutostartOrchestrator(Node):
             self._set_exit_code(10)
             self._shutdown()
         finally:
+            # 早期 return / 例外経路で capture停止スレッドが残っていても、
+            # latestリンク更新(cap-*.mp4 への symlink)前に確実に合流させる。
             self._join_capture_stop()
             try:
                 self._refresh_latest_artifact_links()
