@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Challenge Tuning GUI</title>
+    <script>
+      document.documentElement.dataset.theme = localStorage.getItem("tuning-gui-theme") || "light";
+    </script>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>AI Challenge Tuning GUI</h1>
+        <p id="repoRoot"></p>
+      </div>
+      <div class="top-actions">
+        <div class="settings-menu">
+          <button id="runSettingsToggle" class="settings-toggle" type="button" aria-expanded="false" aria-controls="runSettingsMenu">
+            Run Settings
+          </button>
+          <div id="runSettingsMenu" class="settings-menu-panel" hidden>
+            <div class="settings-tabs" role="tablist" aria-label="Run settings">
+              <button class="settings-tab active" type="button" data-settings-tab="simulator">Simulator</button>
+              <button class="settings-tab" type="button" data-settings-tab="safety">Safety Gate</button>
+              <button class="settings-tab" type="button" data-settings-tab="multiplay">Multiplay</button>
+            </div>
+
+            <section class="settings-pane active" data-settings-panel="simulator">
+              <h3>Simulator</h3>
+              <label class="check">
+                <input id="runHeadless" type="checkbox">
+                <span>AWSIMヘッドレス</span>
+              </label>
+              <label class="field">
+                <span>追加Autoware車両</span>
+                <select id="npcCount">
+                  <option value="0">0台</option>
+                  <option value="1">1台</option>
+                  <option value="2">2台</option>
+                  <option value="3">3台</option>
+                </select>
+              </label>
+              <div class="run-settings-grid">
+                <label class="field">
+                  <span>start</span>
+                  <select id="simStartMode">
+                    <option value="">default</option>
+                    <option value="off">off</option>
+                    <option value="sync">sync</option>
+                    <option value="count">count</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>count sec</span>
+                  <input id="simStartCountSeconds" type="number" min="0" max="10" step="1" placeholder="10">
+                </label>
+                <label class="field">
+                  <span>laps</span>
+                  <input id="simLaps" type="text" placeholder="6 / unlimited">
+                </label>
+                <label class="field">
+                  <span>timeout</span>
+                  <input id="simTimeout" type="number" min="0" step="1" placeholder="600">
+                </label>
+                <label class="field">
+                  <span>NPC車両</span>
+                  <input id="simNpcVehicles" type="number" min="0" max="3" step="1" placeholder="0">
+                </label>
+                <label class="field">
+                  <span>boosts</span>
+                  <input id="simBoosts" type="number" min="0" max="5" step="1" placeholder="5">
+                </label>
+                <label class="field">
+                  <span>camera</span>
+                  <select id="simCamera">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>LiDAR</span>
+                  <select id="simLidar">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>sound</span>
+                  <select id="simSound">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>collision</span>
+                  <select id="simCollisions">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>wall rec.</span>
+                  <select id="simWallRecovery">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>ranking</span>
+                  <select id="simRanking">
+                    <option value="">default</option>
+                    <option value="true">on</option>
+                    <option value="false">off</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>steer</span>
+                  <select id="simSteerSource">
+                    <option value="">default</option>
+                    <option value="ackermann">ackermann</option>
+                    <option value="actuation">actuation</option>
+                    <option value="actuation-longitudinal-only">actuation-longitudinal-only</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>manual</span>
+                  <select id="simManualMode">
+                    <option value="">default</option>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </label>
+              </div>
+              <label class="field">
+                <span>scenario path</span>
+                <input id="simScenario" type="text" placeholder="Scenarios/scenario1.yaml">
+              </label>
+              <label class="field">
+                <span>vehicle poses</span>
+                <input id="simVehiclePoses" type="text" placeholder="poses.yaml">
+              </label>
+              <label class="field">
+                <span>replay0</span>
+                <input id="simReplay0" type="text" placeholder="result-details.json">
+              </label>
+              <label class="field">
+                <span>json path</span>
+                <input id="simJsonPath" type="text" placeholder="config.json">
+              </label>
+              <label class="field">
+                <span>raw args</span>
+                <input id="simRawArgs" type="text" placeholder="--endless true">
+              </label>
+            </section>
+
+            <section class="settings-pane" data-settings-panel="safety">
+              <h3>Safety Gate</h3>
+              <label class="field">
+                <span>scenario</span>
+                <select id="safetyGate"></select>
+              </label>
+            </section>
+
+            <section class="settings-pane" data-settings-panel="multiplay">
+              <h3>Multiplay</h3>
+              <div class="run-settings-grid">
+                <label class="field">
+                  <span>mode</span>
+                  <select id="multiMode">
+                    <option value="">off</option>
+                    <option value="server">server</option>
+                    <option value="client">client</option>
+                    <option value="host">host</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>port</span>
+                  <input id="multiPort" type="number" min="1" max="65535" step="1" placeholder="50051">
+                </label>
+                <label class="field">
+                  <span>send Hz</span>
+                  <input id="multiSendHz" type="number" min="0.1" step="0.1" placeholder="50.0">
+                </label>
+                <label class="field">
+                  <span>name</span>
+                  <input id="multiName" type="text" placeholder="player">
+                </label>
+              </div>
+              <label class="field">
+                <span>address</span>
+                <input id="multiAddress" type="text" placeholder="localhost">
+              </label>
+            </section>
+          </div>
+        </div>
+        <label class="theme-toggle" title="theme">
+          <input id="themeToggle" type="checkbox">
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          <span id="themeLabel">Light</span>
+        </label>
+        <div class="status-pill" id="statusPill">loading</div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="panel">
+          <h2>Control</h2>
+          <label class="field">
+            <span>control_method</span>
+            <select id="controlMethod"></select>
+          </label>
+          <div class="button-row">
+            <button id="saveControl">XMLへ保存</button>
+            <button id="saveControlBuild">保存してビルド</button>
+          </div>
+          <dl class="kv">
+            <dt>XML default</dt>
+            <dd id="xmlDefault">-</dd>
+            <dt>last build</dt>
+            <dd id="lastBuild">-</dd>
+            <dt>dirty</dt>
+            <dd id="dirtySince">-</dd>
+          </dl>
+        </section>
+
+        <section class="panel">
+          <h2>Files</h2>
+          <div id="fileList" class="file-list"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Presets</h2>
+          <label class="field">
+            <span>name</span>
+            <input id="presetName" type="text" placeholder="mpc-fast-01">
+          </label>
+          <label class="field">
+            <span>note</span>
+            <input id="presetNote" type="text" placeholder="変更メモ">
+          </label>
+          <div class="button-row">
+            <button id="savePreset">保存</button>
+            <button id="restorePreset">復元</button>
+          </div>
+          <select id="presetSelect" size="6"></select>
+        </section>
+      </aside>
+
+      <section class="editor">
+        <div class="editor-head">
+          <div>
+            <h2 id="fileTitle">File</h2>
+            <p id="filePath"></p>
+          </div>
+          <div class="button-row">
+            <button id="tableMode">表編集</button>
+            <button id="textMode">テキスト</button>
+            <button id="pathMode">Path Editor</button>
+            <button id="applyStructured">表を本文に反映</button>
+            <button id="validateFile">検証</button>
+            <button id="diffFile">Diff</button>
+            <button id="saveFile">保存</button>
+            <button id="saveFileBuild">保存してビルド</button>
+          </div>
+        </div>
+        <div id="structuredEditor" class="structured-editor" hidden>
+          <div class="structured-toolbar">
+            <label class="field table-filter">
+              <span>filter</span>
+              <input id="structuredFilter" type="text" placeholder="path / name / value / description">
+            </label>
+            <p id="structuredHint"></p>
+          </div>
+          <div class="structured-table-wrap">
+            <table class="structured-table">
+              <thead id="structuredHead">
+                <tr>
+                  <th>line</th>
+                  <th>path</th>
+                  <th>name</th>
+                  <th>type</th>
+                  <th>description</th>
+                  <th>value</th>
+                </tr>
+              </thead>
+              <tbody id="structuredRows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="pathEditor" class="path-editor" hidden>
+          <div class="path-toolbar">
+            <label class="field path-source">
+              <span>source</span>
+              <select id="pathSource"></select>
+            </label>
+            <label class="field path-target">
+              <span>target</span>
+              <input id="pathTarget" type="text">
+            </label>
+            <label class="check path-switch">
+              <input id="pathSwitchConfig" type="checkbox" checked>
+              <span>configへ反映</span>
+            </label>
+            <label class="check path-switch">
+              <input id="pathAutoBuild" type="checkbox">
+              <span>保存後ビルド</span>
+            </label>
+            <div class="button-row path-actions">
+              <button id="pathLoad">読込</button>
+              <button id="pathSave">保存</button>
+              <button id="pathFit">fit</button>
+              <button id="pathZoomIn">+</button>
+              <button id="pathZoomOut">-</button>
+            </div>
+          </div>
+          <div class="path-workspace">
+            <div class="path-canvas-wrap">
+              <canvas id="pathCanvas"></canvas>
+            </div>
+            <aside class="path-side">
+              <div class="button-row path-mode-row">
+                <button id="pathSelectMode" class="active">move</button>
+                <button id="pathAddMode">add</button>
+                <button id="pathDeletePoint">delete</button>
+              </div>
+              <div class="path-smooth">
+                <label class="field">
+                  <span>smooth</span>
+                  <input id="pathSmoothStrength" type="range" min="0.05" max="0.85" step="0.05" value="0.35">
+                </label>
+                <label class="field">
+                  <span>passes</span>
+                  <input id="pathSmoothPasses" type="number" min="1" max="8" step="1" value="2">
+                </label>
+                <div class="button-row path-smooth-row">
+                  <button id="pathSmooth">smooth</button>
+                  <button id="pathUndoSmooth" disabled>undo</button>
+                  <button id="pathClearRange" disabled>clear</button>
+                </div>
+              </div>
+              <dl class="kv path-kv">
+                <dt>points</dt>
+                <dd id="pathPointCount">-</dd>
+                <dt>length</dt>
+                <dd id="pathLength">-</dd>
+                <dt>min seg</dt>
+                <dd id="pathMinSegment">-</dd>
+                <dt>selected</dt>
+                <dd id="pathSelected">-</dd>
+                <dt>range</dt>
+                <dd id="pathRangeCount">-</dd>
+              </dl>
+              <label class="field">
+                <span>x_m</span>
+                <input id="pathPointX" type="number" step="0.001">
+              </label>
+              <label class="field">
+                <span>y_m</span>
+                <input id="pathPointY" type="number" step="0.001">
+              </label>
+              <pre id="pathWarnings" class="mini-log"></pre>
+            </aside>
+          </div>
+        </div>
+        <textarea id="fileEditor" spellcheck="false"></textarea>
+        <pre id="diffOutput" class="diff"></pre>
+      </section>
+
+      <aside class="rightbar">
+        <section class="panel">
+          <h2>Run</h2>
+          <label class="check">
+            <input id="buildFirst" type="checkbox" checked>
+            <span>実行前に更新ビルド</span>
+          </label>
+          <label class="field">
+            <span>run note</span>
+            <input id="runNote" type="text" placeholder="試行メモ">
+          </label>
+          <div class="run-grid">
+            <button id="runBuild">build</button>
+            <button id="runDev">dev</button>
+            <button id="runGate">gate</button>
+            <button id="runEval">evalwrap</button>
+            <button id="runQuickEval">quick eval</button>
+            <button id="runIngest">log化</button>
+            <button id="runDown">down</button>
+            <button id="stopCommand">stop</button>
+            <button id="refreshDocker">ps</button>
+          </div>
+          <pre id="dockerPs" class="mini-log"></pre>
+        </section>
+
+        <section class="panel">
+          <h2>Command Log</h2>
+          <pre id="commandLog" class="command-log"></pre>
+        </section>
+
+        <section class="panel">
+          <h2>Lap History</h2>
+          <div id="lapHistory" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Reports</h2>
+          <div id="reportList" class="report-list"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Motion Log</h2>
+          <label class="field">
+            <span>run</span>
+            <select id="motionRun"></select>
+          </label>
+          <label class="field">
+            <span>domain</span>
+            <select id="motionDomain"></select>
+          </label>
+          <div class="button-row">
+            <button id="refreshMotion">更新</button>
+          </div>
+          <canvas id="motionChart" width="640" height="360"></canvas>
+          <dl id="motionStats" class="kv motion-stats"></dl>
+          <div id="motionLinks" class="motion-links"></div>
+        </section>
+      </aside>
+    </main>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

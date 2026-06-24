@@ -11,9 +11,20 @@ PREDICTION = '#BA4A00'
 # MPC Controller #
 ##################
 
+LATERAL_TARGET_CENTER_OF_CORRIDOR = "center_of_corridor"
+LATERAL_TARGET_REFERENCE_PATH = "reference_path"
+LATERAL_TARGET_MODES = {
+    LATERAL_TARGET_CENTER_OF_CORRIDOR,
+    LATERAL_TARGET_REFERENCE_PATH,
+}
+
+
 class MPC:
     def __init__(self, model, N, Q, R, QN, StateConstraints, InputConstraints,
-                 ay_max, max_steering_rate, wp_id_offset, use_obstacle_avoidance, use_path_constraints_topic, use_max_kappa_pred=True):
+                 ay_max, max_steering_rate, wp_id_offset, use_obstacle_avoidance,
+                 use_path_constraints_topic, use_max_kappa_pred=True,
+                 lateral_target_mode=LATERAL_TARGET_CENTER_OF_CORRIDOR,
+                 wall_margin_m=0.0):
         """
         Constructor for the Model Predictive Controller.
         :param model: bicycle model object to be controlled
@@ -43,6 +54,8 @@ class MPC:
         self.state_constraints = StateConstraints
         self.input_constraints = InputConstraints
         self.ay_max = ay_max
+        self.lateral_target_mode = self._normalize_lateral_target_mode(lateral_target_mode)
+        self.wall_margin_m = max(0.0, float(wall_margin_m))
 
         # 追加: ステアリングレート制限関連のパラメータ
         self.max_steering_rate = max_steering_rate
@@ -71,6 +84,12 @@ class MPC:
     def update_wp_id_offset(self, wp_id_offset: int):
         self.wp_id_offset = wp_id_offset
 
+    def update_lateral_target_mode(self, lateral_target_mode: str):
+        self.lateral_target_mode = self._normalize_lateral_target_mode(lateral_target_mode)
+
+    def update_wall_margin_m(self, wall_margin_m: float):
+        self.wall_margin_m = max(0.0, float(wall_margin_m))
+
     def update_Q(self, Q: np.ndarray):
         self.Q = Q
 
@@ -79,6 +98,32 @@ class MPC:
 
     def update_QN(self, QN: np.ndarray):
         self.QN = QN
+
+    def _normalize_lateral_target_mode(self, lateral_target_mode: str) -> str:
+        if lateral_target_mode in LATERAL_TARGET_MODES:
+            return lateral_target_mode
+        return LATERAL_TARGET_CENTER_OF_CORRIDOR
+
+    def _apply_wall_margin(self, ub: np.ndarray, lb: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        ub = np.array(ub, dtype=float, copy=True)
+        lb = np.array(lb, dtype=float, copy=True)
+        margin = self.wall_margin_m
+        if margin <= 0.0:
+            return ub, lb
+
+        corridor_width = ub - lb
+        effective_margin = np.minimum(
+            margin,
+            np.maximum(corridor_width * 0.5 - 1.0e-3, 0.0),
+        )
+        return ub - effective_margin, lb + effective_margin
+
+    def _lateral_reference(self, ub: np.ndarray, lb: np.ndarray) -> np.ndarray:
+        if self.lateral_target_mode == LATERAL_TARGET_REFERENCE_PATH:
+            reference = np.zeros_like(ub)
+        else:
+            reference = (lb + ub) / 2.0
+        return np.clip(reference, lb, ub)
 
     def _init_problem(self, N, safety_margin):
         """
@@ -140,7 +185,7 @@ class MPC:
                 vmax_dyn = np.sqrt(self.ay_max / (np.abs(max_kappa_pred) + 1e-12))
             else:
                 vmax_dyn = np.sqrt(self.ay_max / (np.abs(kappa_pred[n]) + 1e-12))
-            umax_dyn[self.nu*n] = min(vmax_dyn, umax_dyn[self.nu*n])
+            umax_dyn[self.nu*n] = min(vmax_dyn, v_ref, umax_dyn[self.nu*n])
 
         # Update path constraints
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
@@ -148,10 +193,12 @@ class MPC:
                 self.model.wp_id + 1,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
                 N, self.model.length, self.model.width, safety_margin)
+            ub = np.array(ub, dtype=float, copy=True)
+            lb = np.array(lb, dtype=float, copy=True)
         else:
             ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
-            ub = self.model.reference_path.path_constraints[0][ref_wp_id]
-            lb = self.model.reference_path.path_constraints[1][ref_wp_id]
+            ub = np.array(self.model.reference_path.path_constraints[0][ref_wp_id], dtype=float, copy=True)
+            lb = np.array(self.model.reference_path.path_constraints[1][ref_wp_id], dtype=float, copy=True)
             self.model.reference_path.border_cells.current_wp_id = ref_wp_id
 
             # Update safety margin if provided as argument and different from current value
@@ -164,11 +211,13 @@ class MPC:
                 ub[infeasible_index] = 0.0
                 lb[infeasible_index] = 0.0
 
+        ub, lb = self._apply_wall_margin(ub, lb)
+
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
-        xr[self.nx::self.nx] = (lb + ub) / 2
+        xr[self.nx::self.nx] = self._lateral_reference(ub, lb)
 
         # Get equality matrix
         Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + sparse.csc_matrix(A)

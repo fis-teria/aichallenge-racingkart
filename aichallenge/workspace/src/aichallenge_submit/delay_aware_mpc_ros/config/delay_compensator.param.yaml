@@ -1,0 +1,15 @@
+delay_compensated_odometry:
+  ros__parameters:
+    enabled: true
+    mode: "state_shift_with_steer_lag"
+    steering_delay_sec: 0.20
+    prediction_dt: 0.02
+    steering_time_constant_sec: 0.30
+    wheelbase: 1.087
+    use_reference_time_shift: true
+    use_steering_status: true
+    steering_status_timeout_sec: 0.20
+    use_yaw_rate_fallback: true
+    use_command_history_fallback: true
+    min_velocity_for_yaw_prediction: 0.20
+    debug_publish_period_sec: 0.25

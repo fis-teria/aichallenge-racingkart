@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOLS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${TOOLS_DIR}/.." && pwd)"
+EVALWRAP_DIR="${TOOLS_DIR}/eval_wrapper"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  tools/evalwrap <evalwrap-command> [options]
+
+Examples:
+  tools/evalwrap doctor
+  tools/evalwrap ingest --label baseline --path output/latest
+  tools/evalwrap list
+  tools/evalwrap leaderboard --metric total_time_sec
+  tools/evalwrap run --label baseline --skip-build
+
+This wrapper runs the evalwrap Python package inside:
+  tools/eval_wrapper
+EOF
+}
+
+if [[ ! -f "${EVALWRAP_DIR}/evalwrap/cli.py" ]]; then
+    echo "[evalwrap][ERROR] evalwrap package is not found under: ${EVALWRAP_DIR}" >&2
+    exit 1
+fi
+
+export PYTHONPATH="${EVALWRAP_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+cd "${REPO_ROOT}"
+
+case "${1-}" in
+    "" | -h | --help)
+        usage
+        echo
+        exec python3 -m evalwrap --help
+        ;;
+esac
+
+exec python3 -m evalwrap --repo-root "${REPO_ROOT}" "$@"

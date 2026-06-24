@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalwrap"
+version = "0.1.0"
+description = "Local evaluation result collector and reporter for AI Challenge racing kart runs"
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=5.4",
+]
+
+[project.scripts]
+evalwrap = "evalwrap.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["evalwrap*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

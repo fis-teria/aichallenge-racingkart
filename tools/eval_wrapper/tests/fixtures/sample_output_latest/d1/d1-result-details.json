@@ -1,0 +1,11 @@
+{
+  "laps": [
+    {"lap": 1, "lap_time_sec": 70.1},
+    {"lap": 2, "lap_time_sec": 69.8},
+    {"lap": 3, "lap_time_sec": 68.9},
+    {"lap": 4, "lap_time_sec": 70.2},
+    {"lap": 5, "lap_time_sec": 71.0},
+    {"lap": 6, "lap_time_sec": 71.35}
+  ],
+  "events": []
+}

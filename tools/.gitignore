@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+tuning_gui/.state/
+tuning_gui/backups/
+tuning_gui/history/
+tuning_gui/runtime/
+tuning_gui/presets/*.json

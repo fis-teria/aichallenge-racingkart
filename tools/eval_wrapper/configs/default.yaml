@@ -1,0 +1,11 @@
+analysis_dir: analysis
+output_latest: output/latest
+submission_tar: submit/aichallenge_submit.tar.gz
+domains: [1, 2, 3, 4]
+command_log_dir: command_logs
+reference_trajectory:
+  enabled: true
+  source: mpc_config
+  mpc_package_path: aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros
+  mpc_config_path: aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/config/config.yaml
+  use_when_rosbag_trajectory_missing: true

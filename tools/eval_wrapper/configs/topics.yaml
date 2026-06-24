@@ -1,0 +1,14 @@
+control_cmd: /control/command/control_cmd
+actuation_cmd: /control/command/actuation_cmd
+actuation_status: /vehicle/status/actuation_status
+velocity_status: /vehicle/status/velocity_status
+steering_status: /vehicle/status/steering_status
+gear_cmd: /control/command/gear_cmd
+gear_status: /vehicle/status/gear_status
+nav_sat_fix: /sensing/gnss/nav_sat_fix
+imu_raw: /sensing/imu/imu_raw
+lidar_scan: /sensing/lidar/scan
+camera_image_raw: /sensing/camera/image_raw
+camera_info: /sensing/camera/camera_info
+awsim_status: /awsim/status
+awsim_state: /awsim/state
