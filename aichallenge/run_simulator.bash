@@ -48,6 +48,12 @@ case "${mode}" in
     ;;
 esac
 
+start_mode="${AWSIM_START_MODE:-${start_mode}}"
+vehicles="${AWSIM_VEHICLES:-${vehicles}}"
+laps="${AWSIM_LAPS:-${laps}}"
+timeout="${AWSIM_TIMEOUT:-${timeout}}"
+start_count_seconds="${AWSIM_START_COUNT_SECONDS:-}"
+
 awsim_extra_args="${AWSIM_EXTRA_ARGS-}"
 if [[ -z ${awsim_extra_args} && ! -e /dev/nvidia0 && ${mode} =~ ^(dev|test|[1-4]p)$ ]]; then
     awsim_extra_args="--camera false --lidar false"
@@ -60,6 +66,9 @@ echo "[INFO] Starting AWSIM in '${mode}' mode"
 echo "[INFO] AWSIM Vulkan env: __NV_PRIME_RENDER_OFFLOAD=${awsim_prime_render_offload} __VK_LAYER_NV_optimus=${awsim_vk_layer_optimus} VK_ICD_FILENAMES=${awsim_vk_icd_filenames:-<unset>}"
 
 declare -a opts=("-force-vulkan" "--start-mode" "${start_mode}" "--vehicles" "${vehicles}" "--laps" "${laps}" "--timeout" "${timeout}")
+if [[ -n ${start_count_seconds} ]]; then
+    opts+=("--start-count-seconds" "${start_count_seconds}")
+fi
 declare -a extra_args
 read -r -a extra_args <<<"${awsim_extra_args}"
 opts+=("${extra_args[@]}")

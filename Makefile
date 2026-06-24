@@ -2,11 +2,12 @@
 SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh \
-	simulator dev dev2 dev3 dev4 driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
+	simulator dev dev2 dev3 dev4 gate1 gate2 gate3 driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
 HOST_UID ?= $(shell id -u)
 HOST_GID ?= $(shell id -g)
+CONTROL_METHOD ?= mpc
 export HOST_UID HOST_GID
 # Stop host shell's ROS_DOMAIN_ID from overriding .env via compose interpolation,
 # but still honor an explicit `make foo ROS_DOMAIN_ID=N` command-line override.
@@ -73,6 +74,20 @@ dev2 dev3 dev4: simulator
 	for p in $$(seq 1 $$N); do LOG_DIR=$(LOG_DIR) ROS_DOMAIN_ID=$$p docker compose -p $$p up -d autoware; done; \
 	$(MAKE) awsim-request-start; \
 	echo "To Stop: make down"
+
+gate1: GATE_SCENARIO := SafetyGate/scenario1.yaml
+gate1: GATE_VEHICLES := 4
+gate2: GATE_SCENARIO := SafetyGate/scenario2.yaml
+gate2: GATE_VEHICLES := 4
+gate3: GATE_SCENARIO := SafetyGate/scenario3.yaml
+gate3: GATE_VEHICLES := 1
+gate1 gate2 gate3:
+	@echo "Start safety gate $(@:gate=%) ($(GATE_SCENARIO))"
+	@base_args="--scenario $(GATE_SCENARIO)"; \
+	extra_args="$${AWSIM_EXTRA_ARGS:-} $(GATE_EXTRA_ARGS)"; \
+	control_method="$${CONTROL_METHOD:-$(CONTROL_METHOD)}"; \
+	ROSBAG=true CONTROL_METHOD="$$control_method" AWSIM_START_MODE=sync AWSIM_VEHICLES=$(GATE_VEHICLES) AWSIM_LAPS=unlimited AWSIM_EXTRA_ARGS="$$base_args $$extra_args" $(MAKE) dev; \
+	$(MAKE) awsim-request-start
 
 # Kept for backward compatibility; `make down` already cleans all projects.
 down2 down3 down4: down

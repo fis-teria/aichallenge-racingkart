@@ -8,8 +8,10 @@
     call_initial_pose: true
     request_control_mode: true
     initial_pose_service: /set_initial_pose
+    initial_pose_service_timeout_sec: 120.0
     control_mode_request_topic: /awsim/control_mode_request_topic
     capture_service: /debug/service/capture_screen
+    capture_stop_timeout_sec: 60.0
     enable_debug_visualization: true
     rosbag_topics:
       - /control/command/control_cmd
