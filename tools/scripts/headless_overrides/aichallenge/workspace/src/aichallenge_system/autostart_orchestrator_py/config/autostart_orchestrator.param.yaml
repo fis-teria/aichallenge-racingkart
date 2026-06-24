@@ -1,0 +1,40 @@
+/**:
+  ros__parameters:
+    vehicle_state_topic: /awsim/state
+    start_on_vehicle_state: "Grounded,Ready,Start" # start initialization/recording when either Ready or Start is observed.
+    stop_on_vehicle_state: "Finish"
+    enable_capture: false
+    enable_rosbag: false
+    call_initial_pose: true
+    request_control_mode: true
+    initial_pose_service: /set_initial_pose
+    initial_pose_service_timeout_sec: 120.0
+    control_mode_request_topic: /awsim/control_mode_request_topic
+    capture_service: /debug/service/capture_screen
+    capture_stop_timeout_sec: 60.0
+    enable_debug_visualization: true
+    rosbag_topics:
+      - /control/command/control_cmd
+      - /control/command/actuation_cmd
+      - /awsim/status
+      - /delay_aware_mpc/debug
+      - /mpc/speed_profile_debug
+      - /clock
+      - /localization/acceleration
+      - /localization/kinematic_state
+      - /planning/scenario_planning/trajectory
+      - /vehicle/status/velocity_status
+      - /vehicle/status/steering_status
+      - /sensing/camera/image_raw
+      - /sensing/camera/camera_info
+      - /sensing/lidar/scan
+    rosbag_output: rosbag2_autoware
+    rosbag_storage_id: mcap
+    # Leave both empty to keep rosbag output as plain .mcap (no outer compression).
+    rosbag_compression_format: ""
+    rosbag_compression_mode: ""
+    enable_motion_analytics: true
+    motion_analytics_cmd: "ros2 run aichallenge_system_launch motion_analytics.py"
+    # Empty means <cwd>/<rosbag_output>.
+    motion_analytics_input_dir: ""
+    exit_on_finish: true
