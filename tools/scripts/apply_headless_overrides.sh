@@ -6,6 +6,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 OVERRIDES_DIR="${SCRIPT_DIR}/headless_overrides"
 MANIFEST="${OVERRIDES_DIR}/manifest.txt"
 BACKUP_ROOT="${SCRIPT_DIR}/backups"
+PROFILE="headless"
 
 ACTION="dry-run"
 ASSUME_YES=0
@@ -14,14 +15,16 @@ BACKUP_DIR=""
 usage() {
     cat <<'EOF'
 Usage:
-  tools/scripts/apply_headless_overrides.sh --dry-run
-  tools/scripts/apply_headless_overrides.sh --apply [--yes]
+  tools/scripts/apply_headless_overrides.sh --dry-run [--profile headless|2026-full]
+  tools/scripts/apply_headless_overrides.sh --apply [--profile headless|2026-full] [--yes]
   tools/scripts/apply_headless_overrides.sh --restore --backup-dir PATH [--yes]
 
 Options:
   --dry-run          Show which repo files would be overwritten. This is the default.
   --apply            Copy headless override files into the AI Challenge repo.
   --restore          Restore files from a backup made by --apply.
+  --profile NAME     Patch profile to use: headless (default) or 2026-full.
+  --full-2026        Alias for --profile 2026-full.
   --backup-dir PATH  Backup directory to use for --restore.
   --repo-root PATH   Override the detected AI Challenge repo root.
   --yes, -y          Skip confirmation prompts.
@@ -36,6 +39,24 @@ log() {
 die() {
     echo "[headless-overrides][ERROR] $*" >&2
     exit 1
+}
+
+set_profile() {
+    local profile="$1"
+    [ -n "${profile}" ] || die "--profile requires NAME."
+    case "${profile}" in
+    headless)
+        PROFILE="headless"
+        MANIFEST="${OVERRIDES_DIR}/manifest.txt"
+        ;;
+    2026-full | full-2026)
+        PROFILE="2026-full"
+        MANIFEST="${OVERRIDES_DIR}/manifest.2026-full.txt"
+        ;;
+    *)
+        die "Unknown profile: ${profile}. Expected: headless or 2026-full."
+        ;;
+    esac
 }
 
 confirm() {
@@ -82,12 +103,14 @@ make_backup_dir() {
         printf '%s\n' "${BACKUP_DIR}"
         return 0
     fi
-    printf '%s/headless-overrides-%s\n' "${BACKUP_ROOT}" "$(date +%Y%m%d-%H%M%S)"
+    printf '%s/%s-overrides-%s\n' "${BACKUP_ROOT}" "${PROFILE}" "$(date +%Y%m%d-%H%M%S)"
 }
 
 dry_run() {
     log "Repo root: ${REPO_ROOT}"
+    log "Profile: ${PROFILE}"
     log "Override source: ${OVERRIDES_DIR}"
+    log "Manifest: ${MANIFEST}"
     log "Files that would be overwritten:"
     iter_manifest | while IFS= read -r rel; do
         [ -f "${OVERRIDES_DIR}/${rel}" ] || die "Override file missing: ${OVERRIDES_DIR}/${rel}"
@@ -100,7 +123,7 @@ apply_overrides() {
     backup_dir="$(make_backup_dir)"
 
     dry_run
-    confirm "Apply headless override files and create backup at ${backup_dir}?" || die "Cancelled."
+    confirm "Apply ${PROFILE} override files and create backup at ${backup_dir}?" || die "Cancelled."
 
     mkdir -p "${backup_dir}"
     cp -p "${MANIFEST}" "${backup_dir}/manifest.txt"
@@ -176,6 +199,14 @@ while [ $# -gt 0 ]; do
         ;;
     --restore)
         ACTION="restore"
+        shift
+        ;;
+    --profile)
+        set_profile "${2-}"
+        shift 2
+        ;;
+    --full-2026)
+        set_profile "2026-full"
         shift
         ;;
     --backup-dir)
