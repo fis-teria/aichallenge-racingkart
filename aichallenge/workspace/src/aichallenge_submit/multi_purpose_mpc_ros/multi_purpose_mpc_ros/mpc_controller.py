@@ -576,6 +576,8 @@ class MPCController(Node):
 
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
+        self._last_overtake_override_sec: Optional[float] = None
+        self._overtake_override_timeout_sec = 0.50
 
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
@@ -843,6 +845,8 @@ class MPCController(Node):
             Trajectory, "planning/scenario_planning/trajectory", self._trajectory_callback, trajectory_qos)
         self._stop_request_sub = self.create_subscription(
             Empty, "/control/mpc/stop_request", self._stop_request_callback, 1)
+        self._overtake_override_sub = self.create_subscription(
+            Float32MultiArray, "/overtake/reference_override", self._overtake_override_callback, 1)
 
         if self.use_sim_time:
             self._awsim_status_sub = self.create_subscription(
@@ -929,6 +933,39 @@ class MPCController(Node):
 
     def _trajectory_callback(self, msg):
         self._trajectory = msg
+
+    def _overtake_override_callback(self, msg: Float32MultiArray):
+        data = list(msg.data)
+        if len(data) < 3 or int(data[0]) != 1:
+            self._mpc.clear_overtake_reference_override()
+            self._last_overtake_override_sec = None
+            return
+
+        mode_id = int(data[1])
+        n = int(data[2])
+        expected = 3 + 2 * n
+        if n <= 0 or mode_id == 0:
+            self._mpc.clear_overtake_reference_override()
+            self._last_overtake_override_sec = self.get_clock().now().nanoseconds / 1e9
+            return
+        if len(data) < expected:
+            self.get_logger().warn(
+                f"Malformed overtake override: len={len(data)} expected={expected}",
+                throttle_duration_sec=1.0)
+            return
+
+        lateral_offsets = data[3:3 + n]
+        speed_caps = data[3 + n:3 + 2 * n]
+        self._mpc.set_overtake_reference_override(lateral_offsets, speed_caps, mode_id)
+        self._last_overtake_override_sec = self.get_clock().now().nanoseconds / 1e9
+
+    def _clear_stale_overtake_override(self, now) -> None:
+        if self._last_overtake_override_sec is None:
+            return
+        now_sec = now.nanoseconds / 1e9
+        if now_sec - self._last_overtake_override_sec > self._overtake_override_timeout_sec:
+            self._mpc.clear_overtake_reference_override()
+            self._last_overtake_override_sec = None
 
     def _awsim_status_callback(self, msg):
         laps = int(msg.data[1])
@@ -1117,6 +1154,7 @@ class MPCController(Node):
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
         self._car.get_current_waypoint()
         self._apply_speed_profile(self._car.wp_id)
+        self._clear_stale_overtake_override(now)
 
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()

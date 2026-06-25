@@ -68,6 +68,9 @@ class MPC:
         self.infeasibility_counter = 0
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
+        self.overtake_lateral_offsets = None
+        self.overtake_speed_caps = None
+        self.overtake_mode_id = 0
         self.optimizer = osqp.OSQP()
 
         if not self.use_obstacle_avoidance:
@@ -89,6 +92,17 @@ class MPC:
 
     def update_wall_margin_m(self, wall_margin_m: float):
         self.wall_margin_m = max(0.0, float(wall_margin_m))
+
+    def set_overtake_reference_override(
+            self, lateral_offsets=None, speed_caps=None, mode_id=0):
+        self.overtake_mode_id = int(mode_id)
+        self.overtake_lateral_offsets = (
+            None if lateral_offsets is None else np.asarray(lateral_offsets, dtype=float))
+        self.overtake_speed_caps = (
+            None if speed_caps is None else np.asarray(speed_caps, dtype=float))
+
+    def clear_overtake_reference_override(self):
+        self.set_overtake_reference_override(None, None, 0)
 
     def update_Q(self, Q: np.ndarray):
         self.Q = Q
@@ -124,6 +138,22 @@ class MPC:
         else:
             reference = (lb + ub) / 2.0
         return np.clip(reference, lb, ub)
+
+    def _overtake_lateral_reference(self, n_points: int, ub: np.ndarray, lb: np.ndarray):
+        if self.overtake_lateral_offsets is None or self.overtake_lateral_offsets.size == 0:
+            return None
+        count = min(n_points, self.overtake_lateral_offsets.size)
+        reference = self._lateral_reference(ub, lb)
+        reference[:count] = self.overtake_lateral_offsets[:count]
+        return np.clip(reference, lb, ub)
+
+    def _overtake_speed_cap(self, index: int):
+        if self.overtake_speed_caps is None or index >= self.overtake_speed_caps.size:
+            return None
+        cap = float(self.overtake_speed_caps[index])
+        if not np.isfinite(cap) or cap <= 0.0:
+            return None
+        return cap
 
     def _init_problem(self, N, safety_margin):
         """
@@ -169,6 +199,9 @@ class MPC:
 
             # Clip reference velocity
             v_ref = np.clip(current_waypoint.v_ref, self.input_constraints['umin'][0], self.input_constraints['umax'][0])
+            overtake_cap = self._overtake_speed_cap(n)
+            if overtake_cap is not None:
+                v_ref = min(v_ref, overtake_cap)
 
             # Compute LTV matrices
             f, A_lin, B_lin = self.model.linearize(v_ref, kappa_ref, delta_s)
@@ -217,7 +250,11 @@ class MPC:
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
-        xr[self.nx::self.nx] = self._lateral_reference(ub, lb)
+        overtake_reference = self._overtake_lateral_reference(N, ub, lb)
+        if overtake_reference is None:
+            xr[self.nx::self.nx] = self._lateral_reference(ub, lb)
+        else:
+            xr[self.nx::self.nx] = overtake_reference
 
         # Get equality matrix
         Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + sparse.csc_matrix(A)

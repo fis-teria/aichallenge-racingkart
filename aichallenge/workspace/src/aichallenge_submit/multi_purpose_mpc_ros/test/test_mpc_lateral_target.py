@@ -67,3 +67,33 @@ def test_center_of_corridor_lateral_target_preserves_previous_behavior():
     assert ub == pytest.approx([0.75])
     assert lb == pytest.approx([-0.25])
     assert target == pytest.approx([0.25])
+
+
+def test_overtake_lateral_override_clips_to_corridor():
+    mpc = make_mpc(lateral_target_mode="reference_path")
+    mpc.set_overtake_reference_override([0.2, 2.0], [3.0, 4.0], mode_id=3)
+
+    target = mpc._overtake_lateral_reference(
+        2, np.array([1.0, 1.0]), np.array([-1.0, -1.0]))
+
+    assert target == pytest.approx([0.2, 1.0])
+
+
+def test_overtake_speed_cap_returns_none_for_invalid_values():
+    mpc = make_mpc()
+    mpc.set_overtake_reference_override([0.0], [4.0, -1.0], mode_id=1)
+
+    assert mpc._overtake_speed_cap(0) == pytest.approx(4.0)
+    assert mpc._overtake_speed_cap(1) is None
+    assert mpc._overtake_speed_cap(2) is None
+
+
+def test_clear_overtake_reference_override_restores_no_override():
+    mpc = make_mpc()
+    mpc.set_overtake_reference_override([0.3], [2.0], mode_id=1)
+
+    mpc.clear_overtake_reference_override()
+
+    assert mpc._overtake_lateral_reference(
+        1, np.array([1.0]), np.array([-1.0])) is None
+    assert mpc._overtake_speed_cap(0) is None

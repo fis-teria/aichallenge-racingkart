@@ -2,6 +2,7 @@
 <launch>
   <arg name="use_sim_time" default="true"/>
   <arg name="use_obstacle_avoidance" default="true"/>
+  <arg name="use_overtake_planner" default="true"/>
   <arg name="delay_enabled" default="true"/>
   <arg name="delay_mode" default="state_shift_with_steer_lag"/>
   <arg name="steering_delay_sec" default="0.20"/>
@@ -44,4 +45,11 @@
     <param name="use_stats" value="false"/>
     <remap from="/localization/kinematic_state" to="/delay_aware_mpc/localization/kinematic_state"/>
   </node>
+
+  <group if="$(var use_overtake_planner)">
+    <include file="$(find-pkg-share overtake_planner)/launch/overtake_planner.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="input_odom" value="/delay_aware_mpc/localization/kinematic_state"/>
+    </include>
+  </group>
 </launch>

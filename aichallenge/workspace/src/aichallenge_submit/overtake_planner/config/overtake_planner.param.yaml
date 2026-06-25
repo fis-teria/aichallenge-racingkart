@@ -1,0 +1,34 @@
+overtake_planner_node:
+  ros__parameters:
+    enabled: true
+    reference_package: "multi_purpose_mpc_ros"
+    reference_csv: "env/final_ver3/traj_mincurv_manual.csv"
+    own_vehicle_id: "d1"
+    ego_stale_time_sec: 0.50
+    control_rate_hz: 20.0
+    horizon_points: 30
+    horizon_dt_sec: 0.025
+    lookahead_s_m: 35.0
+    follow_trigger_s_m: 12.0
+    same_corridor_width_m: 0.90
+    dv_block_threshold_mps: 0.20
+    opponent_stale_time_sec: 0.50
+    side_by_side_s_m: 4.0
+    left_offset_m: 0.80
+    right_offset_m: -0.80
+    prepare_distance_m: 8.0
+    merge_distance_m: 12.0
+    follow_speed_margin_mps: 0.20
+    recovery_v_max_mps: 5.0
+    v_passthrough_mps: 50.0
+    d_min_m: -1.35
+    d_max_m: 1.35
+    min_wall_margin_m: 0.25
+    safety_ellipse_a_m: 3.0
+    safety_ellipse_b_m: 1.2
+    min_ellipse_h: 0.20
+    pass_safe_required_cycles: 5.0
+    merge_front_gap_m: 6.0
+    abort_timeout_sec: 5.0
+    min_mode_hold_time_sec: 0.60
+    keep_mode_bonus: 25.0

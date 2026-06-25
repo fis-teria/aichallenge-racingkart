@@ -2,6 +2,7 @@
 <launch>
   <arg name="use_sim_time" default="true"/>
   <arg name="use_obstacle_avoidance" default="false"/>
+  <arg name="use_overtake_planner" default="true"/>
 
   <node pkg="multi_purpose_mpc_ros" exec="run_mpc_controller.bash"
         name="mpc_controller" output="screen"
@@ -12,4 +13,11 @@
     <param name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
     <param name="use_stats" value="false"/>
   </node>
+
+  <group if="$(var use_overtake_planner)">
+    <include file="$(find-pkg-share overtake_planner)/launch/overtake_planner.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="input_odom" value="/localization/kinematic_state"/>
+    </include>
+  </group>
 </launch>
