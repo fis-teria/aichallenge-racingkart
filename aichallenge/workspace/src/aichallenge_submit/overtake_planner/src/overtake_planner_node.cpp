@@ -9,6 +9,7 @@
 #include <v2x_msgs/msg/v2_x_vehicle_position_array.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -38,6 +39,14 @@ std::string resolveReferencePath(
     return csv_path;
   }
   return ament_index_cpp::get_package_share_directory(package_name) + "/" + csv_path;
+}
+
+std::string jsonNumber(double value)
+{
+  if (!std::isfinite(value)) {
+    return "null";
+  }
+  return std::to_string(value);
 }
 
 }  // namespace
@@ -211,7 +220,31 @@ private:
     override_pub_->publish(msg);
   }
 
-  void publishDebug(const PlannerOutput & output)
+  std::uint64_t updateAttemptId(BehaviorMode mode)
+  {
+    const bool starts_attempt =
+      mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
+      mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
+      mode == BehaviorMode::OVERTAKE_LEFT ||
+      mode == BehaviorMode::OVERTAKE_RIGHT;
+    if (!attempt_active_ && starts_attempt) {
+      ++current_attempt_id_;
+      attempt_active_ = true;
+    }
+
+    std::uint64_t publish_id = attempt_active_ ? current_attempt_id_ : 0;
+    if (
+      attempt_active_ &&
+      (mode == BehaviorMode::FREE_RUN || mode == BehaviorMode::FOLLOW_BLOCKED) &&
+      (last_mode_ == BehaviorMode::MERGE_BACK || last_mode_ == BehaviorMode::ABORT_RECOVERY)) {
+      publish_id = current_attempt_id_;
+      attempt_active_ = false;
+    }
+    last_mode_ = mode;
+    return publish_id;
+  }
+
+  void publishDebug(const PlannerOutput & output, const EgoState & ego, std::uint64_t attempt_id)
   {
     std_msgs::msg::String mode_msg;
     mode_msg.data = toString(output.mode);
@@ -221,13 +254,32 @@ private:
     std::ostringstream oss;
     oss << "{"
         << "\"mode\":\"" << toString(output.mode) << "\","
+        << "\"overtake_state\":\"" << toString(output.mode) << "\","
+        << "\"attempt_id\":" << attempt_id << ","
         << "\"selected\":\"" << toString(output.selected) << "\","
         << "\"blocked\":" << (output.blocked_info.blocked ? "true" : "false") << ","
         << "\"side_by_side\":" << (output.blocked_info.side_by_side ? "true" : "false") << ","
-        << "\"front_delta_s\":" << output.blocked_info.front_delta_s << ","
-        << "\"front_delta_d\":" << output.blocked_info.front_delta_d << ","
-        << "\"front_rel_v\":" << output.blocked_info.front_rel_v << ","
-        << "\"active_override\":" << (output.active_override ? "true" : "false")
+        << "\"front_vehicle_id\":\"" << output.blocked_info.nearest_id << "\","
+        << "\"target_vehicle_id\":\"" << output.blocked_info.nearest_id << "\","
+        << "\"front_delta_s\":" << jsonNumber(output.blocked_info.front_delta_s) << ","
+        << "\"front_distance_m\":" << jsonNumber(output.blocked_info.front_delta_s) << ","
+        << "\"front_delta_d\":" << jsonNumber(output.blocked_info.front_delta_d) << ","
+        << "\"front_rel_v\":" << jsonNumber(output.blocked_info.front_rel_v) << ","
+        << "\"relative_speed_mps\":" << jsonNumber(output.blocked_info.front_rel_v) << ","
+        << "\"ego_x\":" << jsonNumber(ego.x) << ","
+        << "\"ego_y\":" << jsonNumber(ego.y) << ","
+        << "\"ego_s\":" << jsonNumber(ego.frenet.s) << ","
+        << "\"ego_lateral_offset\":" << jsonNumber(ego.frenet.d) << ","
+        << "\"ego_speed_mps\":" << jsonNumber(ego.v) << ","
+        << "\"target_lateral_offset_m\":" << jsonNumber(output.target_lateral_offset_m) << ","
+        << "\"min_cbf_h\":" << jsonNumber(output.min_cbf_h) << ","
+        << "\"cbf_slack\":" << jsonNumber(output.cbf_slack) << ","
+        << "\"active_cbf_constraint_count\":" << output.active_cbf_constraint_count << ","
+        << "\"closest_vehicle_id\":\"" << output.blocked_info.nearest_id << "\","
+        << "\"closest_vehicle_distance_m\":" << jsonNumber(output.blocked_info.front_delta_s) << ","
+        << "\"active_override\":" << (output.active_override ? "true" : "false") << ","
+        << "\"abort_reason\":\"" << (output.mode == BehaviorMode::ABORT_RECOVERY ? output.reason : "") << "\","
+        << "\"reason\":\"" << output.reason << "\""
         << "}";
     metrics_msg.data = oss.str();
     metrics_pub_->publish(metrics_msg);
@@ -252,8 +304,9 @@ private:
 
     const auto opponents = collectOpponents(ego, now_sec);
     const auto output = core_->update(now_sec, ego, opponents);
+    const auto attempt_id = updateAttemptId(output.mode);
     publishOverride(output);
-    publishDebug(output);
+    publishDebug(output, ego, attempt_id);
   }
 
   FrenetFrame frame_;
@@ -265,6 +318,9 @@ private:
   double position_jump_threshold_m_{5.0};
   double ego_stale_time_sec_{0.50};
   double control_rate_hz_{20.0};
+  BehaviorMode last_mode_{BehaviorMode::FREE_RUN};
+  bool attempt_active_{false};
+  std::uint64_t current_attempt_id_{0};
 
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr override_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub_;

@@ -1,0 +1,28 @@
+success:
+  pass_margin_m: 1.0
+  t_pass_max_sec: 8.0
+  t_hold_sec: 2.0
+  major_slack_threshold: 0.20
+blocked:
+  blocked_distance_threshold_m: 8.0
+  speed_loss_threshold_mps: 0.8
+  relative_speed_threshold_mps: 0.5
+  min_blocked_duration_sec: 0.8
+opportunity:
+  curvature_overtake_threshold: 0.08
+  cbf_h_safe_threshold: 0.5
+  min_opportunity_duration_sec: 1.0
+safety:
+  cbf_h_warn: 0.2
+  cbf_slack_warn: 0.05
+  cbf_slack_major: 0.20
+  min_vehicle_distance_warn_m: 0.8
+judgement:
+  candidate_success_rate: 0.60
+  attack_success_rate: 0.50
+  small_regression_allowance_sec: 0.5
+  regression_limit_sec: 1.5
+  infeasible_limit: 2
+map:
+  bin_width_m: 5.0
+  fallback_to_section: true

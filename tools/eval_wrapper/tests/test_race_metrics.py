@@ -50,6 +50,7 @@ def test_write_processed_outputs_writes_grade_profile_and_motion_log(tmp_path: P
         ],
         delay_debug_timeseries=[],
         speed_profile_debug_timeseries=[],
+        overtake_debug_timeseries=[],
         section_summary=[],
         awsim_section_summary=[],
         corner_summary=[],

@@ -92,7 +92,7 @@ def run_pipeline(
         config.thresholds,
         reference_trajectory if use_reference_fallback else None,
     )
-    metrics = write_processed_outputs(run_id, domain_results, processed_dir)
+    metrics = write_processed_outputs(run_id, domain_results, processed_dir, overtake_config=config.overtake_analysis)
 
     finished = datetime.now().astimezone()
     warnings = [*collection.warnings, *command_warnings]

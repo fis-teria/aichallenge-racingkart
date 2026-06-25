@@ -8,6 +8,7 @@ from pathlib import Path
 from evalwrap.metrics.event_detector import Event, events_from_counts, events_from_log_excerpts, events_from_rosbag
 from evalwrap.metrics.control_metrics import summarize_control_timeseries
 from evalwrap.metrics.judgement import judge_domain
+from evalwrap.analysis.overtake import build_overtake_outputs
 from evalwrap.parsers.details_parser import ParsedDetails
 from evalwrap.parsers.log_parser import ParsedLogs
 from evalwrap.parsers.rosbag_parser import parse_rosbag
@@ -55,6 +56,7 @@ class DomainResult:
     control_timeseries: list[dict[str, object]]
     delay_debug_timeseries: list[dict[str, object]]
     speed_profile_debug_timeseries: list[dict[str, object]]
+    overtake_debug_timeseries: list[dict[str, object]]
     section_summary: list[dict[str, object]]
     awsim_section_summary: list[dict[str, object]]
     corner_summary: list[dict[str, object]]
@@ -139,6 +141,7 @@ def build_domain_result(
         control_timeseries=[dict(item) for item in rosbag.control_timeseries],
         delay_debug_timeseries=[dict(item) for item in rosbag.delay_debug_timeseries],
         speed_profile_debug_timeseries=[dict(item) for item in rosbag.speed_profile_debug_timeseries],
+        overtake_debug_timeseries=[dict(item) for item in rosbag.overtake_debug_timeseries],
         section_summary=[dict(item) for item in rosbag.section_summary],
         awsim_section_summary=[dict(item) for item in rosbag.awsim_section_summary],
         corner_summary=[dict(item) for item in rosbag.corner_summary],
@@ -146,7 +149,12 @@ def build_domain_result(
     )
 
 
-def write_processed_outputs(run_id: str, domains: list[DomainResult], processed_dir: Path) -> dict[str, object]:
+def write_processed_outputs(
+    run_id: str,
+    domains: list[DomainResult],
+    processed_dir: Path,
+    overtake_config: dict[str, object] | None = None,
+) -> dict[str, object]:
     processed_dir.mkdir(parents=True, exist_ok=True)
     metrics = {
         "run_id": run_id,
@@ -154,7 +162,6 @@ def write_processed_outputs(run_id: str, domains: list[DomainResult], processed_
         "log_excerpts": {domain.domain_id: domain.log_excerpts for domain in domains},
         "events": {domain.domain_id: [event.to_dict() for event in domain.events] for domain in domains},
     }
-    (processed_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     _write_lap_summary(run_id, domains, processed_dir / "lap_summary.csv")
     _write_section_summary(run_id, domains, processed_dir / "section_summary.csv")
     _write_awsim_section_summary(run_id, domains, processed_dir / "awsim_section_summary.csv")
@@ -164,9 +171,12 @@ def write_processed_outputs(run_id: str, domains: list[DomainResult], processed_
     _write_control_timeseries(run_id, domains, processed_dir / "control_timeseries.csv")
     _write_delay_debug_timeseries(run_id, domains, processed_dir / "delay_aware_debug.csv")
     _write_speed_profile_debug_timeseries(run_id, domains, processed_dir / "speed_profile_debug.csv")
+    _write_overtake_debug_timeseries(run_id, domains, processed_dir / "overtake_debug.csv")
     _write_grade_profile(run_id, domains, processed_dir / "grade_profile.csv")
     _write_motion_log(run_id, domains, processed_dir / "motion_log.csv")
     _write_events(domains, processed_dir / "events.csv")
+    metrics["overtake"] = build_overtake_outputs(run_id, domains, processed_dir, overtake_config)
+    (processed_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
     return metrics
 
 
@@ -406,8 +416,47 @@ def _write_speed_profile_debug_timeseries(run_id: str, domains: list[DomainResul
         "grade_percent",
         "grade_accel_base_mps2",
         "grade_accel_ff_mps2",
+        "mpc_status",
+        "mpc_solve_time_ms",
+        "mpc_infeasible_count",
+        "overtake_mode_id",
+        "overtake_override_active",
     ]
     _write_dynamic_timeseries(run_id, domains, path, "speed_profile_debug_timeseries", preferred)
+
+
+def _write_overtake_debug_timeseries(run_id: str, domains: list[DomainResult], path: Path) -> None:
+    preferred = [
+        "time_sec",
+        "mode",
+        "overtake_state",
+        "attempt_id",
+        "target_vehicle_id",
+        "front_vehicle_id",
+        "selected",
+        "blocked",
+        "side_by_side",
+        "front_delta_s",
+        "front_distance_m",
+        "front_delta_d",
+        "front_rel_v",
+        "relative_speed_mps",
+        "ego_x",
+        "ego_y",
+        "ego_s",
+        "ego_lateral_offset",
+        "ego_speed_mps",
+        "target_lateral_offset_m",
+        "min_cbf_h",
+        "cbf_slack",
+        "active_cbf_constraint_count",
+        "closest_vehicle_id",
+        "closest_vehicle_distance_m",
+        "active_override",
+        "abort_reason",
+        "reason",
+    ]
+    _write_dynamic_timeseries(run_id, domains, path, "overtake_debug_timeseries", preferred)
 
 
 def _write_dynamic_timeseries(

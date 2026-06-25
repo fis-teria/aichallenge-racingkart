@@ -90,6 +90,9 @@ struct CandidateTrajectory
   std::vector<double> v_ref;
   bool feasible{true};
   double score{0.0};
+  double min_safety_margin{std::numeric_limits<double>::infinity()};
+  double cbf_slack{0.0};
+  int active_safety_constraint_count{0};
   std::string reject_reason{};
 };
 
@@ -98,6 +101,7 @@ struct BlockedInfo
   bool blocked{false};
   bool side_by_side{false};
   int nearest_index{-1};
+  std::string nearest_id{};
   double front_delta_s{std::numeric_limits<double>::infinity()};
   double front_delta_d{0.0};
   double front_rel_v{0.0};
@@ -146,6 +150,10 @@ struct PlannerOutput
   BlockedInfo blocked_info{};
   std::string reason{};
   bool active_override{false};
+  double target_lateral_offset_m{0.0};
+  double min_cbf_h{std::numeric_limits<double>::quiet_NaN()};
+  double cbf_slack{0.0};
+  int active_cbf_constraint_count{0};
 };
 
 const char * toString(BehaviorMode mode);

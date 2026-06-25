@@ -5,6 +5,8 @@ import html
 from pathlib import Path
 from typing import Any
 
+from .overtake_report import generate_overtake_report, overtake_index_section
+
 
 def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[str, Any]) -> Path:
     report_dir = run_dir / "report"
@@ -12,6 +14,7 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
     index = report_dir / "index.html"
     domains = metrics.get("domains", {})
     log_excerpts = metrics.get("log_excerpts", {})
+    generate_overtake_report(run_dir)
 
     parts = [
         "<!doctype html>",
@@ -37,6 +40,9 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
         "</section>",
         "<section><h2>Result Summary</h2>",
         _domain_table(domains),
+        "</section>",
+        "<section><h2>Overtake Analysis</h2>",
+        overtake_index_section(run_dir, metrics),
         "</section>",
         "<section><h2>Section Splits</h2>",
         _split_table(run_dir),
@@ -72,6 +78,11 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
         _link("../processed/control_timeseries.csv", "control_timeseries.csv"),
         _link("../processed/delay_aware_debug.csv", "delay_aware_debug.csv"),
         _link("../processed/speed_profile_debug.csv", "speed_profile_debug.csv"),
+        _link("../processed/overtake_debug.csv", "overtake_debug.csv"),
+        _link("../processed/overtake_metrics.json", "overtake_metrics.json"),
+        _link("../processed/overtake_attempts.csv", "overtake_attempts.csv"),
+        _link("../processed/overtake_timeseries.csv", "overtake_timeseries.csv"),
+        _link("../processed/overtake_map_bins.csv", "overtake_map_bins.csv"),
         _link("../processed/grade_profile.csv", "grade_profile.csv"),
         _link("../processed/motion_log.csv", "motion_log.csv"),
         "</ul></section>",

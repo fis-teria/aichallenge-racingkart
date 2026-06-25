@@ -79,6 +79,7 @@ PlannerOutput OvertakePlannerCore::update(
     }
   } else if (mode_ == BehaviorMode::FREE_RUN) {
     selected = makeCandidate(CandidateType::FASTEST, ego, blocked, opponents);
+    safety_.evaluate(selected, predictions);
   }
 
   output.mode = mode_;
@@ -86,6 +87,10 @@ PlannerOutput OvertakePlannerCore::update(
   output.blocked_info = blocked;
   output.reason = selected.reject_reason;
   output.active_override = selected.feasible && selected.type != CandidateType::FASTEST;
+  output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected.d.back();
+  output.min_cbf_h = selected.min_safety_margin;
+  output.cbf_slack = selected.cbf_slack;
+  output.active_cbf_constraint_count = selected.active_safety_constraint_count;
   output.lateral_offsets = selected.d;
   output.speed_caps = selected.v_ref;
   return output;
@@ -125,6 +130,7 @@ BlockedInfo OvertakePlannerCore::detectBlocked(
     }
     if (delta_s < info.front_delta_s) {
       info.nearest_index = static_cast<int>(i);
+      info.nearest_id = opp.id;
       info.front_delta_s = delta_s;
       info.front_delta_d = delta_d;
       info.front_rel_v = ego.v - opp.v;

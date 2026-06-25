@@ -64,6 +64,24 @@ def test_build_analysis_from_series_generates_timeseries_metrics_sections_and_ev
     assert {"stuck", "hard_brake", "high_accel", "steer_oscillation", "path_deviation"}.issubset(event_types)
 
 
+def test_build_analysis_from_series_preserves_overtake_debug_rows() -> None:
+    parsed = build_analysis_from_series(
+        odometry=[{"time_sec": 1.0, "x_m": 0.0, "y_m": 0.0, "speed_mps": 1.0, "yaw_rate_rps": 0.0}],
+        overtake_debug=[
+            {
+                "time_sec": 1.0,
+                "mode": "OVERTAKE_LEFT",
+                "front_delta_s": 4.0,
+                "front_vehicle_id": "d2",
+            }
+        ],
+    )
+
+    assert parsed.available
+    assert parsed.overtake_debug_timeseries[0]["mode"] == "OVERTAKE_LEFT"
+    assert parsed.overtake_debug_timeseries[0]["front_vehicle_id"] == "d2"
+
+
 def test_parse_rosbag_gracefully_handles_missing_storage(tmp_path: Path) -> None:
     parsed = parse_rosbag(tmp_path)
 

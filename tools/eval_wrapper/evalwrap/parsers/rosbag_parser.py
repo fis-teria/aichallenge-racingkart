@@ -59,6 +59,12 @@ DELAY_DEBUG_TOPICS = {
 SPEED_PROFILE_DEBUG_TOPICS = {
     "/mpc/speed_profile_debug",
 }
+OVERTAKE_MODE_TOPICS = {
+    "/debug/overtake/mode",
+}
+OVERTAKE_METRICS_TOPICS = {
+    "/debug/overtake/metrics",
+}
 ACKERMANN_CONTROL_COMMAND_TYPE = "autoware_auto_control_msgs/msg/AckermannControlCommand"
 RawDecoder = Callable[[bytes, float], dict[str, float | None] | None]
 PathPoint = tuple[float, float, float | None]
@@ -74,6 +80,7 @@ class ParsedRosbag:
     control_timeseries: list[dict[str, float | None]] = field(default_factory=list)
     delay_debug_timeseries: list[dict[str, object]] = field(default_factory=list)
     speed_profile_debug_timeseries: list[dict[str, object]] = field(default_factory=list)
+    overtake_debug_timeseries: list[dict[str, object]] = field(default_factory=list)
     section_summary: list[dict[str, float | int | None]] = field(default_factory=list)
     awsim_section_summary: list[dict[str, float | int | None]] = field(default_factory=list)
     corner_summary: list[dict[str, float | int | str | None]] = field(default_factory=list)
@@ -139,6 +146,7 @@ def parse_rosbag(
     awsim_status: list[dict[str, float | int | None]] = []
     delay_debug: list[dict[str, object]] = []
     speed_profile_debug: list[dict[str, object]] = []
+    overtake_debug: list[dict[str, object]] = []
     trajectory_points: list[PathPoint] = []
     trajectory_source: str | None = None
     raw_decode_failed_topics: set[str] = set()
@@ -187,6 +195,14 @@ def parse_rosbag(
             row = _extract_json_debug(msg, time_sec)
             if row is not None:
                 speed_profile_debug.append(row)
+        elif topic_name in OVERTAKE_MODE_TOPICS:
+            row = _extract_overtake_mode(msg, time_sec)
+            if row is not None:
+                overtake_debug.append(row)
+        elif topic_name in OVERTAKE_METRICS_TOPICS:
+            row = _extract_json_debug(msg, time_sec)
+            if row is not None:
+                overtake_debug.append(row)
         elif topic_name in TRAJECTORY_TOPICS:
             points = _extract_trajectory_points(msg)
             if points:
@@ -207,6 +223,7 @@ def parse_rosbag(
         awsim_status=awsim_status,
         delay_debug=delay_debug,
         speed_profile_debug=speed_profile_debug,
+        overtake_debug=overtake_debug,
         trajectory_points=trajectory_points,
         trajectory_source=trajectory_source,
         thresholds=thresholds,
@@ -225,6 +242,7 @@ def build_analysis_from_series(
     awsim_status: list[dict[str, float | int | None]] | None = None,
     delay_debug: list[dict[str, object]] | None = None,
     speed_profile_debug: list[dict[str, object]] | None = None,
+    overtake_debug: list[dict[str, object]] | None = None,
     trajectory_points: list[Sequence[float | None]] | None = None,
     trajectory_source: str | None = None,
     thresholds: dict[str, float] | None = None,
@@ -241,6 +259,7 @@ def build_analysis_from_series(
     awsim_status = _sorted_rows(awsim_status or [])
     delay_debug = _sorted_debug_rows(delay_debug or [])
     speed_profile_debug = _sorted_debug_rows(speed_profile_debug or [])
+    overtake_debug = _sorted_debug_rows(overtake_debug or [])
     trajectory_points = _normalize_trajectory_points(trajectory_points or [])
 
     vehicle_rows = _merge_vehicle_rows(odometry, velocity_status, acceleration, steering_status, sync_tolerance)
@@ -253,11 +272,12 @@ def build_analysis_from_series(
         trajectory_profile = None
         trajectory_reference = []
 
-    if not vehicle_rows and not control_rows and not awsim_status:
+    if not vehicle_rows and not control_rows and not awsim_status and not overtake_debug:
         return ParsedRosbag(
             available=False,
             reason="rosbag parsed but no usable time-series samples were found",
             warnings=warnings or [],
+            overtake_debug_timeseries=overtake_debug,
         )
 
     _attach_distance_and_sections(vehicle_rows, int(merged_thresholds["section_count"]))
@@ -275,6 +295,7 @@ def build_analysis_from_series(
         control_timeseries=control_rows,
         delay_debug_timeseries=delay_debug,
         speed_profile_debug_timeseries=speed_profile_debug,
+        overtake_debug_timeseries=overtake_debug,
         section_summary=sections,
         awsim_section_summary=awsim_sections,
         corner_summary=corners,
@@ -340,6 +361,8 @@ def _target_topics(topic_types: dict[str, str]) -> set[str]:
         | AWSIM_STATUS_TOPICS
         | DELAY_DEBUG_TOPICS
         | SPEED_PROFILE_DEBUG_TOPICS
+        | OVERTAKE_MODE_TOPICS
+        | OVERTAKE_METRICS_TOPICS
     )
     return set(topic_types).intersection(supported)
 
@@ -432,6 +455,13 @@ def _extract_json_debug(msg: Any, time_sec: float) -> dict[str, object] | None:
     row: dict[str, object] = {"time_sec": time_sec}
     _flatten_debug_payload(row, "", payload)
     return row
+
+
+def _extract_overtake_mode(msg: Any, time_sec: float) -> dict[str, object] | None:
+    data = getattr(msg, "data", None)
+    if not isinstance(data, str) or not data:
+        return None
+    return {"time_sec": time_sec, "mode": data, "overtake_state": data}
 
 
 def _flatten_debug_payload(output: dict[str, object], prefix: str, payload: dict[str, object]) -> None:

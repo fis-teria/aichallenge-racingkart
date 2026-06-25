@@ -11,6 +11,7 @@ import copy
 import os
 import shutil
 from datetime import datetime
+from time import perf_counter
 
 # ROS 2
 import rclpy
@@ -567,6 +568,9 @@ class MPCController(Node):
         self._curvature_speed_profile_mps: List[float] = []
         self._combined_speed_profile: List[SpeedProfilePoint] = []
         self._last_speed_profile_debug_publish_sec = -1.0e9
+        self._last_mpc_solve_time_ms = 0.0
+        self._last_mpc_status = "unknown"
+        self._last_mpc_infeasible_count = 0
         self._reset_grade_estimator()
         compute_speed_profile(self._car, self._mpc_cfg)
         self._curvature_speed_profile_mps = self._read_reference_speed_profile()
@@ -695,6 +699,11 @@ class MPCController(Node):
                 "grade_percent": self._last_grade_percent,
                 "grade_accel_base_mps2": self._last_grade_accel_base_mps2,
                 "grade_accel_ff_mps2": self._last_grade_accel_ff_mps2,
+                "mpc_status": self._last_mpc_status,
+                "mpc_solve_time_ms": self._last_mpc_solve_time_ms,
+                "mpc_infeasible_count": self._last_mpc_infeasible_count,
+                "overtake_mode_id": getattr(self._mpc, "overtake_mode_id", 0),
+                "overtake_override_active": bool(getattr(self._mpc, "overtake_lateral_offsets", None) is not None),
             },
             separators=(",", ":"),
         )
@@ -1157,7 +1166,11 @@ class MPCController(Node):
         self._clear_stale_overtake_override(now)
 
         with self._stats.time_block("control"):
+            solve_started = perf_counter()
             u, max_delta = self._mpc.get_control()
+            self._last_mpc_solve_time_ms = (perf_counter() - solve_started) * 1000.0
+            self._last_mpc_infeasible_count = int(getattr(self._mpc, "infeasibility_counter", 0))
+            self._last_mpc_status = "infeasible" if self._last_mpc_infeasible_count > 0 else "solved"
             # self.get_logger().info(f"u: {u}")
 
         # override by brake command if control is disabled

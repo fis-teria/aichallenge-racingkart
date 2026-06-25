@@ -19,6 +19,9 @@
       - /awsim/status
       - /delay_aware_mpc/debug
       - /mpc/speed_profile_debug
+      - /debug/overtake/mode
+      - /debug/overtake/metrics
+      - /v2x/vehicle_positions
       - /clock
       - /localization/acceleration
       - /localization/kinematic_state

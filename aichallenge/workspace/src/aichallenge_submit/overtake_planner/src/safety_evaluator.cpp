@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace overtake_planner
 {
@@ -30,6 +31,9 @@ bool SafetyEvaluator::evaluate(
   const std::vector<PredictedOpponent> & predictions) const
 {
   candidate.feasible = true;
+  candidate.min_safety_margin = std::numeric_limits<double>::infinity();
+  candidate.cbf_slack = 0.0;
+  candidate.active_safety_constraint_count = 0;
   candidate.reject_reason.clear();
 
   for (double d : candidate.d) {
@@ -46,8 +50,13 @@ bool SafetyEvaluator::evaluate(
     for (std::size_t i = 0; i < n; ++i) {
       const double margin = ellipseMargin(
         candidate.x[i], candidate.y[i], candidate.yaw[i], pred.x[i], pred.y[i]);
+      candidate.min_safety_margin = std::min(candidate.min_safety_margin, margin);
+      if (margin <= config_.min_ellipse_h + 0.10) {
+        ++candidate.active_safety_constraint_count;
+      }
       if (margin <= config_.min_ellipse_h) {
         candidate.feasible = false;
+        candidate.cbf_slack = config_.min_ellipse_h - margin;
         candidate.reject_reason = "opponent_collision";
         return false;
       }

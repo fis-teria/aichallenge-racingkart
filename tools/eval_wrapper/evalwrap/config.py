@@ -19,6 +19,7 @@ class EvalConfig:
     command_log_dir: str = "command_logs"
     thresholds: dict[str, float] = field(default_factory=dict)
     reference_trajectory: dict[str, Any] = field(default_factory=dict)
+    overtake_analysis: dict[str, Any] = field(default_factory=dict)
 
 
 def package_root() -> Path:
@@ -39,10 +40,12 @@ def load_config(repo_root: Path | None = None, config_path: Path | None = None) 
     root = find_repo_root(repo_root or Path.cwd())
     default_path = package_root() / "configs" / "default.yaml"
     thresholds_path = package_root() / "configs" / "thresholds.yaml"
+    overtake_path = package_root() / "configs" / "overtake_analysis.yaml"
     data = _load_yaml(default_path)
     if config_path:
         data.update(_load_yaml(config_path))
     thresholds = _load_yaml(thresholds_path)
+    overtake_analysis = _load_yaml(overtake_path)
 
     analysis_dir = root / str(data.get("analysis_dir", "analysis"))
     output_latest = root / str(data.get("output_latest", "output/latest"))
@@ -58,4 +61,5 @@ def load_config(repo_root: Path | None = None, config_path: Path | None = None) 
         command_log_dir=str(data.get("command_log_dir", "command_logs")),
         thresholds={str(k): float(v) for k, v in thresholds.items()},
         reference_trajectory=dict(data.get("reference_trajectory", {}) or {}),
+        overtake_analysis=dict(data.get("overtake_analysis", overtake_analysis) or {}),
     )
