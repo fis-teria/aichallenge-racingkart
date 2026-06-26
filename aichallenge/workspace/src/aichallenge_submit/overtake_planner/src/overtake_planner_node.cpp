@@ -8,8 +8,10 @@
 #include <std_msgs/msg/string.hpp>
 #include <v2x_msgs/msg/v2_x_vehicle_position_array.hpp>
 
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -49,6 +51,43 @@ std::string jsonNumber(double value)
   return std::to_string(value);
 }
 
+std::optional<std::string> vehicleIdFromRosDomainId(const char * raw_domain_id)
+{
+  if (raw_domain_id == nullptr || raw_domain_id[0] == '\0') {
+    return std::nullopt;
+  }
+
+  errno = 0;
+  char * end = nullptr;
+  const long domain_id = std::strtol(raw_domain_id, &end, 10);
+  if (errno != 0 || end == raw_domain_id || *end != '\0' || domain_id <= 0) {
+    return std::nullopt;
+  }
+
+  return "d" + std::to_string(domain_id);
+}
+
+std::string resolveOwnVehicleId(const std::string & configured_id, const rclcpp::Logger & logger)
+{
+  if (!configured_id.empty() && configured_id != "auto") {
+    return configured_id;
+  }
+
+  const char * raw_domain_id = std::getenv("ROS_DOMAIN_ID");
+  const auto resolved_id = vehicleIdFromRosDomainId(raw_domain_id);
+  if (resolved_id.has_value()) {
+    RCLCPP_INFO(
+      logger, "resolved own_vehicle_id=%s from ROS_DOMAIN_ID=%s",
+      resolved_id->c_str(), raw_domain_id);
+    return resolved_id.value();
+  }
+
+  RCLCPP_WARN(
+    logger,
+    "own_vehicle_id is auto, but ROS_DOMAIN_ID is unset or invalid; falling back to d1");
+  return "d1";
+}
+
 }  // namespace
 
 class OvertakePlannerNode : public rclcpp::Node
@@ -61,7 +100,8 @@ public:
       declare_parameter<std::string>("reference_package", "multi_purpose_mpc_ros");
     const auto reference_csv =
       declare_parameter<std::string>("reference_csv", "env/final_ver3/traj_mincurv_manual.csv");
-    own_vehicle_id_ = declare_parameter<std::string>("own_vehicle_id", "d1");
+    own_vehicle_id_ =
+      resolveOwnVehicleId(declare_parameter<std::string>("own_vehicle_id", "auto"), get_logger());
     ignore_near_ego_m_ = declare_parameter<double>("ignore_near_ego_m", 1.0);
     position_jump_threshold_m_ = declare_parameter<double>("position_jump_threshold_m", 5.0);
     ego_stale_time_sec_ = declare_parameter<double>("ego_stale_time_sec", 0.50);

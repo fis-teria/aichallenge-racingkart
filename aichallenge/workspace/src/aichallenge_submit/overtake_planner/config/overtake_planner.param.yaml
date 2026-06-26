@@ -3,7 +3,8 @@ overtake_planner_node:
     enabled: true
     reference_package: "multi_purpose_mpc_ros"
     reference_csv: "env/final_ver3/traj_mincurv_manual.csv"
-    own_vehicle_id: "d1"
+    # "auto" resolves to d${ROS_DOMAIN_ID}; set d1..d4 explicitly to override.
+    own_vehicle_id: "auto"
     ego_stale_time_sec: 0.50
     control_rate_hz: 20.0
     horizon_points: 30
