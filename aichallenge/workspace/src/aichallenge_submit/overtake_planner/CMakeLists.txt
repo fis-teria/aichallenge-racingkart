@@ -35,6 +35,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_state_machine test/test_state_machine.cpp)
   target_link_libraries(test_state_machine ${PROJECT_NAME}_core)
+
+  ament_add_gtest(test_overtake_planner_core test/test_overtake_planner_core.cpp)
+  target_link_libraries(test_overtake_planner_core ${PROJECT_NAME}_core)
 endif()
 
 ament_auto_package(INSTALL_TO_SHARE

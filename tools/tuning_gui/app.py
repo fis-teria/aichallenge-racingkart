@@ -33,6 +33,7 @@ import yaml
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parents[1]
 STATIC_DIR = APP_DIR / "static"
+STATIC_CACHE_CONTROL = "no-store, max-age=0"
 STATE_DIR = APP_DIR / ".state"
 BACKUP_DIR = APP_DIR / "backups"
 PRESET_DIR = APP_DIR / "presets"
@@ -1547,10 +1548,11 @@ def awsim_extra_args(
     options: dict[str, Any],
     allow_scenario: bool = True,
     include_session_options: bool = True,
+    blocked_raw_options: set[str] | None = None,
 ) -> str:
     parts: list[str] = []
     skip_options: set[str] = set()
-    blocked_raw_options: set[str] = set()
+    blocked_raw_options = set(blocked_raw_options or set())
     if headless:
         parts.append(AWSIM_HEADLESS_ARGS)
         skip_options.update({"camera", "lidar"})
@@ -1616,6 +1618,7 @@ def command_for(
             simulator_options,
             allow_scenario=False,
             include_session_options=False,
+            blocked_raw_options={"--safety-gate"},
         )
         pairs = {"CONTROL_METHOD": method}
         if simulator_options.get("timeout"):
@@ -1705,7 +1708,7 @@ def start_command(
         raise ValueError(f"unknown control_method: {method}")
     npc_count = normalize_npc_count(npc_count)
     simulator_options = normalize_simulator_options(simulator_options)
-    safety_gate = normalize_safety_gate(safety_gate, required=(action == "gate"))
+    safety_gate = normalize_safety_gate(safety_gate, required=True) if action == "gate" else None
     with command_lock:
         if active_process is not None and active_process.poll() is None:
             raise RuntimeError("command is already running")
@@ -2140,10 +2143,10 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             if parsed.path == "/":
-                self._send_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
+                self._send_index()
             elif parsed.path in {"/app.js", "/styles.css"}:
                 content_type = "application/javascript; charset=utf-8" if parsed.path.endswith(".js") else "text/css; charset=utf-8"
-                self._send_file(STATIC_DIR / parsed.path.lstrip("/"), content_type)
+                self._send_file(STATIC_DIR / parsed.path.lstrip("/"), content_type, no_store=True)
             elif parsed.path == "/api/state":
                 self._json(app_state())
             elif parsed.path == "/api/file":
@@ -2266,7 +2269,7 @@ class Handler(BaseHTTPRequestHandler):
                 headless = bool(body.get("headless", False))
                 npc_count = normalize_npc_count(body.get("npc_count", 0))
                 simulator_options = normalize_simulator_options(body.get("simulator_options"))
-                safety_gate = normalize_safety_gate(body.get("safety_gate"), required=(action == "gate"))
+                safety_gate = normalize_safety_gate(body.get("safety_gate"), required=True) if action == "gate" else None
                 state = start_command(action, method, build_first, note, headless, npc_count, simulator_options, safety_gate)
                 self._json(asdict(state))
             elif parsed.path == "/api/stop":
@@ -2319,13 +2322,35 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_file(self, path: Path, content_type: str) -> None:
+    def _send_index(self) -> None:
+        path = STATIC_DIR / "index.html"
+        if not path.exists() or not path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        text = path.read_text(encoding="utf-8")
+        text = text.replace('href="/styles.css"', f'href="/styles.css?v={self._asset_version("styles.css")}"')
+        text = text.replace('src="/app.js"', f'src="/app.js?v={self._asset_version("app.js")}"')
+        self._send_bytes(text.encode("utf-8"), "text/html; charset=utf-8", no_store=True)
+
+    def _asset_version(self, filename: str) -> int:
+        path = STATIC_DIR / filename
+        try:
+            return int(path.stat().st_mtime)
+        except FileNotFoundError:
+            return 0
+
+    def _send_file(self, path: Path, content_type: str, *, no_store: bool = False) -> None:
         if not path.exists() or not path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         data = path.read_bytes()
+        self._send_bytes(data, content_type, no_store=no_store)
+
+    def _send_bytes(self, data: bytes, content_type: str, *, no_store: bool = False) -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        if no_store:
+            self.send_header("Cache-Control", STATIC_CACHE_CONTROL)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

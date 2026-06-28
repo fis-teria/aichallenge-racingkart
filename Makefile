@@ -76,14 +76,17 @@ dev2 dev3 dev4: simulator
 	echo "To Stop: make down"
 
 gate1: GATE_SCENARIO := SafetyGate/scenario1.yaml
+gate1: SAFETY_GATE_ARG := test1
 gate1: GATE_VEHICLES := 4
 gate2: GATE_SCENARIO := SafetyGate/scenario2.yaml
+gate2: SAFETY_GATE_ARG := test2
 gate2: GATE_VEHICLES := 4
 gate3: GATE_SCENARIO := SafetyGate/scenario3.yaml
+gate3: SAFETY_GATE_ARG := test3
 gate3: GATE_VEHICLES := 1
 gate1 gate2 gate3:
-	@echo "Start safety gate $(@:gate=%) ($(GATE_SCENARIO))"
-	@base_args="--scenario $(GATE_SCENARIO)"; \
+	@echo "Start safety gate $(@:gate=%) ($(GATE_SCENARIO), --safety-gate $(SAFETY_GATE_ARG))"
+	@base_args="--scenario $(GATE_SCENARIO) --safety-gate $(SAFETY_GATE_ARG)"; \
 	extra_args="$${AWSIM_EXTRA_ARGS:-} $(GATE_EXTRA_ARGS)"; \
 	control_method="$${CONTROL_METHOD:-$(CONTROL_METHOD)}"; \
 	ROSBAG=true CONTROL_METHOD="$$control_method" AWSIM_START_MODE=sync AWSIM_VEHICLES=$(GATE_VEHICLES) AWSIM_LAPS=unlimited AWSIM_EXTRA_ARGS="$$base_args $$extra_args" $(MAKE) dev; \

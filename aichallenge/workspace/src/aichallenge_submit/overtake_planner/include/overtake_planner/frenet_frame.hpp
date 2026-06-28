@@ -11,6 +11,7 @@ namespace overtake_planner
 class FrenetFrame
 {
 public:
+  // 参照CSVを読み、Cartesian <-> Frenet変換で使う閉ループの中心線を作る。
   bool loadCsv(const std::string & path, std::string * error = nullptr);
   void setReference(std::vector<ReferencePoint> reference);
 
@@ -19,6 +20,7 @@ public:
   const std::vector<ReferencePoint> & reference() const { return reference_; }
 
   double wrapS(double s) const;
+  // ループコース上でfrom_sからto_sまで前向きに進んだ距離を返す。
   double deltaS(double from_s, double to_s) const;
   FrenetPose cartesianToFrenet(double x, double y, double yaw) const;
   ReferencePoint interpolate(double s) const;

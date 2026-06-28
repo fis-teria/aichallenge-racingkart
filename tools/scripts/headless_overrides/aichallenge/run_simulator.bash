@@ -72,6 +72,9 @@ fi
 declare -a extra_args
 read -r -a extra_args <<<"${awsim_extra_args}"
 opts+=("${extra_args[@]}")
+printf "[INFO] AWSIM options:"
+printf " %q" "${opts[@]}"
+printf "\n"
 
 export ROS_DOMAIN_ID=0
 env_args=(

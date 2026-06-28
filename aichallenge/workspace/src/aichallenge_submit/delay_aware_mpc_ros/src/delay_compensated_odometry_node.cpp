@@ -51,6 +51,7 @@ std::string json_escape(const std::string &value) {
 } // namespace
 
 struct PoseState {
+  // MPCへ渡す姿勢を先読みするときに使う、最低限の車両状態。
   double x{};
   double y{};
   double yaw{};
@@ -59,11 +60,13 @@ struct PoseState {
 };
 
 struct CommandSample {
+  // ステア指令履歴は、制御遅れぶん過去の指令を引き直すために保持する。
   double time_sec{};
   double steering_rad{};
 };
 
 struct DelayPrediction {
+  // 入力odomと、遅れ補償後にMPCへ渡す予測odomをまとめたデバッグ用の状態。
   PoseState input;
   PoseState predicted;
   double estimated_current_steering_rad{};
@@ -78,6 +81,8 @@ struct DelayPrediction {
 class DelayCompensatedOdometryNode : public rclcpp::Node {
 public:
   DelayCompensatedOdometryNode() : Node("delay_compensated_odometry") {
+    // delay-aware MPCは既存MPCの前段でodomだけを差し替える薄いノード。
+    // ここでは遅れ時間、ステア一次遅れ、フォールバック入力源をROSパラメータ化する。
     enabled_ = declare_parameter<bool>("enabled", true);
     mode_ =
         declare_parameter<std::string>("mode", "state_shift_with_steer_lag");
@@ -133,11 +138,13 @@ public:
 
 private:
   bool active() const {
+    // baselineや無効設定のときは入力odomをそのまま流し、比較実験しやすくする。
     return enabled_ && mode_ != "baseline" && use_reference_time_shift_ &&
            steering_delay_sec_ > 0.0;
   }
 
   void normalize_config() {
+    // 不正な設定値で予測ループが破綻しないよう、モードと最小値をここで正規化する。
     if (mode_ != "baseline" && mode_ != "state_shift" &&
         mode_ != "state_shift_with_steer_lag" && mode_ != "delay_augmented") {
       RCLCPP_WARN(
@@ -162,6 +169,7 @@ private:
 
   void on_control_command(const autoware_auto_control_msgs::msg::
                               AckermannControlCommand::ConstSharedPtr msg) {
+    // MPCから見える現在時刻基準で、過去のステア指令を時系列バッファに積む。
     const double t = now_sec();
     const double steer = static_cast<double>(msg->lateral.steering_tire_angle);
     command_history_.push_back(CommandSample{t, steer});
@@ -172,11 +180,13 @@ private:
   void on_steering_report(
       const autoware_auto_vehicle_msgs::msg::SteeringReport::ConstSharedPtr
           msg) {
+    // 実舵角が新鮮な間は、指令値よりこちらを現在ステアの推定に優先する。
     latest_steering_status_ =
         CommandSample{now_sec(), static_cast<double>(msg->steering_tire_angle)};
   }
 
   void on_odometry(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
+    // localizationのodomを受け取り、遅れ時間ぶん先の姿勢へずらしてMPC入力にする。
     const double t = now_sec();
     const PoseState input{msg->pose.pose.position.x, msg->pose.pose.position.y,
                           yaw_from_quaternion(msg->pose.pose.orientation),
@@ -196,6 +206,7 @@ private:
   }
 
   DelayPrediction predict(const PoseState &state, const double t) {
+    // 現在ステアを推定してから、自転車モデルでdelay秒ぶん姿勢を前進積分する。
     const auto [current_steer, source] = estimate_current_steering(state, t);
     if (!active()) {
       return DelayPrediction{
@@ -210,15 +221,18 @@ private:
     double lagged_steer = current_steer;
 
     while (elapsed < steering_delay_sec_ - 1.0e-12) {
+      // prediction_dtごとに、未来時刻で効いているはずのステアを推定する。
       const double step_dt =
           std::min(prediction_dt_, steering_delay_sec_ - elapsed);
       const double future_time = t + elapsed;
       applied_steer = predict_steering_for_step(future_time, step_dt,
                                                 current_steer, lagged_steer);
       if (mode_ == "state_shift_with_steer_lag") {
+        // ステア機構の一次遅れを次ステップへ引き継ぐ。
         lagged_steer = applied_steer;
       }
 
+      // 低速カートのMPC前処理として十分軽い、速度一定の自転車モデルで姿勢を進める。
       predicted.x += predicted.velocity * std::cos(predicted.yaw) * step_dt;
       predicted.y += predicted.velocity * std::sin(predicted.yaw) * step_dt;
       predicted.yaw = normalize_angle(predicted.yaw +
@@ -236,6 +250,7 @@ private:
 
   std::pair<double, std::string>
   estimate_current_steering(const PoseState &state, const double t) const {
+    // 推定の信頼度順: 実舵角 -> yaw_rate逆算 -> 指令履歴 -> 直近指令。
     if (use_steering_status_ && latest_steering_status_.has_value()) {
       const double age = t - latest_steering_status_->time_sec;
       if (age >= 0.0 && age <= steering_status_timeout_sec_) {
@@ -260,6 +275,7 @@ private:
                                    const double step_dt,
                                    const double current_steer,
                                    const double lagged_steer) const {
+    // modeごとに「未来ステップで効くステア」を切り替える。
     if (mode_ == "state_shift") {
       return current_steer;
     }
@@ -269,14 +285,17 @@ private:
             ? current_steer
             : command_at_or_before(future_time - steering_delay_sec_);
     if (mode_ == "delay_augmented") {
+      // delay_augmentedは指令履歴だけを見る軽量モード。
       return target_steer;
     }
 
+    // state_shift_with_steer_lagでは、目標ステアへ一次遅れで追従させる。
     const double alpha = 1.0 - std::exp(-step_dt / steering_time_constant_sec_);
     return lagged_steer + (target_steer - lagged_steer) * alpha;
   }
 
   double command_at_or_before(const double target_time_sec) const {
+    // 指定時刻以前で最も新しいステア指令を取り出し、遅延後に効く入力を近似する。
     const CommandSample *selected = nullptr;
     for (const auto &sample : command_history_) {
       if (sample.time_sec <= target_time_sec) {
@@ -295,6 +314,7 @@ private:
   }
 
   void trim_command_history(const double t) {
+    // 遅れ補償に必要な範囲だけ残し、長時間走行で履歴が増え続けないようにする。
     const double keep_window_sec = std::max(5.0, steering_delay_sec_ * 4.0);
     while (!command_history_.empty() &&
            t - command_history_.front().time_sec > keep_window_sec) {
@@ -303,6 +323,7 @@ private:
   }
 
   void publish_debug(const double t, const DelayPrediction &prediction) {
+    // reportやrosbag解析で補償量を追えるよう、poseとJSONデバッグを間引いて出す。
     if (debug_publish_period_sec_ > 0.0 &&
         t - last_debug_publish_sec_ < debug_publish_period_sec_) {
       return;

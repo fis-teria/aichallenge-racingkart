@@ -10,6 +10,7 @@ class BehaviorStateMachine
 public:
   explicit BehaviorStateMachine(PlannerConfig config);
 
+  // 選ばれた候補とblocked状態から、追従・追い越し・復帰のモードを更新する。
   BehaviorMode update(
     double now_sec,
     BehaviorMode current,
@@ -20,12 +21,14 @@ public:
   double modeEnterTime() const { return mode_enter_time_sec_; }
 
 private:
+  // モードが短時間で振動しないよう、最低保持時間を満たしたかを見る。
   bool canSwitch(double now_sec) const;
   void markIfChanged(double now_sec, BehaviorMode before, BehaviorMode after);
 
   PlannerConfig config_;
   double mode_enter_time_sec_{0.0};
-  int pass_safe_cycles_{0};
+  int pass_left_safe_cycles_{0};
+  int pass_right_safe_cycles_{0};
 };
 
 }  // namespace overtake_planner

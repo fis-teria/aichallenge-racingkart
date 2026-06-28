@@ -37,6 +37,7 @@ std::string resolveReferencePath(
   const std::string & package_name,
   const std::string & csv_path)
 {
+  // 相対パスならパッケージshare配下として解決し、configから短いパスで指定できるようにする。
   if (csv_path.empty() || csv_path.front() == '/') {
     return csv_path;
   }
@@ -53,6 +54,7 @@ std::string jsonNumber(double value)
 
 std::optional<std::string> vehicleIdFromRosDomainId(const char * raw_domain_id)
 {
+  // AI Challengeのdomain番号とV2X vehicle_id(d1,d2,...)を対応させる。
   if (raw_domain_id == nullptr || raw_domain_id[0] == '\0') {
     return std::nullopt;
   }
@@ -69,6 +71,7 @@ std::optional<std::string> vehicleIdFromRosDomainId(const char * raw_domain_id)
 
 std::string resolveOwnVehicleId(const std::string & configured_id, const rclcpp::Logger & logger)
 {
+  // own_vehicle_id=autoならROS_DOMAIN_IDから自車IDを推定し、V2X上の自車を除外する。
   if (!configured_id.empty() && configured_id != "auto") {
     return configured_id;
   }
@@ -96,6 +99,7 @@ public:
   OvertakePlannerNode()
   : Node("overtake_planner_node")
   {
+    // 参照線、V2Xフィルタ、候補生成/安全評価のしきい値をROSパラメータから読む。
     const auto reference_package =
       declare_parameter<std::string>("reference_package", "multi_purpose_mpc_ros");
     const auto reference_csv =
@@ -116,6 +120,16 @@ public:
     config.dv_block_threshold_mps = declare_parameter<double>("dv_block_threshold_mps", 0.20);
     config.opponent_stale_time_sec = declare_parameter<double>("opponent_stale_time_sec", 0.50);
     config.side_by_side_s_m = declare_parameter<double>("side_by_side_s_m", 4.0);
+    config.side_by_side_target_gap_m =
+      declare_parameter<double>("side_by_side_target_gap_m", 1.10);
+    config.side_by_side_shift_distance_m =
+      declare_parameter<double>("side_by_side_shift_distance_m", 5.0);
+    config.side_by_side_speed_cap_mps =
+      declare_parameter<double>("side_by_side_speed_cap_mps", 4.5);
+    config.min_pass_gap_m = declare_parameter<double>("min_pass_gap_m", 1.45);
+    config.pass_gap_hysteresis_m = declare_parameter<double>("pass_gap_hysteresis_m", 0.15);
+    config.yield_speed_margin_mps = declare_parameter<double>("yield_speed_margin_mps", 0.60);
+    config.yield_rejoin_gap_m = declare_parameter<double>("yield_rejoin_gap_m", 3.0);
     config.left_offset_m = declare_parameter<double>("left_offset_m", 0.80);
     config.right_offset_m = declare_parameter<double>("right_offset_m", -0.80);
     config.prepare_distance_m = declare_parameter<double>("prepare_distance_m", 8.0);
@@ -150,6 +164,7 @@ public:
     frame_ = frame;
     core_ = std::make_unique<OvertakePlannerCore>(frame_, config);
 
+    // MPCへ渡すoverride配列と、evalwrapで拾うdebugトピックをpublishする。
     override_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>(
       "/overtake/reference_override", rclcpp::QoS(1));
     mode_pub_ = create_publisher<std_msgs::msg::String>("/debug/overtake/mode", rclcpp::QoS(1));
@@ -174,6 +189,7 @@ public:
 private:
   struct TrackSample
   {
+    // V2X位置の前回値。位置差分から他車速度を推定する。
     double stamp_sec{0.0};
     double x{0.0};
     double y{0.0};
@@ -189,6 +205,7 @@ private:
 
   void updateOpponents(const v2x_msgs::msg::V2XVehiclePositionArray & msg)
   {
+    // 各車両の最新位置を保持し、ジャンプが小さい時だけ速度推定を更新する。
     for (const auto & vehicle : msg.vehicles) {
       const double stamp_sec = stampToSec(vehicle.header.stamp);
       auto & sample = samples_[vehicle.vehicle_id];
@@ -198,6 +215,7 @@ private:
         const double dt = stamp_sec - sample.stamp_sec;
         const double jump = std::hypot(x - sample.x, y - sample.y);
         if (dt > 0.0 && jump <= position_jump_threshold_m_) {
+          // V2X位置差分から等速予測用のvx/vyを作る。
           sample.vx = (x - sample.x) / dt;
           sample.vy = (y - sample.y) / dt;
         } else {
@@ -214,6 +232,7 @@ private:
 
   std::vector<OpponentState> collectOpponents(const EgoState & ego, double now_sec) const
   {
+    // 自車IDと近すぎる点を除外し、Frenet座標つきの他車リストへ変換する。
     std::vector<OpponentState> opponents;
     if (!ego.valid || frame_.empty()) {
       return opponents;
@@ -245,6 +264,7 @@ private:
 
   void publishOverride(const PlannerOutput & output)
   {
+    // Float32MultiArrayの簡易プロトコル: [valid, mode_id, n, d[0..n), v_ref[0..n)]。
     std_msgs::msg::Float32MultiArray msg;
     const int mode_id = static_cast<int>(output.mode);
     const int n = output.active_override ? static_cast<int>(output.lateral_offsets.size()) : 0;
@@ -262,6 +282,7 @@ private:
 
   std::uint64_t updateAttemptId(BehaviorMode mode)
   {
+    // evalwrapでattemptを追跡できるよう、追い越し準備開始から復帰完了まで同じIDを出す。
     const bool starts_attempt =
       mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
       mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
@@ -273,10 +294,19 @@ private:
     }
 
     std::uint64_t publish_id = attempt_active_ ? current_attempt_id_ : 0;
+    const bool yield_finishes_attempt =
+      mode == BehaviorMode::YIELD_BEHIND &&
+      (last_mode_ == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
+       last_mode_ == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
+       last_mode_ == BehaviorMode::OVERTAKE_LEFT ||
+       last_mode_ == BehaviorMode::OVERTAKE_RIGHT);
     if (
       attempt_active_ &&
-      (mode == BehaviorMode::FREE_RUN || mode == BehaviorMode::FOLLOW_BLOCKED) &&
-      (last_mode_ == BehaviorMode::MERGE_BACK || last_mode_ == BehaviorMode::ABORT_RECOVERY)) {
+      (((mode == BehaviorMode::FREE_RUN || mode == BehaviorMode::FOLLOW_BLOCKED) &&
+        (last_mode_ == BehaviorMode::MERGE_BACK ||
+         last_mode_ == BehaviorMode::ABORT_RECOVERY ||
+         last_mode_ == BehaviorMode::YIELD_BEHIND)) ||
+       yield_finishes_attempt)) {
       publish_id = current_attempt_id_;
       attempt_active_ = false;
     }
@@ -286,6 +316,7 @@ private:
 
   void publishDebug(const PlannerOutput & output, const EgoState & ego, std::uint64_t attempt_id)
   {
+    // modeだけの軽量トピックと、解析用の詳細JSONを分けてpublishする。
     std_msgs::msg::String mode_msg;
     mode_msg.data = toString(output.mode);
     mode_pub_->publish(mode_msg);
@@ -306,6 +337,17 @@ private:
         << "\"front_delta_d\":" << jsonNumber(output.blocked_info.front_delta_d) << ","
         << "\"front_rel_v\":" << jsonNumber(output.blocked_info.front_rel_v) << ","
         << "\"relative_speed_mps\":" << jsonNumber(output.blocked_info.front_rel_v) << ","
+        << "\"side_vehicle_id\":\"" << output.blocked_info.side_id << "\","
+        << "\"side_delta_s\":" << jsonNumber(output.blocked_info.side_delta_s) << ","
+        << "\"side_delta_d\":" << jsonNumber(output.blocked_info.side_delta_d) << ","
+        << "\"side_lateral_gap_m\":" << jsonNumber(std::abs(output.blocked_info.side_delta_d)) << ","
+        << "\"side_relative_speed_mps\":" << jsonNumber(output.blocked_info.side_rel_v) << ","
+        << "\"left_pass_gap_m\":" << jsonNumber(output.blocked_info.left_pass_gap_m) << ","
+        << "\"right_pass_gap_m\":" << jsonNumber(output.blocked_info.right_pass_gap_m) << ","
+        << "\"can_pass_left\":" << (output.blocked_info.can_pass_left ? "true" : "false") << ","
+        << "\"can_pass_right\":" << (output.blocked_info.can_pass_right ? "true" : "false") << ","
+        << "\"pass_gap_required_m\":" << jsonNumber(output.blocked_info.pass_gap_required_m) << ","
+        << "\"pass_gap_reason\":\"" << output.blocked_info.pass_gap_reason << "\","
         << "\"ego_x\":" << jsonNumber(ego.x) << ","
         << "\"ego_y\":" << jsonNumber(ego.y) << ","
         << "\"ego_s\":" << jsonNumber(ego.frenet.s) << ","
@@ -327,12 +369,14 @@ private:
 
   void onTimer()
   {
+    // 最新odomを自車状態へ変換し、他車収集 -> コア更新 -> override/debug publishを1周期で行う。
     const double now_sec = now().seconds();
     EgoState ego;
     if (odom_.has_value() && !frame_.empty()) {
       const auto & odom = *odom_;
       ego.stamp_sec = stampToSec(odom.header.stamp);
       if (now_sec - ego.stamp_sec <= ego_stale_time_sec_) {
+        // 古いodomで追い越し判断すると危ないので、新鮮な時だけvalidにする。
         ego.x = odom.pose.pose.position.x;
         ego.y = odom.pose.pose.position.y;
         ego.yaw = yawFromQuaternion(odom.pose.pose.orientation);

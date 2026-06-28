@@ -159,6 +159,7 @@ function readSavedRunSettings() {
 function restoreRunSettings() {
   const saved = readSavedRunSettings();
   for (const id of RUN_SETTING_IDS) {
+    if (id === "safetyGate") continue;
     const el = $(id);
     if (!el || !(id in saved)) continue;
     if (el.type === "checkbox") {
@@ -172,6 +173,7 @@ function restoreRunSettings() {
 function saveRunSettings() {
   const payload = {};
   for (const id of RUN_SETTING_IDS) {
+    if (id === "safetyGate") continue;
     const el = $(id);
     if (!el) continue;
     payload[id] = el.type === "checkbox" ? el.checked : el.value;
@@ -211,19 +213,23 @@ function collectSimulatorOptions() {
 function renderSafetyGates(data) {
   const select = $("safetyGate");
   if (!select) return;
-  const saved = readSavedRunSettings();
-  const selected = select.value || saved.safetyGate || "gate1";
+  const gates = data.safety_gates || [];
+  const preferred = select.dataset.selectedGate || select.value || "gate1";
+  const selected = gates.some((gate) => gate.id === preferred) ? preferred : (gates[0] && gates[0].id) || "";
   select.innerHTML = "";
-  for (const gate of data.safety_gates || []) {
+  for (const gate of gates) {
     const option = document.createElement("option");
     option.value = gate.id;
     option.textContent = gate.label || gate.id;
-    option.selected = gate.id === selected;
     select.appendChild(option);
+  }
+  if (selected) {
+    select.value = selected;
   }
   if (select.options.length && !select.value) {
     select.value = select.options[0].value;
   }
+  select.dataset.selectedGate = select.value;
 }
 
 function setSettingsTab(tab) {
@@ -248,6 +254,11 @@ function toggleRunSettingsMenu() {
   const menu = $("runSettingsMenu");
   if (!menu) return;
   setRunSettingsMenu(menu.hidden);
+}
+
+function eventStartedInRunSettings(event) {
+  const target = event.target;
+  return Boolean(target && target.closest && target.closest(".settings-menu"));
 }
 
 async function loadState() {
@@ -338,9 +349,13 @@ function updateRunSettingsAvailability(locked = false) {
   for (const id of ["simCamera", "simLidar"]) {
     const el = $(id);
     if (!el) continue;
-    el.disabled = locked || headless;
+    el.disabled = locked;
     el.title = headless ? "AWSIMヘッドレス中はcamera/LiDARをoffとして起動します" : "";
   }
+}
+
+function commandIsRunning() {
+  return Boolean(state.app && state.app.command && state.app.command.running === true);
 }
 
 function setCommandLog(text) {
@@ -1402,20 +1417,23 @@ async function run(action) {
   if (action === "gate" && !safetyGate) {
     throw new Error("Safety Gateを選んでね");
   }
+  const payload = {
+    action,
+    control_method: method,
+    build_first: buildFirst,
+    note,
+    headless,
+    npc_count: npcCount,
+    simulator_options: simulatorOptions,
+  };
+  if (action === "gate") {
+    payload.safety_gate = safetyGate;
+  }
   const data = await api("/api/run", {
     method: "POST",
-    body: JSON.stringify({
-      action,
-      control_method: method,
-      build_first: buildFirst,
-      note,
-      headless,
-      npc_count: npcCount,
-      safety_gate: safetyGate,
-      simulator_options: simulatorOptions,
-    }),
+    body: JSON.stringify(payload),
   });
-  toast(`${action} を開始したよ`);
+  toast(action === "gate" ? `${safetyGate} を開始したよ` : `${action} を開始したよ`);
   setCommandLog(`$ ${data.command}\n`);
   startCommandPolling();
   await loadState();
@@ -1787,14 +1805,23 @@ function bind() {
     const el = $(id);
     if (!el) continue;
     el.addEventListener(el.tagName === "INPUT" ? "input" : "change", () => {
+      if (id === "safetyGate") {
+        el.dataset.selectedGate = el.value;
+      }
       saveRunSettings();
-      updateRunSettingsAvailability(Boolean(state.app && state.app.command && state.app.command.running));
+      updateRunSettingsAvailability(commandIsRunning());
     });
   }
   updateRunSettingsAvailability(false);
+  $("runSettingsToggle").addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
   $("runSettingsToggle").addEventListener("click", (event) => {
     event.stopPropagation();
     toggleRunSettingsMenu();
+  });
+  $("runSettingsMenu").addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
   });
   $("runSettingsMenu").addEventListener("click", (event) => {
     event.stopPropagation();
@@ -1802,7 +1829,10 @@ function bind() {
   document.querySelectorAll("[data-settings-tab]").forEach((button) => {
     button.addEventListener("click", () => setSettingsTab(button.dataset.settingsTab));
   });
-  document.addEventListener("click", () => setRunSettingsMenu(false));
+  document.addEventListener("click", (event) => {
+    if (eventStartedInRunSettings(event)) return;
+    setRunSettingsMenu(false);
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       setRunSettingsMenu(false);

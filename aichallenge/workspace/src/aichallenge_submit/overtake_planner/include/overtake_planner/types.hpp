@@ -8,6 +8,7 @@ namespace overtake_planner
 {
 
 enum class BehaviorMode {
+  // 状態機械の現在モード。MPC overrideを出すか、追従するか、復帰するかを表す。
   FREE_RUN = 0,
   FOLLOW_BLOCKED = 1,
   PREPARE_OVERTAKE_LEFT = 2,
@@ -16,18 +17,24 @@ enum class BehaviorMode {
   OVERTAKE_RIGHT = 5,
   MERGE_BACK = 6,
   ABORT_RECOVERY = 7,
+  SIDE_BY_SIDE_KEEP = 8,
+  YIELD_BEHIND = 9,
 };
 
 enum class CandidateType {
+  // 各周期で評価する候補軌道。最終的に一番低スコアの候補が状態機械へ渡される。
   FASTEST = 0,
   FOLLOW = 1,
   PASS_LEFT = 2,
   PASS_RIGHT = 3,
   RECOVERY = 4,
+  SIDE_BY_SIDE_KEEP = 5,
+  YIELD_BEHIND = 6,
 };
 
 struct ReferencePoint
 {
+  // 参照CSV上の中心線サンプル。Frenet座標系の基準になる。
   double s{0.0};
   double x{0.0};
   double y{0.0};
@@ -38,6 +45,7 @@ struct ReferencePoint
 
 struct FrenetPose
 {
+  // 参照線に対する縦方向sと横方向d。追い越し判断は主にこの座標系で行う。
   double s{0.0};
   double d{0.0};
   double yaw_error{0.0};
@@ -46,6 +54,7 @@ struct FrenetPose
 
 struct EgoState
 {
+  // 自車の現在状態。odomと参照線から周期ごとに作り直す。
   double stamp_sec{0.0};
   double x{0.0};
   double y{0.0};
@@ -57,6 +66,7 @@ struct EgoState
 
 struct OpponentState
 {
+  // V2Xから見える他車状態。速度は位置差分から推定する。
   std::string id{};
   double stamp_sec{0.0};
   double x{0.0};
@@ -70,6 +80,7 @@ struct OpponentState
 
 struct PredictedOpponent
 {
+  // 安全評価用に、他車を短い時間 horizon で等速予測した軌道。
   std::string id{};
   std::vector<double> t;
   std::vector<double> x;
@@ -80,6 +91,7 @@ struct PredictedOpponent
 
 struct CandidateTrajectory
 {
+  // MPCへ渡す横オフセット列と速度上限列。安全評価とスコアもここへ保持する。
   CandidateType type{CandidateType::FASTEST};
   std::vector<double> t;
   std::vector<double> s;
@@ -98,6 +110,7 @@ struct CandidateTrajectory
 
 struct BlockedInfo
 {
+  // 前方の遅い車両や横並び状態をまとめた、追い越し開始/継続判断の入力。
   bool blocked{false};
   bool side_by_side{false};
   int nearest_index{-1};
@@ -105,10 +118,22 @@ struct BlockedInfo
   double front_delta_s{std::numeric_limits<double>::infinity()};
   double front_delta_d{0.0};
   double front_rel_v{0.0};
+  int side_index{-1};
+  std::string side_id{};
+  double side_delta_s{std::numeric_limits<double>::infinity()};
+  double side_delta_d{0.0};
+  double side_rel_v{0.0};
+  double left_pass_gap_m{std::numeric_limits<double>::infinity()};
+  double right_pass_gap_m{std::numeric_limits<double>::infinity()};
+  bool can_pass_left{false};
+  bool can_pass_right{false};
+  double pass_gap_required_m{0.0};
+  std::string pass_gap_reason{};
 };
 
 struct PlannerConfig
 {
+  // 追い越し候補生成、安全マージン、状態遷移をまとめて調整するパラメータ群。
   bool enabled{true};
   std::size_t horizon_points{30};
   double horizon_dt_sec{0.025};
@@ -120,6 +145,13 @@ struct PlannerConfig
   double opponent_stale_time_sec{0.50};
   double side_by_side_s_m{4.0};
   double side_margin_m{1.2};
+  double side_by_side_target_gap_m{1.10};
+  double side_by_side_shift_distance_m{5.0};
+  double side_by_side_speed_cap_mps{4.5};
+  double min_pass_gap_m{1.45};
+  double pass_gap_hysteresis_m{0.15};
+  double yield_speed_margin_mps{0.60};
+  double yield_rejoin_gap_m{3.0};
   double left_offset_m{0.80};
   double right_offset_m{-0.80};
   double prepare_distance_m{8.0};
@@ -143,6 +175,7 @@ struct PlannerConfig
 
 struct PlannerOutput
 {
+  // ROSノードへ返す最終結果。override配列、debug指標、選択理由を含める。
   BehaviorMode mode{BehaviorMode::FREE_RUN};
   CandidateType selected{CandidateType::FASTEST};
   std::vector<double> lateral_offsets;

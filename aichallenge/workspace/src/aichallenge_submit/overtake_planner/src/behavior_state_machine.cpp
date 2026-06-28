@@ -7,6 +7,7 @@ BehaviorStateMachine::BehaviorStateMachine(PlannerConfig config) : config_(confi
 
 bool BehaviorStateMachine::canSwitch(double now_sec) const
 {
+  // 候補が一瞬だけ安全に見えた場合のチャタリングを防ぐ。
   return now_sec - mode_enter_time_sec_ >= config_.min_mode_hold_time_sec;
 }
 
@@ -25,24 +26,49 @@ BehaviorMode BehaviorStateMachine::update(
   const BlockedInfo & blocked_info,
   bool selected_feasible)
 {
+  // コアが選んだ候補を、そのまま使うのではなく運転状態として安定化する。
   BehaviorMode next = current;
 
   if (!selected_feasible) {
-    next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::ABORT_RECOVERY;
+    // 選択候補が危険なら、前方閉塞中は追従、それ以外は中心線へ復帰する。
+    if (blocked_info.side_by_side) {
+      next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+    } else {
+      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::ABORT_RECOVERY;
+    }
     markIfChanged(now_sec, current, next);
     return next;
   }
 
   if (selected == CandidateType::PASS_LEFT || selected == CandidateType::PASS_RIGHT) {
-    ++pass_safe_cycles_;
+    // PASS候補が連続して安全なときだけ追い越し準備へ進む。
+    if (selected == CandidateType::PASS_LEFT) {
+      ++pass_left_safe_cycles_;
+      pass_right_safe_cycles_ = 0;
+    } else {
+      ++pass_right_safe_cycles_;
+      pass_left_safe_cycles_ = 0;
+    }
   } else {
-    pass_safe_cycles_ = 0;
+    pass_left_safe_cycles_ = 0;
+    pass_right_safe_cycles_ = 0;
   }
 
   switch (current) {
     case BehaviorMode::FREE_RUN:
-      if (blocked_info.blocked) {
-        if (pass_safe_cycles_ >= static_cast<int>(config_.pass_safe_required_cycles) && canSwitch(now_sec)) {
+      // 通常走行中に前方閉塞を検出したら、まず追従しつつPASS安全周期を貯める。
+      if (selected == CandidateType::YIELD_BEHIND) {
+        next = BehaviorMode::YIELD_BEHIND;
+      } else if (blocked_info.side_by_side) {
+        next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+      } else if (blocked_info.blocked) {
+        const bool left_ready =
+          selected == CandidateType::PASS_LEFT &&
+          pass_left_safe_cycles_ >= static_cast<int>(config_.pass_safe_required_cycles);
+        const bool right_ready =
+          selected == CandidateType::PASS_RIGHT &&
+          pass_right_safe_cycles_ >= static_cast<int>(config_.pass_safe_required_cycles);
+        if ((left_ready || right_ready) && canSwitch(now_sec)) {
           next = selected == CandidateType::PASS_LEFT ?
             BehaviorMode::PREPARE_OVERTAKE_LEFT : BehaviorMode::PREPARE_OVERTAKE_RIGHT;
         } else {
@@ -51,24 +77,42 @@ BehaviorMode BehaviorStateMachine::update(
       }
       break;
     case BehaviorMode::FOLLOW_BLOCKED:
-      if (!blocked_info.blocked) {
+      // 追従中に閉塞が解けたら通常走行へ、十分安全なら追い越し準備へ移る。
+      if (selected == CandidateType::YIELD_BEHIND) {
+        next = BehaviorMode::YIELD_BEHIND;
+      } else if (blocked_info.side_by_side) {
+        next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+      } else if (!blocked_info.blocked) {
         next = BehaviorMode::FREE_RUN;
-      } else if (
-        pass_safe_cycles_ >= static_cast<int>(config_.pass_safe_required_cycles) &&
-        canSwitch(now_sec)) {
-        next = selected == CandidateType::PASS_LEFT ?
-          BehaviorMode::PREPARE_OVERTAKE_LEFT : BehaviorMode::PREPARE_OVERTAKE_RIGHT;
+      } else {
+        const bool left_ready =
+          selected == CandidateType::PASS_LEFT &&
+          pass_left_safe_cycles_ >= static_cast<int>(config_.pass_safe_required_cycles);
+        const bool right_ready =
+          selected == CandidateType::PASS_RIGHT &&
+          pass_right_safe_cycles_ >= static_cast<int>(config_.pass_safe_required_cycles);
+        if ((left_ready || right_ready) && canSwitch(now_sec)) {
+          next = selected == CandidateType::PASS_LEFT ?
+            BehaviorMode::PREPARE_OVERTAKE_LEFT : BehaviorMode::PREPARE_OVERTAKE_RIGHT;
+        }
       }
       break;
     case BehaviorMode::PREPARE_OVERTAKE_LEFT:
-      next = BehaviorMode::OVERTAKE_LEFT;
+      // 準備モードは1周期だけ使い、次周期から実際の追い越しオフセットを維持する。
+      next = selected == CandidateType::YIELD_BEHIND ?
+        BehaviorMode::YIELD_BEHIND : BehaviorMode::OVERTAKE_LEFT;
       break;
     case BehaviorMode::PREPARE_OVERTAKE_RIGHT:
-      next = BehaviorMode::OVERTAKE_RIGHT;
+      // 左右どちらに避けるかをデバッグ上でも分けて追跡する。
+      next = selected == CandidateType::YIELD_BEHIND ?
+        BehaviorMode::YIELD_BEHIND : BehaviorMode::OVERTAKE_RIGHT;
       break;
     case BehaviorMode::OVERTAKE_LEFT:
     case BehaviorMode::OVERTAKE_RIGHT:
-      if (blocked_info.side_by_side) {
+      // 横並び中は追い越しを継続し、前方ギャップが戻ったら中心線へ戻る。
+      if (selected == CandidateType::YIELD_BEHIND) {
+        next = BehaviorMode::YIELD_BEHIND;
+      } else if (blocked_info.side_by_side) {
         next = current;
       } else if (blocked_info.front_delta_s > config_.merge_front_gap_m && !blocked_info.blocked) {
         next = BehaviorMode::MERGE_BACK;
@@ -77,10 +121,36 @@ BehaviorMode BehaviorStateMachine::update(
       }
       break;
     case BehaviorMode::MERGE_BACK:
-      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
+      // 中心線復帰後、まだ前が詰まっていれば追従、空いていれば通常走行へ戻る。
+      if (blocked_info.side_by_side) {
+        next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+      } else {
+        next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
+      }
       break;
     case BehaviorMode::ABORT_RECOVERY:
-      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
+      // 中止復帰も中心線へ戻す処理なので、復帰後の状態はMERGE_BACKと同じ判定にする。
+      if (blocked_info.side_by_side) {
+        next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+      } else {
+        next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
+      }
+      break;
+    case BehaviorMode::SIDE_BY_SIDE_KEEP:
+      // 横並び中は相手から離れる距離維持overrideを出し続け、解けたら通常の閉塞判定へ戻る。
+      if (selected == CandidateType::YIELD_BEHIND) {
+        next = BehaviorMode::YIELD_BEHIND;
+      } else if (!blocked_info.side_by_side) {
+        next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
+      }
+      break;
+    case BehaviorMode::YIELD_BEHIND:
+      // 相手の後ろに入れる距離が戻ったら、通常の追従状態へ戻す。
+      if (blocked_info.nearest_index >= 0 && blocked_info.front_delta_s >= config_.yield_rejoin_gap_m) {
+        next = BehaviorMode::FOLLOW_BLOCKED;
+      } else if (!blocked_info.blocked && !blocked_info.side_by_side) {
+        next = BehaviorMode::FREE_RUN;
+      }
       break;
   }
 

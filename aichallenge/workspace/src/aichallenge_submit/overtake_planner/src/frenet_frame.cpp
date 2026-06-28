@@ -58,6 +58,10 @@ const char * toString(BehaviorMode mode)
       return "MERGE_BACK";
     case BehaviorMode::ABORT_RECOVERY:
       return "ABORT_RECOVERY";
+    case BehaviorMode::SIDE_BY_SIDE_KEEP:
+      return "SIDE_BY_SIDE_KEEP";
+    case BehaviorMode::YIELD_BEHIND:
+      return "YIELD_BEHIND";
   }
   return "UNKNOWN";
 }
@@ -75,6 +79,10 @@ const char * toString(CandidateType type)
       return "PASS_RIGHT";
     case CandidateType::RECOVERY:
       return "RECOVERY";
+    case CandidateType::SIDE_BY_SIDE_KEEP:
+      return "SIDE_BY_SIDE_KEEP";
+    case CandidateType::YIELD_BEHIND:
+      return "YIELD_BEHIND";
   }
   return "UNKNOWN";
 }
@@ -100,6 +108,7 @@ double normalizeAngle(double angle)
 
 bool FrenetFrame::loadCsv(const std::string & path, std::string * error)
 {
+  // MPCと同じ参照CSVを読み、追い越し判断で使う中心線を構築する。
   std::ifstream ifs(path);
   if (!ifs) {
     if (error != nullptr) {
@@ -150,6 +159,7 @@ bool FrenetFrame::loadCsv(const std::string & path, std::string * error)
 
 void FrenetFrame::setReference(std::vector<ReferencePoint> reference)
 {
+  // CSVにs_mが無い/NaNの点は、隣接点距離から累積sを補完する。
   reference_ = std::move(reference);
   double s = 0.0;
   for (std::size_t i = 0; i < reference_.size(); ++i) {
@@ -163,6 +173,7 @@ void FrenetFrame::setReference(std::vector<ReferencePoint> reference)
     }
   }
   if (reference_.size() > 1) {
+    // コースは閉ループとして扱い、最後の点から先頭点へ戻る距離も含める。
     const auto & first = reference_.front();
     const auto & last = reference_.back();
     track_length_ = reference_.back().s + std::hypot(first.x - last.x, first.y - last.y);
@@ -173,6 +184,7 @@ void FrenetFrame::setReference(std::vector<ReferencePoint> reference)
 
 double FrenetFrame::wrapS(double s) const
 {
+  // 参照線の長さでsを折り返し、周回コース上の位置として扱う。
   if (track_length_ <= 0.0) {
     return s;
   }
@@ -185,6 +197,7 @@ double FrenetFrame::wrapS(double s) const
 
 double FrenetFrame::deltaS(double from_s, double to_s) const
 {
+  // to_sが次周にある場合も、前方距離として正の値を返す。
   double delta = wrapS(to_s) - wrapS(from_s);
   if (delta < 0.0) {
     delta += track_length_;
@@ -194,6 +207,7 @@ double FrenetFrame::deltaS(double from_s, double to_s) const
 
 FrenetPose FrenetFrame::cartesianToFrenet(double x, double y, double yaw) const
 {
+  // 最近傍の参照点を探し、その接線方向に対する横ずれdを計算する簡易変換。
   FrenetPose pose;
   if (reference_.empty()) {
     return pose;
@@ -220,6 +234,7 @@ FrenetPose FrenetFrame::cartesianToFrenet(double x, double y, double yaw) const
 
 ReferencePoint FrenetFrame::interpolate(double s) const
 {
+  // 指定sを囲む2点を線形補間し、候補軌道を滑らかに生成できるようにする。
   if (reference_.empty()) {
     return {};
   }
@@ -249,6 +264,7 @@ ReferencePoint FrenetFrame::interpolate(double s) const
 
 ReferencePoint FrenetFrame::frenetToCartesian(double s, double d) const
 {
+  // 中心線上の点から法線方向にdだけずらして、MPCへ渡すCartesian点へ戻す。
   ReferencePoint out = interpolate(s);
   out.x = out.x - d * std::sin(out.yaw);
   out.y = out.y + d * std::cos(out.yaw);

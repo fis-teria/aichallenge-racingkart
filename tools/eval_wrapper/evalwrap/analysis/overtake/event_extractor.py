@@ -21,6 +21,8 @@ def normalize_state(value: object) -> str:
         "OVERTAKE_RIGHT": "OVERTAKING",
         "MERGE_BACK": "RETURNING",
         "ABORT_RECOVERY": "ABORTED",
+        "SIDE_BY_SIDE_KEEP": "SIDE_BY_SIDE",
+        "YIELD_BEHIND": "ABORTED",
     }
     return aliases.get(text, text)
 

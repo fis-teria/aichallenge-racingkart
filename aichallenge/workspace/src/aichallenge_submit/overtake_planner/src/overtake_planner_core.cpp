@@ -17,6 +17,26 @@ double smoothstep(double z)
   return z * z * (3.0 - 2.0 * z);
 }
 
+constexpr double kSideDirectionEpsilon = 0.05;
+
+bool isLeftPassMode(BehaviorMode mode)
+{
+  return mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
+         mode == BehaviorMode::OVERTAKE_LEFT;
+}
+
+bool isRightPassMode(BehaviorMode mode)
+{
+  return mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
+         mode == BehaviorMode::OVERTAKE_RIGHT;
+}
+
+bool currentPassGapLost(BehaviorMode mode, const BlockedInfo & blocked_info)
+{
+  return (isLeftPassMode(mode) && !blocked_info.can_pass_left) ||
+         (isRightPassMode(mode) && !blocked_info.can_pass_right);
+}
+
 }  // namespace
 
 OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame, PlannerConfig config)
@@ -32,45 +52,73 @@ PlannerOutput OvertakePlannerCore::update(
   const EgoState & ego,
   const std::vector<OpponentState> & opponents)
 {
+  // デフォルトはMPCの元参照をそのまま使う。安全に判断できる時だけoverrideを有効化する。
   PlannerOutput output;
   output.lateral_offsets.assign(config_.horizon_points, 0.0);
   output.speed_caps.assign(config_.horizon_points, config_.v_passthrough_mps);
 
   if (!config_.enabled || !ego.valid || frame_.empty()) {
+    // 自車状態や参照線が無いとFrenet判断ができないので、何も介入しない。
     mode_ = BehaviorMode::FREE_RUN;
     output.mode = mode_;
     output.reason = "disabled_or_invalid";
     return output;
   }
 
-  const BlockedInfo blocked = detectBlocked(ego, opponents, now_sec);
+  BlockedInfo blocked = detectBlocked(ego, opponents, now_sec);
   const auto predictions = predictOpponents(opponents, now_sec);
+  blocked = evaluatePassGap(blocked, opponents, predictions);
 
+  // まず全状況でFASTEST候補を作り、閉塞時だけ追従/左右追い越し候補を増やす。
   std::vector<CandidateTrajectory> candidates;
   candidates.push_back(makeCandidate(CandidateType::FASTEST, ego, blocked, opponents));
+  if (blocked.side_by_side) {
+    candidates.push_back(makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego, blocked, opponents));
+  }
   if (blocked.blocked) {
     candidates.push_back(makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents));
-    candidates.push_back(makeCandidate(CandidateType::PASS_LEFT, ego, blocked, opponents));
-    candidates.push_back(makeCandidate(CandidateType::PASS_RIGHT, ego, blocked, opponents));
+    if (blocked.can_pass_left) {
+      candidates.push_back(makeCandidate(CandidateType::PASS_LEFT, ego, blocked, opponents));
+    }
+    if (blocked.can_pass_right) {
+      candidates.push_back(makeCandidate(CandidateType::PASS_RIGHT, ego, blocked, opponents));
+    }
+    if (!blocked.can_pass_left && !blocked.can_pass_right) {
+      candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
+    }
+  }
+  if (currentPassGapLost(mode_, blocked)) {
+    candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
   }
   if (isPassMode(mode_) || mode_ == BehaviorMode::ABORT_RECOVERY) {
+    // 追い越し中や中止中は、中心線へ戻るRECOVERY候補も常に評価する。
     candidates.push_back(makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
   }
 
   for (auto & candidate : candidates) {
+    // 壁/他車との安全余裕を見てから、目的に応じたスコアを付ける。
     safety_.evaluate(candidate, predictions);
     candidate.score = candidateScore(candidate, blocked);
   }
 
   CandidateTrajectory selected = selectCandidate(candidates);
+  // 候補選択だけで急にモードを切り替えず、状態機械で保持時間や継続条件をかける。
   mode_ = state_machine_.update(now_sec, mode_, selected.type, blocked, selected.feasible);
   if (mode_ == BehaviorMode::ABORT_RECOVERY) {
+    // 中止時は必ず中心線へ戻す候補を再生成し、最新予測で安全評価する。
     selected = makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
     safety_.evaluate(selected, predictions);
   } else if (mode_ == BehaviorMode::MERGE_BACK) {
     selected = makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
     safety_.evaluate(selected, predictions);
+  } else if (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP) {
+    selected = makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego, blocked, opponents);
+    safety_.evaluate(selected, predictions);
+  } else if (mode_ == BehaviorMode::YIELD_BEHIND) {
+    selected = makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents);
+    safety_.evaluate(selected, predictions);
   } else if (mode_ == BehaviorMode::FOLLOW_BLOCKED && selected.type != CandidateType::FOLLOW) {
+    // 追従モードでは速度上限だけを落とすFOLLOW候補を優先する。
     selected = makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents);
     safety_.evaluate(selected, predictions);
     if (!selected.feasible) {
@@ -83,10 +131,15 @@ PlannerOutput OvertakePlannerCore::update(
   }
 
   output.mode = mode_;
+  // ROSノードがMPC overrideとdebug JSONを作れるよう、選択結果を平坦な出力に詰める。
   output.selected = selected.type;
   output.blocked_info = blocked;
   output.reason = selected.reject_reason;
-  output.active_override = selected.feasible && selected.type != CandidateType::FASTEST;
+  const bool side_by_side_best_effort =
+    selected.type == CandidateType::SIDE_BY_SIDE_KEEP &&
+    selected.reject_reason == "opponent_collision";
+  output.active_override =
+    selected.type != CandidateType::FASTEST && (selected.feasible || side_by_side_best_effort);
   output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected.d.back();
   output.min_cbf_h = selected.min_safety_margin;
   output.cbf_slack = selected.cbf_slack;
@@ -101,6 +154,7 @@ BlockedInfo OvertakePlannerCore::detectBlocked(
   const std::vector<OpponentState> & opponents,
   double now_sec) const
 {
+  // 同一コリドー内の最も近い前方車両を探し、速度差/距離から閉塞を判断する。
   BlockedInfo info;
   for (std::size_t i = 0; i < opponents.size(); ++i) {
     const auto & opp = opponents[i];
@@ -123,7 +177,15 @@ BlockedInfo OvertakePlannerCore::detectBlocked(
     const bool side_by_side = std::abs(signed_delta_s) < config_.side_by_side_s_m &&
       std::abs(delta_d) < config_.side_margin_m;
     if (side_by_side) {
+      // 横並び中は不用意なmerge backを避けるため、状態機械へ明示的に伝える。
       info.side_by_side = true;
+      if (info.side_index < 0 || std::abs(signed_delta_s) < std::abs(info.side_delta_s)) {
+        info.side_index = static_cast<int>(i);
+        info.side_id = opp.id;
+        info.side_delta_s = signed_delta_s;
+        info.side_delta_d = delta_d;
+        info.side_rel_v = ego.v - opp.v;
+      }
     }
     if (!front || !same_corridor) {
       continue;
@@ -138,6 +200,7 @@ BlockedInfo OvertakePlannerCore::detectBlocked(
   }
 
   if (info.nearest_index >= 0) {
+    // 近い、または相対速度で詰まりつつある前走車を「blocked」と扱う。
     const bool closing = info.front_rel_v > config_.dv_block_threshold_mps;
     const bool slow_gap = info.front_delta_s < config_.follow_trigger_s_m;
     info.blocked = closing || slow_gap;
@@ -145,10 +208,68 @@ BlockedInfo OvertakePlannerCore::detectBlocked(
   return info;
 }
 
+BlockedInfo OvertakePlannerCore::evaluatePassGap(
+  const BlockedInfo & blocked_info,
+  const std::vector<OpponentState> & opponents,
+  const std::vector<PredictedOpponent> & predictions) const
+{
+  BlockedInfo out = blocked_info;
+  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
+  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
+  const double ellipse_gap = config_.safety_ellipse_b_m * std::sqrt(1.0 + config_.min_ellipse_h);
+  out.pass_gap_required_m = std::max(config_.min_pass_gap_m, ellipse_gap);
+
+  const int target_index = out.nearest_index >= 0 ? out.nearest_index : out.side_index;
+  if (target_index < 0 || static_cast<std::size_t>(target_index) >= opponents.size()) {
+    out.left_pass_gap_m = 0.0;
+    out.right_pass_gap_m = 0.0;
+    out.can_pass_left = false;
+    out.can_pass_right = false;
+    out.pass_gap_reason = "no_target";
+    return out;
+  }
+
+  const auto & target = opponents[static_cast<std::size_t>(target_index)];
+  double min_left_gap = upper_d - target.frenet.d;
+  double min_right_gap = target.frenet.d - lower_d;
+
+  for (const auto & pred : predictions) {
+    if (pred.id != target.id) {
+      continue;
+    }
+    for (double d : pred.d) {
+      min_left_gap = std::min(min_left_gap, upper_d - d);
+      min_right_gap = std::min(min_right_gap, d - lower_d);
+    }
+    break;
+  }
+
+  out.left_pass_gap_m = min_left_gap;
+  out.right_pass_gap_m = min_right_gap;
+  const double left_threshold =
+    out.pass_gap_required_m - (isLeftPassMode(mode_) ? config_.pass_gap_hysteresis_m : 0.0);
+  const double right_threshold =
+    out.pass_gap_required_m - (isRightPassMode(mode_) ? config_.pass_gap_hysteresis_m : 0.0);
+  out.can_pass_left = min_left_gap >= left_threshold;
+  out.can_pass_right = min_right_gap >= right_threshold;
+
+  if (out.can_pass_left && out.can_pass_right) {
+    out.pass_gap_reason = "ok";
+  } else if (out.can_pass_left) {
+    out.pass_gap_reason = "right_gap_narrow";
+  } else if (out.can_pass_right) {
+    out.pass_gap_reason = "left_gap_narrow";
+  } else {
+    out.pass_gap_reason = "both_gap_narrow";
+  }
+  return out;
+}
+
 std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
   const std::vector<OpponentState> & opponents,
   double now_sec) const
 {
+  // V2X位置から推定した速度を使い、短いhorizonでは等速直線運動として予測する。
   std::vector<PredictedOpponent> out;
   for (const auto & opp : opponents) {
     if (!opp.valid || now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
@@ -178,6 +299,7 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
   const BlockedInfo & blocked_info,
   const std::vector<OpponentState> & opponents) const
 {
+  // 候補ごとに目標横オフセットと速度上限を決め、Frenet上で滑らかに接続する。
   CandidateTrajectory candidate;
   candidate.type = type;
   candidate.t.reserve(config_.horizon_points);
@@ -190,7 +312,10 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
 
   double target_d = 0.0;
   double shift_distance = config_.merge_distance_m;
+  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
+  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
   if (type == CandidateType::PASS_LEFT) {
+    // 左右PASSは中心線から一定量オフセットした仮想参照をMPCへ渡す。
     target_d = config_.left_offset_m;
     shift_distance = config_.prepare_distance_m;
   } else if (type == CandidateType::PASS_RIGHT) {
@@ -200,17 +325,61 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
     target_d = 0.0;
   } else if (type == CandidateType::RECOVERY) {
     target_d = 0.0;
+  } else if (type == CandidateType::SIDE_BY_SIDE_KEEP) {
+    target_d = ego.frenet.d;
+    shift_distance = config_.side_by_side_shift_distance_m;
+    if (blocked_info.side_index >= 0) {
+      const auto & opp = opponents[static_cast<std::size_t>(blocked_info.side_index)];
+      const double left_space = upper_d - ego.frenet.d;
+      const double right_space = ego.frenet.d - lower_d;
+      double away_sign = 0.0;
+      if (std::abs(blocked_info.side_delta_d) > kSideDirectionEpsilon) {
+        away_sign = blocked_info.side_delta_d > 0.0 ? -1.0 : 1.0;
+      } else {
+        away_sign = left_space >= right_space ? 1.0 : -1.0;
+      }
+      const double gap_target =
+        opp.frenet.d + away_sign * config_.side_by_side_target_gap_m;
+      target_d = away_sign > 0.0 ?
+        std::max(ego.frenet.d, gap_target) :
+        std::min(ego.frenet.d, gap_target);
+      target_d = std::clamp(target_d, lower_d, upper_d);
+    }
+  } else if (type == CandidateType::YIELD_BEHIND) {
+    const int target_index =
+      blocked_info.nearest_index >= 0 ? blocked_info.nearest_index : blocked_info.side_index;
+    target_d = ego.frenet.d;
+    if (target_index >= 0 && static_cast<std::size_t>(target_index) < opponents.size()) {
+      const auto & opp = opponents[static_cast<std::size_t>(target_index)];
+      target_d = std::clamp(opp.frenet.d, lower_d, upper_d);
+    }
   }
 
   double speed_cap = config_.v_passthrough_mps;
   if (type == CandidateType::FOLLOW && blocked_info.nearest_index >= 0) {
+    // FOLLOWは前走車より少し低い速度上限にして、MPC側の速度計画を抑える。
     const auto & opp = opponents[static_cast<std::size_t>(blocked_info.nearest_index)];
     speed_cap = std::max(0.5, opp.v - config_.follow_speed_margin_mps);
   } else if (type == CandidateType::RECOVERY) {
     speed_cap = config_.recovery_v_max_mps;
+  } else if (type == CandidateType::SIDE_BY_SIDE_KEEP) {
+    speed_cap = config_.side_by_side_speed_cap_mps;
+    if (blocked_info.side_index >= 0) {
+      const auto & opp = opponents[static_cast<std::size_t>(blocked_info.side_index)];
+      speed_cap = std::min(speed_cap, std::max(1.0, opp.v));
+    }
+  } else if (type == CandidateType::YIELD_BEHIND) {
+    speed_cap = 0.5;
+    const int target_index =
+      blocked_info.nearest_index >= 0 ? blocked_info.nearest_index : blocked_info.side_index;
+    if (target_index >= 0 && static_cast<std::size_t>(target_index) < opponents.size()) {
+      const auto & opp = opponents[static_cast<std::size_t>(target_index)];
+      speed_cap = std::max(0.5, opp.v - config_.yield_speed_margin_mps);
+    }
   }
 
   for (std::size_t i = 0; i < config_.horizon_points; ++i) {
+    // 現在速度で進む想定のs列を作り、smoothstepで横方向を急変させない。
     const double t = static_cast<double>(i) * config_.horizon_dt_sec;
     const double ds = std::max(0.5, ego.v) * t;
     const double s = frame_.wrapS(ego.frenet.s + ds);
@@ -233,6 +402,7 @@ double OvertakePlannerCore::candidateScore(
   const CandidateTrajectory & candidate,
   const BlockedInfo & blocked_info) const
 {
+  // 候補の優先順位を単純なコストへ落とし、まず安全性、その後に追い越し意欲を見る。
   if (!candidate.feasible) {
     return 1.0e9;
   }
@@ -251,11 +421,23 @@ double OvertakePlannerCore::candidateScore(
     case CandidateType::RECOVERY:
       score = 40.0;
       break;
+    case CandidateType::SIDE_BY_SIDE_KEEP:
+      score = blocked_info.side_by_side ? -30.0 : 80.0;
+      break;
+    case CandidateType::YIELD_BEHIND:
+      if (currentPassGapLost(mode_, blocked_info)) {
+        score = -50.0;
+      } else {
+        score = (!blocked_info.can_pass_left && !blocked_info.can_pass_right) ? 5.0 : 70.0;
+      }
+      break;
   }
   if (
     (mode_ == BehaviorMode::OVERTAKE_LEFT && candidate.type == CandidateType::PASS_LEFT) ||
     (mode_ == BehaviorMode::OVERTAKE_RIGHT && candidate.type == CandidateType::PASS_RIGHT) ||
-    (mode_ == BehaviorMode::FOLLOW_BLOCKED && candidate.type == CandidateType::FOLLOW)) {
+    (mode_ == BehaviorMode::FOLLOW_BLOCKED && candidate.type == CandidateType::FOLLOW) ||
+    (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP && candidate.type == CandidateType::SIDE_BY_SIDE_KEEP)) {
+    // いまのモードに沿う候補を少し優遇し、左右や追従/追い越しが細かく揺れないようにする。
     score -= config_.keep_mode_bonus;
   }
   return score;
@@ -264,6 +446,7 @@ double OvertakePlannerCore::candidateScore(
 CandidateTrajectory OvertakePlannerCore::selectCandidate(
   std::vector<CandidateTrajectory> & candidates) const
 {
+  // スコア最小の候補を返す。空の場合はデフォルト候補を返して上位で安全側に倒す。
   auto best = std::min_element(
     candidates.begin(), candidates.end(),
     [](const CandidateTrajectory & a, const CandidateTrajectory & b) {

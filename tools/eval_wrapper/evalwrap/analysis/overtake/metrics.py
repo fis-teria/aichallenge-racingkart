@@ -42,6 +42,17 @@ TIMESERIES_FIELDS = [
     "penalty_flag",
     "blocked",
     "side_by_side",
+    "side_vehicle_id",
+    "side_delta_s",
+    "side_delta_d",
+    "side_lateral_gap_m",
+    "side_relative_speed_mps",
+    "left_pass_gap_m",
+    "right_pass_gap_m",
+    "can_pass_left",
+    "can_pass_right",
+    "pass_gap_required_m",
+    "pass_gap_reason",
 ]
 
 ATTEMPT_FIELDS = [
@@ -278,6 +289,17 @@ def _merge_row(base: dict[str, object], overtake: dict[str, object], speed: dict
         "penalty_flag": _first_value(base, "penalty_flag"),
         "blocked": _first_value(overtake, "blocked"),
         "side_by_side": _first_value(overtake, "side_by_side"),
+        "side_vehicle_id": _first_value(overtake, "side_vehicle_id"),
+        "side_delta_s": _first_value(overtake, "side_delta_s"),
+        "side_delta_d": _first_value(overtake, "side_delta_d"),
+        "side_lateral_gap_m": _first_value(overtake, "side_lateral_gap_m"),
+        "side_relative_speed_mps": _first_value(overtake, "side_relative_speed_mps"),
+        "left_pass_gap_m": _first_value(overtake, "left_pass_gap_m"),
+        "right_pass_gap_m": _first_value(overtake, "right_pass_gap_m"),
+        "can_pass_left": _first_value(overtake, "can_pass_left"),
+        "can_pass_right": _first_value(overtake, "can_pass_right"),
+        "pass_gap_required_m": _first_value(overtake, "pass_gap_required_m"),
+        "pass_gap_reason": _first_value(overtake, "pass_gap_reason"),
     }
 
 
