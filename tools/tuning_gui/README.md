@@ -49,6 +49,7 @@ tools/run_tuning_gui.bash --restart
 - `追加Autoware車両` は自車以外に起動する追加Autoware台数です。通常 `dev` では `0台` が `make dev`、`1台`〜`3台` が `make dev2`〜`make dev4` に対応します。`AWSIMヘッドレス` の場合も同じターゲットを使い、AWSIMの車両数は通常通り `dev2`〜`dev4` 側で指定されます。
 - ヘッダーの `Run Settings` から `Simulator`、`Safety Gate`、`Multiplay` の設定を開けます。
 - `Safety Gate` の `gate` ボタンは `make gate1`〜`make gate3` を呼び出し、AWSIMの `SafetyGate/scenario*.yaml` を使って障害物停止、追い越し、車線維持のシナリオを実行します。
+- `control_method` が `mpc` または `delay_aware_mpc` のとき、Files に `Overtake planner params` が出ます。`side_yield_s_m`、`side_margin_m`、`yield_speed_margin_mps` などの追い抜き・横並び設定を表編集で変更できます。
 - `Simulator` の各項目は `AWSIM_EXTRA_ARGS` や `AWSIM_START_MODE` / `AWSIM_LAPS` / `AWSIM_TIMEOUT` としてAWSIM起動オプションへ変換されます。
 - `raw args` はGUIやlaunchが管理する `--camera`、`--laps`、`--scenario` などと重複すると起動前にエラーになります。
 - `Multiplay` は `--multiplay`、`--multiplay-address`、`--multiplay-port`、`--multiplay-name`、`--multiplay-send-hz` を組み立てます。

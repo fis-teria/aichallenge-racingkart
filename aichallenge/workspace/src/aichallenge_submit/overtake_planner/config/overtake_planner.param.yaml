@@ -15,6 +15,8 @@ overtake_planner_node:
     dv_block_threshold_mps: 0.20
     opponent_stale_time_sec: 0.50
     side_by_side_s_m: 4.0
+    side_margin_m: 1.20
+    side_yield_s_m: 0.30
     side_by_side_target_gap_m: 1.10
     side_by_side_shift_distance_m: 5.0
     side_by_side_speed_cap_mps: 4.5

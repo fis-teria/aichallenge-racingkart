@@ -120,6 +120,8 @@ public:
     config.dv_block_threshold_mps = declare_parameter<double>("dv_block_threshold_mps", 0.20);
     config.opponent_stale_time_sec = declare_parameter<double>("opponent_stale_time_sec", 0.50);
     config.side_by_side_s_m = declare_parameter<double>("side_by_side_s_m", 4.0);
+    config.side_margin_m = declare_parameter<double>("side_margin_m", 1.2);
+    config.side_yield_s_m = declare_parameter<double>("side_yield_s_m", 0.30);
     config.side_by_side_target_gap_m =
       declare_parameter<double>("side_by_side_target_gap_m", 1.10);
     config.side_by_side_shift_distance_m =

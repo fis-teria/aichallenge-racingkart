@@ -59,6 +59,7 @@ overtake_planner::PlannerConfig makeConfig()
   config.min_mode_hold_time_sec = 0.0;
   config.side_by_side_s_m = 4.0;
   config.side_margin_m = 1.2;
+  config.side_yield_s_m = 0.3;
   config.side_by_side_target_gap_m = 1.1;
   config.side_by_side_shift_distance_m = 2.0;
   config.side_by_side_speed_cap_mps = 4.5;
@@ -92,6 +93,27 @@ TEST(OvertakePlannerCore, SideBySideOpponentOnLeftMovesRightAndOverrides)
   EXPECT_TRUE(output.active_override);
   EXPECT_LT(output.lateral_offsets.back(), -0.35);
   EXPECT_LE(output.speed_caps.back(), config.side_by_side_speed_cap_mps);
+  EXPECT_NEAR(output.speed_caps.back(), 3.4, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, SideBySideOpponentAheadYieldsBehind)
+{
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent = makeOpponent(frame, 5.6, 0.6);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::YIELD_BEHIND);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::YIELD_BEHIND);
+  EXPECT_TRUE(output.blocked_info.side_by_side);
+  EXPECT_GT(output.blocked_info.side_delta_s, config.side_yield_s_m);
+  EXPECT_TRUE(output.active_override);
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_NEAR(output.speed_caps.back(), 3.4, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, SideBySideDoesNotPushPastWallMargin)

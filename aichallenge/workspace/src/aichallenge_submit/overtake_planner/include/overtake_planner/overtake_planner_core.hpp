@@ -51,6 +51,8 @@ private:
   double candidateScore(
     const CandidateTrajectory & candidate,
     const BlockedInfo & blocked_info) const;
+  // 横並びで相手が縦方向に前へ出ている場合は、無理に並走せず後ろへ譲る。
+  bool shouldYieldBehindSideBySide(const BlockedInfo & blocked_info) const;
 
   FrenetFrame frame_;
   PlannerConfig config_;

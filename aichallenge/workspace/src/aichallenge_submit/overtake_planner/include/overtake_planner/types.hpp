@@ -145,6 +145,7 @@ struct PlannerConfig
   double opponent_stale_time_sec{0.50};
   double side_by_side_s_m{4.0};
   double side_margin_m{1.2};
+  double side_yield_s_m{0.30};
   double side_by_side_target_gap_m{1.10};
   double side_by_side_shift_distance_m{5.0};
   double side_by_side_speed_cap_mps{4.5};

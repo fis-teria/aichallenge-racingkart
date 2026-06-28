@@ -47,6 +47,7 @@ HISTORY_FILE = HISTORY_DIR / "runs.jsonl"
 LAUNCH_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch")
 SYSTEM_LAUNCH_ROOT = Path("aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch")
 MPC_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros")
+OVERTAKE_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/overtake_planner")
 MPC_CONFIG_PATH = MPC_ROOT / "config/config.yaml"
 DELAY_AWARE_MPC_CONFIG_PATH = Path(
     "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_aware_config.yaml"
@@ -95,6 +96,32 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "v2x_obstacle_avoidance.vehicle_radius": "V2X車両を障害物として扱うときの半径[m]です。",
     "v2x_obstacle_avoidance.v_max_safety": "V2X速度推定の安全上限[m/s]です。異常に速い推定値を破棄します。",
     "v2x_obstacle_avoidance.position_jump_threshold": "V2X位置が瞬間的に飛んだと判定する距離[m]です。",
+    "overtake_planner_node.ros__parameters.enabled": "overtake_planner全体を有効にするフラグです。falseにするとMPCへの追い抜きoverrideを止めます。",
+    "overtake_planner_node.ros__parameters.reference_csv": "追い抜き判断のFrenet基準に使う参照CSVです。MPCの走行ラインと合わせるのが基本です。",
+    "overtake_planner_node.ros__parameters.own_vehicle_id": "V2X上で自車として除外するIDです。autoならROS_DOMAIN_IDからd1などを推定します。",
+    "overtake_planner_node.ros__parameters.lookahead_s_m": "前方車両を追い抜き判断に入れる縦方向距離[m]です。大きいほど早めに反応します。",
+    "overtake_planner_node.ros__parameters.follow_trigger_s_m": "前走車へ追従を始める距離[m]です。大きいほど詰める前に減速します。",
+    "overtake_planner_node.ros__parameters.same_corridor_width_m": "前方閉塞判定で同じ走行コリドーとみなす横幅[m]です。",
+    "overtake_planner_node.ros__parameters.dv_block_threshold_mps": "相対速度で詰まり中と判定するしきい値[m/s]です。小さいほど早くblockedになります。",
+    "overtake_planner_node.ros__parameters.side_by_side_s_m": "横並びとみなす縦方向距離[m]です。",
+    "overtake_planner_node.ros__parameters.side_margin_m": "横並びとみなす横方向距離[m]です。大きいほど横並び検出が広くなります。",
+    "overtake_planner_node.ros__parameters.side_yield_s_m": "横並び中に相手がこの距離[m]以上前なら、自車が後ろへ譲る判定にします。",
+    "overtake_planner_node.ros__parameters.side_by_side_target_gap_m": "横並び維持時に相手から横へ確保したい距離[m]です。",
+    "overtake_planner_node.ros__parameters.side_by_side_shift_distance_m": "横並び維持の横移動をならす距離[m]です。大きいほどゆっくり横へ逃げます。",
+    "overtake_planner_node.ros__parameters.side_by_side_speed_cap_mps": "横並び維持時の速度上限[m/s]です。相手速度からyield marginを引いた値との低い方を使います。",
+    "overtake_planner_node.ros__parameters.min_pass_gap_m": "左右追い抜き候補に必要な最小横ギャップ[m]です。",
+    "overtake_planner_node.ros__parameters.yield_speed_margin_mps": "譲り・横並び時に相手速度から引く速度余裕[m/s]です。大きいほど後ろに下がりやすくなります。",
+    "overtake_planner_node.ros__parameters.yield_rejoin_gap_m": "譲り状態から追従へ戻る前方距離[m]です。",
+    "overtake_planner_node.ros__parameters.left_offset_m": "左追い抜き時にMPCへ渡す横オフセット[m]です。",
+    "overtake_planner_node.ros__parameters.right_offset_m": "右追い抜き時にMPCへ渡す横オフセット[m]です。",
+    "overtake_planner_node.ros__parameters.follow_speed_margin_mps": "追従時に前走車速度から引く速度余裕[m/s]です。",
+    "overtake_planner_node.ros__parameters.safety_ellipse_a_m": "他車との安全楕円の前後方向半径[m]です。",
+    "overtake_planner_node.ros__parameters.safety_ellipse_b_m": "他車との安全楕円の左右方向半径[m]です。",
+    "overtake_planner_node.ros__parameters.min_ellipse_h": "安全楕円の最小余裕です。大きいほど他車へ保守的になります。",
+    "overtake_planner_node.ros__parameters.pass_safe_required_cycles": "追い抜き候補が安全と連続判定される必要周期数です。",
+    "overtake_planner_node.ros__parameters.merge_front_gap_m": "追い抜き後に中心へ戻るための前方ギャップ[m]です。",
+    "overtake_planner_node.ros__parameters.abort_timeout_sec": "追い抜き状態を続けすぎた場合に中止復帰へ入る時間[s]です。",
+    "overtake_planner_node.ros__parameters.keep_mode_bonus": "現在モードを少し優先してチャタリングを抑えるスコア補正です。",
 }
 
 DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
@@ -170,6 +197,16 @@ CATALOG: dict[str, list[dict[str, str]]] = {
             "kind": "xml",
         },
         {
+            "label": "Overtake planner params",
+            "path": str(OVERTAKE_ROOT / "config/overtake_planner.param.yaml"),
+            "kind": "yaml",
+        },
+        {
+            "label": "Overtake planner launch",
+            "path": str(OVERTAKE_ROOT / "launch/overtake_planner.launch.xml"),
+            "kind": "xml",
+        },
+        {
             "label": "MPC reference path",
             "path": "aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/env/final_ver3/traj_mincurv.csv",
             "kind": "csv",
@@ -179,6 +216,16 @@ CATALOG: dict[str, list[dict[str, str]]] = {
         {
             "label": "Delay-aware MPC launch params",
             "path": str(LAUNCH_ROOT / "launch/control/delay_aware_mpc.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Overtake planner params",
+            "path": str(OVERTAKE_ROOT / "config/overtake_planner.param.yaml"),
+            "kind": "yaml",
+        },
+        {
+            "label": "Overtake planner launch",
+            "path": str(OVERTAKE_ROOT / "launch/overtake_planner.launch.xml"),
             "kind": "xml",
         },
         {

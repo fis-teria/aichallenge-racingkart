@@ -75,6 +75,9 @@ PlannerOutput OvertakePlannerCore::update(
   if (blocked.side_by_side) {
     candidates.push_back(makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego, blocked, opponents));
   }
+  if (shouldYieldBehindSideBySide(blocked)) {
+    candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
+  }
   if (blocked.blocked) {
     candidates.push_back(makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents));
     if (blocked.can_pass_left) {
@@ -138,8 +141,12 @@ PlannerOutput OvertakePlannerCore::update(
   const bool side_by_side_best_effort =
     selected.type == CandidateType::SIDE_BY_SIDE_KEEP &&
     selected.reject_reason == "opponent_collision";
+  const bool yield_best_effort =
+    selected.type == CandidateType::YIELD_BEHIND &&
+    selected.reject_reason == "opponent_collision";
   output.active_override =
-    selected.type != CandidateType::FASTEST && (selected.feasible || side_by_side_best_effort);
+    selected.type != CandidateType::FASTEST &&
+    (selected.feasible || side_by_side_best_effort || yield_best_effort);
   output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected.d.back();
   output.min_cbf_h = selected.min_safety_margin;
   output.cbf_slack = selected.cbf_slack;
@@ -366,7 +373,7 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
     speed_cap = config_.side_by_side_speed_cap_mps;
     if (blocked_info.side_index >= 0) {
       const auto & opp = opponents[static_cast<std::size_t>(blocked_info.side_index)];
-      speed_cap = std::min(speed_cap, std::max(1.0, opp.v));
+      speed_cap = std::min(speed_cap, std::max(0.5, opp.v - config_.yield_speed_margin_mps));
     }
   } else if (type == CandidateType::YIELD_BEHIND) {
     speed_cap = 0.5;
@@ -425,7 +432,9 @@ double OvertakePlannerCore::candidateScore(
       score = blocked_info.side_by_side ? -30.0 : 80.0;
       break;
     case CandidateType::YIELD_BEHIND:
-      if (currentPassGapLost(mode_, blocked_info)) {
+      if (shouldYieldBehindSideBySide(blocked_info)) {
+        score = -60.0;
+      } else if (currentPassGapLost(mode_, blocked_info)) {
         score = -50.0;
       } else {
         score = (!blocked_info.can_pass_left && !blocked_info.can_pass_right) ? 5.0 : 70.0;
@@ -441,6 +450,11 @@ double OvertakePlannerCore::candidateScore(
     score -= config_.keep_mode_bonus;
   }
   return score;
+}
+
+bool OvertakePlannerCore::shouldYieldBehindSideBySide(const BlockedInfo & blocked_info) const
+{
+  return blocked_info.side_by_side && blocked_info.side_delta_s > config_.side_yield_s_m;
 }
 
 CandidateTrajectory OvertakePlannerCore::selectCandidate(
