@@ -142,6 +142,12 @@ public:
       declare_parameter<double>("yield_rejoin_wall_clearance_m", 0.15);
     config.corner_follow_speed_margin_mps =
       declare_parameter<double>("corner_follow_speed_margin_mps", 0.20);
+    config.corner_yield_v_max_mps =
+      declare_parameter<double>("corner_yield_v_max_mps", 3.0);
+    config.large_lateral_error_threshold_m =
+      declare_parameter<double>("large_lateral_error_threshold_m", 0.60);
+    config.large_lateral_error_v_max_mps =
+      declare_parameter<double>("large_lateral_error_v_max_mps", 2.5);
     config.min_pass_gap_m = declare_parameter<double>("min_pass_gap_m", 1.45);
     config.pass_gap_hysteresis_m = declare_parameter<double>("pass_gap_hysteresis_m", 0.15);
     config.yield_speed_margin_mps = declare_parameter<double>("yield_speed_margin_mps", 0.60);

@@ -159,6 +159,9 @@ struct PlannerConfig
   double corner_yield_rejoin_gap_m{5.5};
   double yield_rejoin_wall_clearance_m{0.15};
   double corner_follow_speed_margin_mps{0.20};
+  double corner_yield_v_max_mps{3.0};
+  double large_lateral_error_threshold_m{0.60};
+  double large_lateral_error_v_max_mps{2.5};
   double min_pass_gap_m{1.45};
   double pass_gap_hysteresis_m{0.15};
   double yield_speed_margin_mps{0.60};

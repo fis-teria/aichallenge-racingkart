@@ -146,7 +146,7 @@ TEST(OvertakePlannerCore, CornerSideBySideYieldsBehindWithCloseSpeedCap)
   EXPECT_TRUE(output.active_override);
   EXPECT_NEAR(output.target_lateral_offset_m, config.corner_yield_target_d_m, 1.0e-9);
   ASSERT_FALSE(output.speed_caps.empty());
-  EXPECT_NEAR(output.speed_caps.back(), 3.8, 1.0e-9);
+  EXPECT_NEAR(output.speed_caps.back(), config.corner_yield_v_max_mps, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, CornerSideBySideLeadCarDoesNotPushLaterally)
@@ -193,7 +193,7 @@ TEST(OvertakePlannerCore, CornerSideBySideNearWallUsesSafeYieldReference)
   EXPECT_LE(*minmax_offset.second, upper_d + 1.0e-9);
   EXPECT_LT(output.target_lateral_offset_m, upper_d);
   ASSERT_FALSE(output.speed_caps.empty());
-  EXPECT_NEAR(output.speed_caps.back(), 3.8, 1.0e-9);
+  EXPECT_NEAR(output.speed_caps.back(), config.large_lateral_error_v_max_mps, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, WallMarginRecoveryStartsInsideCorridorAndSlows)
@@ -217,6 +217,26 @@ TEST(OvertakePlannerCore, WallMarginRecoveryStartsInsideCorridorAndSlows)
   EXPECT_GE(min_offset, lower_d - 1.0e-9);
   ASSERT_FALSE(output.speed_caps.empty());
   EXPECT_NEAR(output.speed_caps.back(), config.wall_margin_recovery_v_max_mps, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, LargeLateralErrorRecoveryUsesSlowCap)
+{
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.wall_margin_recovery_v_max_mps = 2.5;
+  config.large_lateral_error_threshold_m = 0.6;
+  config.large_lateral_error_v_max_mps = 1.8;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 1.8);
+
+  const auto output = core.update(0.1, ego, {});
+
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::RECOVERY);
+  EXPECT_TRUE(output.active_override);
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_NEAR(output.speed_caps.back(), config.large_lateral_error_v_max_mps, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, WallMarginRecoveryDoesNotReleaseToFastestTooEarly)

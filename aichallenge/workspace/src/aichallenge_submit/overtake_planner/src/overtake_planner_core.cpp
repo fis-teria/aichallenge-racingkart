@@ -154,10 +154,11 @@ PlannerOutput OvertakePlannerCore::update(
   const bool wall_margin_escape =
     selected.reject_reason == "wall_margin" &&
     selected.type == CandidateType::YIELD_BEHIND;
+  const double selected_target_d = selected.d.empty() ? ego.frenet.d : selected.d.back();
   output.active_override =
     selected.type != CandidateType::FASTEST &&
     (selected.feasible || side_by_side_best_effort || yield_best_effort || wall_margin_escape);
-  output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected.d.back();
+  output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected_target_d;
   output.min_cbf_h = selected.min_safety_margin;
   output.cbf_slack = selected.cbf_slack;
   output.active_cbf_constraint_count = selected.active_safety_constraint_count;
@@ -376,12 +377,13 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
   }
 
   double speed_cap = config_.v_passthrough_mps;
+  const double ego_wall_clearance = wallClearance(ego.frenet.d);
   if (type == CandidateType::FOLLOW && blocked_info.nearest_index >= 0) {
     // FOLLOWは前走車より少し低い速度上限にして、MPC側の速度計画を抑える。
     const auto & opp = opponents[static_cast<std::size_t>(blocked_info.nearest_index)];
     speed_cap = std::max(0.5, opp.v - config_.follow_speed_margin_mps);
   } else if (type == CandidateType::RECOVERY) {
-    speed_cap = wallClearance(ego.frenet.d) < 0.0 ?
+    speed_cap = ego_wall_clearance < 0.0 ?
       config_.wall_margin_recovery_v_max_mps : config_.recovery_v_max_mps;
   } else if (type == CandidateType::SIDE_BY_SIDE_KEEP) {
     speed_cap = config_.side_by_side_speed_cap_mps;
@@ -399,6 +401,24 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
         config_.corner_follow_speed_margin_mps : config_.yield_speed_margin_mps;
       speed_cap = std::max(0.5, opp.v - margin);
     }
+    if (blocked_info.corner_side_by_side && config_.corner_yield_v_max_mps > 0.0) {
+      speed_cap = std::min(speed_cap, config_.corner_yield_v_max_mps);
+    }
+  }
+
+  const bool recovery_like =
+    type == CandidateType::RECOVERY ||
+    type == CandidateType::YIELD_BEHIND ||
+    type == CandidateType::SIDE_BY_SIDE_KEEP;
+  if (recovery_like && ego_wall_clearance < 0.0) {
+    speed_cap = std::min(speed_cap, config_.wall_margin_recovery_v_max_mps);
+  }
+  if (
+    recovery_like &&
+    config_.large_lateral_error_threshold_m >= 0.0 &&
+    config_.large_lateral_error_v_max_mps > 0.0 &&
+    std::abs(ego.frenet.d - target_d) > config_.large_lateral_error_threshold_m) {
+    speed_cap = std::min(speed_cap, config_.large_lateral_error_v_max_mps);
   }
 
   for (std::size_t i = 0; i < config_.horizon_points; ++i) {
