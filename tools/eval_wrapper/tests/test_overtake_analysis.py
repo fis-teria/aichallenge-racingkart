@@ -9,6 +9,7 @@ from evalwrap.analysis.overtake.event_extractor import extract_overtake_attempts
 from evalwrap.analysis.overtake.metrics import build_overtake_outputs
 from evalwrap.analysis.overtake.opportunity_detector import detect_missed_overtake_chances
 from evalwrap.metrics.race_metrics import DomainMetrics
+from evalwrap.reports.overtake_report import generate_overtake_report
 
 
 CONFIG = {
@@ -114,8 +115,28 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
         ],
         overtake_debug_timeseries=[
             {"time_sec": 0.0, "mode": "FOLLOW_BLOCKED", "front_delta_s": 5.0, "front_vehicle_id": "d2"},
-            {"time_sec": 1.0, "mode": "PREPARE_OVERTAKE_LEFT", "front_delta_s": 4.0, "front_vehicle_id": "d2", "attempt_id": 1, "min_cbf_h": 0.8},
-            {"time_sec": 2.0, "mode": "OVERTAKE_LEFT", "front_delta_s": 2.0, "front_vehicle_id": "d2", "attempt_id": 1, "min_cbf_h": 0.7},
+            {
+                "time_sec": 1.0,
+                "mode": "PREPARE_OVERTAKE_LEFT",
+                "selected": "PASS_LEFT",
+                "front_delta_s": 4.0,
+                "front_vehicle_id": "d2",
+                "attempt_id": 1,
+                "active_override": True,
+                "pass_gap_reason": "ok",
+                "min_cbf_h": 0.8,
+            },
+            {
+                "time_sec": 2.0,
+                "mode": "OVERTAKE_LEFT",
+                "selected": "PASS_LEFT",
+                "front_delta_s": 2.0,
+                "front_vehicle_id": "d2",
+                "attempt_id": 1,
+                "active_override": True,
+                "pass_gap_reason": "ok",
+                "min_cbf_h": 0.7,
+            },
             {"time_sec": 3.0, "mode": "MERGE_BACK", "front_delta_s": 8.0, "front_vehicle_id": "d2", "attempt_id": 1, "min_cbf_h": 0.9},
             {"time_sec": 3.2, "mode": "FREE_RUN", "front_vehicle_id": "d2", "attempt_id": 1},
         ],
@@ -131,3 +152,182 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
     assert attempts[0]["result"] == "success"
     metrics = json.loads((tmp_path / "overtake_metrics.json").read_text(encoding="utf-8"))
     assert metrics["domains"]["d1"]["analysis_available"] is True
+    with (tmp_path / "overtake_timeseries.csv").open("r", encoding="utf-8", newline="") as handle:
+        timeseries = list(csv.DictReader(handle))
+    assert timeseries[1]["selected"] == "PASS_LEFT"
+    assert timeseries[1]["active_override"] == "True"
+    assert timeseries[1]["pass_gap_reason"] == "ok"
+
+
+def test_generate_overtake_report_surfaces_decision_metrics(tmp_path: Path) -> None:
+    processed = tmp_path / "processed"
+    processed.mkdir()
+    (processed / "overtake_metrics.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "domains": {
+                    "d1": {
+                        "analysis_available": True,
+                        "attempt_count": 1,
+                        "success_count": 0,
+                        "success_rate": 0.0,
+                        "failure_rate": 0.0,
+                        "blocked_time_sec": 1.2,
+                        "missed_overtake_chance_count": 0,
+                        "collision_count": 0,
+                        "penalty_count": 0,
+                        "min_vehicle_distance_m": 4.0,
+                        "min_cbf_h": 0.8,
+                        "max_cbf_slack": 0.0,
+                        "mpc_infeasible_count": 0,
+                        "abort_reason_counts": {},
+                        "judgement": "candidate",
+                    }
+                },
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_csv(processed / "overtake_attempts.csv", ["domain_id", "attempt_id", "result"], [])
+    _write_csv(
+        processed / "overtake_timeseries.csv",
+        [
+            "domain_id",
+            "timestamp_sec",
+            "s",
+            "ego_x",
+            "ego_y",
+            "overtake_state",
+            "selected",
+            "blocked",
+            "side_by_side",
+            "front_vehicle_id",
+            "front_distance_m",
+            "front_delta_d",
+            "can_pass_left",
+            "can_pass_right",
+            "pass_gap_reason",
+            "active_override",
+            "reason",
+            "min_cbf_h",
+        ],
+        [
+            {
+                "domain_id": "d1",
+                "timestamp_sec": 1.0,
+                "s": 12.0,
+                "ego_x": 1.0,
+                "ego_y": 2.0,
+                "overtake_state": "FOLLOWING",
+                "selected": "FOLLOW",
+                "blocked": "true",
+                "side_by_side": "false",
+                "front_vehicle_id": "d2",
+                "front_distance_m": 5.0,
+                "front_delta_d": 0.1,
+                "can_pass_left": "true",
+                "can_pass_right": "false",
+                "pass_gap_reason": "right_gap_narrow",
+                "active_override": "true",
+                "reason": "",
+                "min_cbf_h": 0.9,
+            },
+            {
+                "domain_id": "d1",
+                "timestamp_sec": 2.0,
+                "s": 16.0,
+                "ego_x": 2.0,
+                "ego_y": 2.0,
+                "overtake_state": "OVERTAKING",
+                "selected": "PASS_LEFT",
+                "blocked": "true",
+                "side_by_side": "false",
+                "front_vehicle_id": "d2",
+                "front_distance_m": 4.0,
+                "front_delta_d": 0.2,
+                "can_pass_left": "true",
+                "can_pass_right": "false",
+                "pass_gap_reason": "right_gap_narrow",
+                "active_override": "true",
+                "reason": "",
+                "min_cbf_h": 0.8,
+            },
+        ],
+    )
+    _write_csv(processed / "overtake_map_bins.csv", ["domain_id", "bin_id"], [])
+
+    report = generate_overtake_report(tmp_path)
+
+    assert report is not None
+    html = report.read_text(encoding="utf-8")
+    assert "Decision Summary" in html
+    assert "Decision Samples" in html
+    assert "PASS_LEFT" in html
+    assert "right_gap_narrow" in html
+    assert "active_override_samples" in html
+
+
+def test_generate_overtake_report_keeps_single_vehicle_debug_quiet(tmp_path: Path) -> None:
+    processed = tmp_path / "processed"
+    processed.mkdir()
+    (processed / "overtake_metrics.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "domains": {
+                    "d1": {
+                        "analysis_available": True,
+                        "attempt_count": 0,
+                        "success_count": 0,
+                        "success_rate": 0.0,
+                        "failure_rate": 0.0,
+                        "blocked_time_sec": 0.0,
+                        "missed_overtake_chance_count": 0,
+                        "collision_count": 0,
+                        "penalty_count": 0,
+                        "min_vehicle_distance_m": None,
+                        "min_cbf_h": None,
+                        "max_cbf_slack": None,
+                        "mpc_infeasible_count": 0,
+                        "abort_reason_counts": {},
+                        "judgement": "no_attempt",
+                    }
+                },
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_csv(processed / "overtake_attempts.csv", ["domain_id", "attempt_id", "result"], [])
+    _write_csv(
+        processed / "overtake_timeseries.csv",
+        ["domain_id", "timestamp_sec", "selected", "blocked", "side_by_side", "pass_gap_reason", "active_override"],
+        [
+            {
+                "domain_id": "d1",
+                "timestamp_sec": 1.0,
+                "selected": "FASTEST",
+                "blocked": "false",
+                "side_by_side": "false",
+                "pass_gap_reason": "no_target",
+                "active_override": "false",
+            }
+        ],
+    )
+    _write_csv(processed / "overtake_map_bins.csv", ["domain_id", "bin_id"], [])
+
+    report = generate_overtake_report(tmp_path)
+
+    assert report is not None
+    html = report.read_text(encoding="utf-8")
+    assert "No overtake scene observed" in html
+    assert "Decision Samples" not in html
+
+
+def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)

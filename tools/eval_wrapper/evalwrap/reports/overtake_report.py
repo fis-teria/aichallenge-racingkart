@@ -67,6 +67,9 @@ def _html(
             "<section><h2>Summary</h2>",
             _summary_table(metrics),
             "</section>",
+            "<section><h2>Decision Summary</h2>",
+            _decision_summary(metrics, timeseries, attempts),
+            "</section>",
             "<section><h2>Event Map</h2>",
             _event_map(attempts, timeseries),
             "</section>",
@@ -94,6 +97,156 @@ def _html(
             "</ul></section>",
             "</body></html>",
         ]
+    )
+
+
+def _decision_summary(
+    metrics: dict[str, Any],
+    timeseries: list[dict[str, str]],
+    attempts: list[dict[str, str]],
+) -> str:
+    parts = [_decision_overview(metrics, timeseries)]
+    if not _has_overtake_scene(metrics, timeseries, attempts):
+        parts.append(
+            "<p class='notice muted'>No overtake scene observed. "
+            "The debug topic was parsed, but no front/side vehicle, blocked state, "
+            "side-by-side state, or active override sample was found.</p>"
+        )
+        return "\n".join(parts)
+
+    samples = _decision_samples(timeseries)
+    parts.extend(
+        [
+            "<h3>Decision Samples</h3>",
+            _table(
+                samples[:120],
+                [
+                    "domain_id",
+                    "timestamp_sec",
+                    "s",
+                    "overtake_state",
+                    "selected",
+                    "blocked",
+                    "side_by_side",
+                    "corner_side_by_side",
+                    "corner_abs_curvature",
+                    "front_vehicle_id",
+                    "front_distance_m",
+                    "front_delta_d",
+                    "can_pass_left",
+                    "can_pass_right",
+                    "pass_gap_reason",
+                    "active_override",
+                    "reason",
+                ],
+            ),
+        ]
+    )
+    if len(samples) > 120:
+        parts.append(f"<p class='notice'>Showing 120 of {len(samples)} decision-change samples.</p>")
+    return "\n".join(parts)
+
+
+def _decision_overview(metrics: dict[str, Any], timeseries: list[dict[str, str]]) -> str:
+    domains = metrics.get("domains", {})
+    domain_ids = set(domains) if isinstance(domains, dict) else set()
+    domain_ids.update(str(row.get("domain_id") or "") for row in timeseries if row.get("domain_id"))
+    rows = []
+    for domain_id in sorted(domain_ids):
+        domain_rows = [row for row in timeseries if str(row.get("domain_id") or "") == domain_id]
+        domain_metrics = domains.get(domain_id, {}) if isinstance(domains, dict) else {}
+        rows.append(
+            {
+                "domain_id": domain_id,
+                "samples": len(domain_rows),
+                "attempts": domain_metrics.get("attempt_count"),
+                "blocked_samples": sum(1 for row in domain_rows if _truthy(row.get("blocked"))),
+                "side_by_side_samples": sum(1 for row in domain_rows if _truthy(row.get("side_by_side"))),
+                "corner_side_by_side_samples": sum(
+                    1 for row in domain_rows if _truthy(row.get("corner_side_by_side"))
+                ),
+                "active_override_samples": sum(1 for row in domain_rows if _truthy(row.get("active_override"))),
+                "front_vehicle_samples": sum(1 for row in domain_rows if _filled(row.get("front_vehicle_id"))),
+                "selected_counts": _top_counts(domain_rows, "selected"),
+                "pass_gap_reasons": _top_counts(domain_rows, "pass_gap_reason"),
+                "reasons": _top_counts(domain_rows, "reason"),
+            }
+        )
+    return _table(
+        rows,
+        [
+            "domain_id",
+            "samples",
+            "attempts",
+            "blocked_samples",
+            "side_by_side_samples",
+            "corner_side_by_side_samples",
+            "active_override_samples",
+            "front_vehicle_samples",
+            "selected_counts",
+            "pass_gap_reasons",
+            "reasons",
+        ],
+    )
+
+
+def _has_overtake_scene(
+    metrics: dict[str, Any],
+    timeseries: list[dict[str, str]],
+    attempts: list[dict[str, str]],
+) -> bool:
+    if attempts:
+        return True
+    for domain in metrics.get("domains", {}).values():
+        if _int(domain.get("attempt_count")) > 0:
+            return True
+        if (_float(domain.get("blocked_time_sec")) or 0.0) > 0.0:
+            return True
+        if _int(domain.get("missed_overtake_chance_count")) > 0:
+            return True
+    return any(_is_interesting_decision_row(row) for row in timeseries)
+
+
+def _decision_samples(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    samples = []
+    last_signature_by_domain: dict[str, tuple[object, ...]] = {}
+    for row in sorted(rows, key=lambda item: (str(item.get("domain_id") or ""), _float(item.get("timestamp_sec")) or 0.0)):
+        if not _is_interesting_decision_row(row):
+            continue
+        domain_id = str(row.get("domain_id") or "")
+        signature = (
+            row.get("overtake_state"),
+            row.get("selected"),
+            row.get("blocked"),
+            row.get("side_by_side"),
+            row.get("corner_side_by_side"),
+            row.get("active_override"),
+            row.get("front_vehicle_id"),
+            row.get("can_pass_left"),
+            row.get("can_pass_right"),
+            row.get("pass_gap_reason"),
+            row.get("reason"),
+        )
+        if signature == last_signature_by_domain.get(domain_id):
+            continue
+        samples.append(row)
+        last_signature_by_domain[domain_id] = signature
+    return samples
+
+
+def _is_interesting_decision_row(row: dict[str, str]) -> bool:
+    selected = str(row.get("selected") or "").strip().upper()
+    pass_gap_reason = str(row.get("pass_gap_reason") or "").strip()
+    return (
+        _truthy(row.get("blocked"))
+        or _truthy(row.get("side_by_side"))
+        or _truthy(row.get("corner_side_by_side"))
+        or _truthy(row.get("active_override"))
+        or _filled(row.get("front_vehicle_id"))
+        or _filled(row.get("side_vehicle_id"))
+        or selected not in {"", "FASTEST"}
+        or pass_gap_reason not in {"", "no_target"}
+        or _filled(row.get("reason"))
     )
 
 
@@ -252,8 +405,11 @@ def _style() -> str:
 body{font-family:system-ui,sans-serif;margin:32px;color:#202124;background:#f8fafc}
 section{background:white;border:1px solid #d8dee9;border-radius:8px;padding:16px;margin:16px 0}
 table{border-collapse:collapse;width:100%;font-size:13px}th,td{border-bottom:1px solid #e5e7eb;padding:7px;text-align:left}th{background:#f1f5f9}
+h3{margin:18px 0 10px;font-size:16px}
 .overtake-map,.overtake-chart{display:block;width:100%;height:auto;background:white;border:1px solid #e5e7eb;border-radius:8px}
 .bars{display:grid;gap:8px}.bar-row{display:grid;grid-template-columns:180px 1fr 48px;gap:10px;align-items:center}.bar-row div{height:12px;background:#e5e7eb;border-radius:999px;overflow:hidden}.bar-row i{display:block;height:100%;background:#f97316}
+.notice{padding:10px 12px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e3a8a}
+.notice.muted{background:#f8fafc;border-color:#e2e8f0;color:#475569}
 a{color:#2563eb}
 </style>
 """
@@ -278,6 +434,40 @@ def _float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _int(value: object) -> int:
+    parsed = _float(value)
+    if parsed is None:
+        return 0
+    return int(parsed)
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def _filled(value: object) -> bool:
+    return value not in (None, "")
+
+
+def _top_counts(rows: list[dict[str, str]], key: str, *, limit: int = 3) -> str:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(key)
+        if not _filled(value):
+            continue
+        text = str(value)
+        counts[text] = counts.get(text, 0) + 1
+    if not counts:
+        return ""
+    items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    return ", ".join(f"{name}:{count}" for name, count in items)
 
 
 def _fmt(value: object) -> str:

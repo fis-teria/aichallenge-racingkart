@@ -261,6 +261,85 @@ CATALOG: dict[str, list[dict[str, str]]] = {
             "kind": "csv",
         },
     ],
+    "simple_delay_aware_control": [
+        {
+            "label": "Simple delay-aware control launch",
+            "path": str(LAUNCH_ROOT / "launch/control/simple_delay_aware_control.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Simple delay-aware control params",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/config/simple_delay_aware_control.param.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Simple delay-aware control core",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/src/control_core.cpp",
+            "kind": "text",
+        },
+        {
+            "label": "Simple delay-aware control node",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/src/simple_delay_aware_control_node.cpp",
+            "kind": "text",
+        },
+        {
+            "label": "Exercise holes",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/src/control_core_exercise.cpp",
+            "kind": "text",
+        },
+        {
+            "label": "Teaching spec",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/docs/01_implementation_spec.md",
+            "kind": "text",
+        },
+        {
+            "label": "Logic explanation",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/docs/02_logic_explanation.md",
+            "kind": "text",
+        },
+        {
+            "label": "Launch integration guide",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/docs/03_launch_integration_guide.md",
+            "kind": "text",
+        },
+        {
+            "label": "Trajectory generator raceline",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_trajectory_generator/data/raceline_awsim_30km_from_garage.csv",
+            "kind": "csv",
+        },
+    ],
+    "simple_dealay_aware_contorol": [
+        {
+            "label": "Simple delay-aware control launch",
+            "path": str(LAUNCH_ROOT / "launch/control/simple_delay_aware_control.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Simple delay-aware control params",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/config/simple_delay_aware_control.param.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Exercise holes",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/src/control_core_exercise.cpp",
+            "kind": "text",
+        },
+        {
+            "label": "Teaching spec",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/docs/01_implementation_spec.md",
+            "kind": "text",
+        },
+        {
+            "label": "Logic explanation",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/docs/02_logic_explanation.md",
+            "kind": "text",
+        },
+        {
+            "label": "Launch integration guide",
+            "path": "aichallenge/workspace/src/aichallenge_submit/simple_delay_aware_control/docs/03_launch_integration_guide.md",
+            "kind": "text",
+        },
+    ],
     "tiny_lidar_net": [
         {
             "label": "Tiny LiDAR Net wrapper launch",
