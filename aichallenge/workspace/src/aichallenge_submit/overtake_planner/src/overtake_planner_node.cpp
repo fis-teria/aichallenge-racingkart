@@ -128,6 +128,20 @@ public:
       declare_parameter<double>("side_by_side_shift_distance_m", 5.0);
     config.side_by_side_speed_cap_mps =
       declare_parameter<double>("side_by_side_speed_cap_mps", 4.5);
+    config.corner_side_yield_curvature_m_inv =
+      declare_parameter<double>("corner_side_yield_curvature_m_inv", 0.06);
+    config.corner_side_yield_lookahead_m =
+      declare_parameter<double>("corner_side_yield_lookahead_m", 8.0);
+    config.corner_side_yield_wall_clearance_m =
+      declare_parameter<double>("corner_side_yield_wall_clearance_m", 0.25);
+    config.corner_yield_target_d_m =
+      declare_parameter<double>("corner_yield_target_d_m", 0.0);
+    config.corner_yield_rejoin_gap_m =
+      declare_parameter<double>("corner_yield_rejoin_gap_m", 5.5);
+    config.yield_rejoin_wall_clearance_m =
+      declare_parameter<double>("yield_rejoin_wall_clearance_m", 0.15);
+    config.corner_follow_speed_margin_mps =
+      declare_parameter<double>("corner_follow_speed_margin_mps", 0.20);
     config.min_pass_gap_m = declare_parameter<double>("min_pass_gap_m", 1.45);
     config.pass_gap_hysteresis_m = declare_parameter<double>("pass_gap_hysteresis_m", 0.15);
     config.yield_speed_margin_mps = declare_parameter<double>("yield_speed_margin_mps", 0.60);
@@ -138,6 +152,8 @@ public:
     config.merge_distance_m = declare_parameter<double>("merge_distance_m", 12.0);
     config.follow_speed_margin_mps = declare_parameter<double>("follow_speed_margin_mps", 0.20);
     config.recovery_v_max_mps = declare_parameter<double>("recovery_v_max_mps", 5.0);
+    config.wall_margin_recovery_v_max_mps =
+      declare_parameter<double>("wall_margin_recovery_v_max_mps", 2.5);
     config.v_passthrough_mps = declare_parameter<double>("v_passthrough_mps", 50.0);
     config.d_min_m = declare_parameter<double>("d_min_m", -1.35);
     config.d_max_m = declare_parameter<double>("d_max_m", 1.35);
@@ -198,6 +214,23 @@ private:
     double vx{0.0};
     double vy{0.0};
     bool has_prev{false};
+  };
+
+  struct DecisionLogSnapshot
+  {
+    BehaviorMode mode{BehaviorMode::FREE_RUN};
+    CandidateType selected{CandidateType::FASTEST};
+    bool blocked{false};
+    bool side_by_side{false};
+    bool corner_side_by_side{false};
+    bool can_pass_left{false};
+    bool can_pass_right{false};
+    bool active_override{false};
+    double corner_abs_curvature{0.0};
+    std::string front_vehicle_id{};
+    std::string side_vehicle_id{};
+    std::string pass_gap_reason{};
+    std::string reason{};
   };
 
   double stampToSec(const builtin_interfaces::msg::Time & stamp) const
@@ -332,6 +365,9 @@ private:
         << "\"selected\":\"" << toString(output.selected) << "\","
         << "\"blocked\":" << (output.blocked_info.blocked ? "true" : "false") << ","
         << "\"side_by_side\":" << (output.blocked_info.side_by_side ? "true" : "false") << ","
+        << "\"corner_side_by_side\":"
+        << (output.blocked_info.corner_side_by_side ? "true" : "false") << ","
+        << "\"corner_abs_curvature\":" << jsonNumber(output.blocked_info.corner_abs_curvature) << ","
         << "\"front_vehicle_id\":\"" << output.blocked_info.nearest_id << "\","
         << "\"target_vehicle_id\":\"" << output.blocked_info.nearest_id << "\","
         << "\"front_delta_s\":" << jsonNumber(output.blocked_info.front_delta_s) << ","
@@ -369,6 +405,98 @@ private:
     metrics_pub_->publish(metrics_msg);
   }
 
+  DecisionLogSnapshot makeDecisionLogSnapshot(const PlannerOutput & output) const
+  {
+    DecisionLogSnapshot snapshot;
+    snapshot.mode = output.mode;
+    snapshot.selected = output.selected;
+    snapshot.blocked = output.blocked_info.blocked;
+    snapshot.side_by_side = output.blocked_info.side_by_side;
+    snapshot.corner_side_by_side = output.blocked_info.corner_side_by_side;
+    snapshot.can_pass_left = output.blocked_info.can_pass_left;
+    snapshot.can_pass_right = output.blocked_info.can_pass_right;
+    snapshot.active_override = output.active_override;
+    snapshot.corner_abs_curvature = output.blocked_info.corner_abs_curvature;
+    snapshot.front_vehicle_id = output.blocked_info.nearest_id;
+    snapshot.side_vehicle_id = output.blocked_info.side_id;
+    snapshot.pass_gap_reason = output.blocked_info.pass_gap_reason;
+    snapshot.reason = output.reason;
+    return snapshot;
+  }
+
+  bool isInterestingDecisionEvent(const DecisionLogSnapshot & snapshot) const
+  {
+    const bool has_pass_gap_context =
+      !snapshot.pass_gap_reason.empty() && snapshot.pass_gap_reason != "no_target";
+    return snapshot.mode != BehaviorMode::FREE_RUN ||
+           snapshot.selected != CandidateType::FASTEST ||
+           snapshot.blocked ||
+           snapshot.side_by_side ||
+           snapshot.corner_side_by_side ||
+           snapshot.active_override ||
+           !snapshot.front_vehicle_id.empty() ||
+           !snapshot.side_vehicle_id.empty() ||
+           has_pass_gap_context ||
+           !snapshot.reason.empty();
+  }
+
+  bool shouldLogDecisionEvent(const DecisionLogSnapshot & current) const
+  {
+    if (!has_decision_log_snapshot_) {
+      return isInterestingDecisionEvent(current);
+    }
+
+    const auto & previous = last_decision_log_snapshot_;
+    const bool changed =
+      current.mode != previous.mode ||
+      current.selected != previous.selected ||
+      current.blocked != previous.blocked ||
+      current.side_by_side != previous.side_by_side ||
+      current.corner_side_by_side != previous.corner_side_by_side ||
+      current.can_pass_left != previous.can_pass_left ||
+      current.can_pass_right != previous.can_pass_right ||
+      current.active_override != previous.active_override ||
+      std::abs(current.corner_abs_curvature - previous.corner_abs_curvature) > 0.02 ||
+      current.front_vehicle_id != previous.front_vehicle_id ||
+      current.side_vehicle_id != previous.side_vehicle_id ||
+      current.pass_gap_reason != previous.pass_gap_reason ||
+      current.reason != previous.reason;
+    return changed && (isInterestingDecisionEvent(current) || isInterestingDecisionEvent(previous));
+  }
+
+  void logDecisionEvent(
+    const PlannerOutput & output, const EgoState & ego, std::uint64_t attempt_id)
+  {
+    // 毎周期ではなく、判断入力や出力が変わった時だけautoware.logへ要約を残す。
+    const auto current = makeDecisionLogSnapshot(output);
+    const bool should_log = shouldLogDecisionEvent(current);
+    last_decision_log_snapshot_ = current;
+    has_decision_log_snapshot_ = true;
+    if (!should_log) {
+      return;
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "overtake decision: own_vehicle_id=%s attempt_id=%lu mode=%s selected=%s "
+      "blocked=%d side_by_side=%d corner_side_by_side=%d active_override=%d "
+      "front_id=%s front_ds=%.2f "
+      "front_dd=%.2f rel_v=%.2f side_id=%s side_ds=%.2f side_dd=%.2f "
+      "can_left=%d can_right=%d pass_gap_reason=%s corner_abs_curvature=%.3f "
+      "ego_s=%.2f ego_d=%.2f target_d=%.2f min_cbf_h=%.3f cbf_slack=%.3f reason=%s",
+      own_vehicle_id_.c_str(), static_cast<unsigned long>(attempt_id), toString(output.mode),
+      toString(output.selected), output.blocked_info.blocked, output.blocked_info.side_by_side,
+      output.blocked_info.corner_side_by_side, output.active_override,
+      output.blocked_info.nearest_id.c_str(),
+      output.blocked_info.front_delta_s, output.blocked_info.front_delta_d,
+      output.blocked_info.front_rel_v, output.blocked_info.side_id.c_str(),
+      output.blocked_info.side_delta_s, output.blocked_info.side_delta_d,
+      output.blocked_info.can_pass_left, output.blocked_info.can_pass_right,
+      output.blocked_info.pass_gap_reason.c_str(), output.blocked_info.corner_abs_curvature,
+      ego.frenet.s, ego.frenet.d,
+      output.target_lateral_offset_m, output.min_cbf_h, output.cbf_slack, output.reason.c_str());
+  }
+
   void onTimer()
   {
     // 最新odomを自車状態へ変換し、他車収集 -> コア更新 -> override/debug publishを1周期で行う。
@@ -393,6 +521,7 @@ private:
     const auto attempt_id = updateAttemptId(output.mode);
     publishOverride(output);
     publishDebug(output, ego, attempt_id);
+    logDecisionEvent(output, ego, attempt_id);
   }
 
   FrenetFrame frame_;
@@ -405,6 +534,8 @@ private:
   double ego_stale_time_sec_{0.50};
   double control_rate_hz_{20.0};
   BehaviorMode last_mode_{BehaviorMode::FREE_RUN};
+  DecisionLogSnapshot last_decision_log_snapshot_{};
+  bool has_decision_log_snapshot_{false};
   bool attempt_active_{false};
   std::uint64_t current_attempt_id_{0};
 

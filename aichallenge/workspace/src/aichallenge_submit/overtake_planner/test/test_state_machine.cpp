@@ -114,3 +114,60 @@ TEST(BehaviorStateMachine, YieldReturnsToFollowAfterRejoinGap)
 
   EXPECT_EQ(next, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
 }
+
+TEST(BehaviorStateMachine, CornerYieldWaitsForWiderRejoinGap)
+{
+  overtake_planner::PlannerConfig config;
+  config.yield_rejoin_gap_m = 3.0;
+  config.corner_yield_rejoin_gap_m = 5.5;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.blocked = true;
+  info.side_by_side = true;
+  info.corner_side_by_side = true;
+  info.nearest_index = 0;
+  info.front_delta_s = 4.0;
+  info.ego_wall_clearance_m = 0.5;
+
+  const auto next = sm.update(
+    2.0, overtake_planner::BehaviorMode::YIELD_BEHIND,
+    overtake_planner::CandidateType::FOLLOW, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::YIELD_BEHIND);
+}
+
+TEST(BehaviorStateMachine, YieldWaitsUntilEgoHasWallClearance)
+{
+  overtake_planner::PlannerConfig config;
+  config.yield_rejoin_wall_clearance_m = 0.15;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.blocked = true;
+  info.nearest_index = 0;
+  info.front_delta_s = 8.0;
+  info.ego_wall_clearance_m = 0.05;
+
+  const auto next = sm.update(
+    2.0, overtake_planner::BehaviorMode::YIELD_BEHIND,
+    overtake_planner::CandidateType::FOLLOW, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::YIELD_BEHIND);
+}
+
+TEST(BehaviorStateMachine, AbortRecoveryWaitsUntilEgoHasWallClearance)
+{
+  overtake_planner::PlannerConfig config;
+  config.yield_rejoin_wall_clearance_m = 0.15;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.ego_wall_clearance_m = 0.05;
+
+  const auto next = sm.update(
+    2.0, overtake_planner::BehaviorMode::ABORT_RECOVERY,
+    overtake_planner::CandidateType::RECOVERY, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+}

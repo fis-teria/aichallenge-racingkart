@@ -20,6 +20,18 @@ overtake_planner::FrenetFrame makeStraightFrame()
   return frame;
 }
 
+overtake_planner::FrenetFrame makeCurvedFrame()
+{
+  std::vector<overtake_planner::ReferencePoint> ref;
+  for (int i = 0; i <= 40; ++i) {
+    ref.push_back(overtake_planner::ReferencePoint{
+      static_cast<double>(i), static_cast<double>(i), 0.0, 0.0, 0.12, 5.0});
+  }
+  overtake_planner::FrenetFrame frame;
+  frame.setReference(ref);
+  return frame;
+}
+
 overtake_planner::EgoState makeEgo(
   const overtake_planner::FrenetFrame & frame, double x, double d)
 {
@@ -114,6 +126,115 @@ TEST(OvertakePlannerCore, SideBySideOpponentAheadYieldsBehind)
   EXPECT_TRUE(output.active_override);
   ASSERT_FALSE(output.speed_caps.empty());
   EXPECT_NEAR(output.speed_caps.back(), 3.4, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, CornerSideBySideYieldsBehindWithCloseSpeedCap)
+{
+  const auto frame = makeCurvedFrame();
+  auto config = makeConfig();
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent = makeOpponent(frame, 5.1, 0.6);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.side_by_side);
+  EXPECT_TRUE(output.blocked_info.corner_side_by_side);
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::YIELD_BEHIND);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::YIELD_BEHIND);
+  EXPECT_TRUE(output.active_override);
+  EXPECT_NEAR(output.target_lateral_offset_m, config.corner_yield_target_d_m, 1.0e-9);
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_NEAR(output.speed_caps.back(), 3.8, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, CornerSideBySideLeadCarDoesNotPushLaterally)
+{
+  const auto frame = makeCurvedFrame();
+  auto config = makeConfig();
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.6, 0.0);
+  const auto opponent = makeOpponent(frame, 5.0, 0.6);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.side_by_side);
+  EXPECT_TRUE(output.blocked_info.corner_side_by_side);
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::FREE_RUN);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::FASTEST);
+  EXPECT_FALSE(output.active_override);
+}
+
+TEST(OvertakePlannerCore, CornerSideBySideNearWallUsesSafeYieldReference)
+{
+  const auto frame = makeCurvedFrame();
+  auto config = makeConfig();
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.6, 1.2);
+  const auto opponent = makeOpponent(frame, 5.0, 0.4);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.side_by_side);
+  EXPECT_TRUE(output.blocked_info.corner_side_by_side);
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::YIELD_BEHIND);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::YIELD_BEHIND);
+  EXPECT_TRUE(output.reason.empty());
+  EXPECT_TRUE(output.active_override);
+  ASSERT_FALSE(output.lateral_offsets.empty());
+  const auto minmax_offset =
+    std::minmax_element(output.lateral_offsets.begin(), output.lateral_offsets.end());
+  const double lower_d = config.d_min_m + config.min_wall_margin_m;
+  const double upper_d = config.d_max_m - config.min_wall_margin_m;
+  EXPECT_GE(*minmax_offset.first, lower_d - 1.0e-9);
+  EXPECT_LE(*minmax_offset.second, upper_d + 1.0e-9);
+  EXPECT_LT(output.target_lateral_offset_m, upper_d);
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_NEAR(output.speed_caps.back(), 3.8, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, WallMarginRecoveryStartsInsideCorridorAndSlows)
+{
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, -1.8);
+
+  const auto output = core.update(0.1, ego, {});
+  const double lower_d = config.d_min_m + config.min_wall_margin_m;
+
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::RECOVERY);
+  EXPECT_TRUE(output.active_override);
+  EXPECT_TRUE(output.reason.empty());
+  ASSERT_FALSE(output.lateral_offsets.empty());
+  const auto min_offset =
+    *std::min_element(output.lateral_offsets.begin(), output.lateral_offsets.end());
+  EXPECT_GE(min_offset, lower_d - 1.0e-9);
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_NEAR(output.speed_caps.back(), config.wall_margin_recovery_v_max_mps, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, WallMarginRecoveryDoesNotReleaseToFastestTooEarly)
+{
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, -1.8);
+  const auto first = core.update(0.1, ego, {});
+  ASSERT_EQ(first.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+
+  const auto second = core.update(0.2, ego, {});
+
+  EXPECT_EQ(second.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+  EXPECT_EQ(second.selected, overtake_planner::CandidateType::RECOVERY);
+  EXPECT_TRUE(second.active_override);
+  EXPECT_TRUE(second.reason.empty());
 }
 
 TEST(OvertakePlannerCore, SideBySideDoesNotPushPastWallMargin)

@@ -68,14 +68,21 @@ PlannerOutput OvertakePlannerCore::update(
   BlockedInfo blocked = detectBlocked(ego, opponents, now_sec);
   const auto predictions = predictOpponents(opponents, now_sec);
   blocked = evaluatePassGap(blocked, opponents, predictions);
+  blocked.corner_abs_curvature =
+    maxAbsCurvatureAhead(ego.frenet.s, config_.corner_side_yield_lookahead_m);
+  blocked.corner_side_by_side =
+    blocked.side_by_side &&
+    config_.corner_side_yield_curvature_m_inv > 0.0 &&
+    blocked.corner_abs_curvature >= config_.corner_side_yield_curvature_m_inv;
+  blocked.ego_wall_clearance_m = wallClearance(ego.frenet.d);
 
   // まず全状況でFASTEST候補を作り、閉塞時だけ追従/左右追い越し候補を増やす。
   std::vector<CandidateTrajectory> candidates;
   candidates.push_back(makeCandidate(CandidateType::FASTEST, ego, blocked, opponents));
-  if (blocked.side_by_side) {
+  if (blocked.side_by_side && !blocked.corner_side_by_side) {
     candidates.push_back(makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego, blocked, opponents));
   }
-  if (shouldYieldBehindSideBySide(blocked)) {
+  if (shouldYieldBehindSideBySide(ego, blocked)) {
     candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
   }
   if (blocked.blocked) {
@@ -144,9 +151,12 @@ PlannerOutput OvertakePlannerCore::update(
   const bool yield_best_effort =
     selected.type == CandidateType::YIELD_BEHIND &&
     selected.reject_reason == "opponent_collision";
+  const bool wall_margin_escape =
+    selected.reject_reason == "wall_margin" &&
+    selected.type == CandidateType::YIELD_BEHIND;
   output.active_override =
     selected.type != CandidateType::FASTEST &&
-    (selected.feasible || side_by_side_best_effort || yield_best_effort);
+    (selected.feasible || side_by_side_best_effort || yield_best_effort || wall_margin_escape);
   output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected.d.back();
   output.min_cbf_h = selected.min_safety_margin;
   output.cbf_slack = selected.cbf_slack;
@@ -355,8 +365,11 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
   } else if (type == CandidateType::YIELD_BEHIND) {
     const int target_index =
       blocked_info.nearest_index >= 0 ? blocked_info.nearest_index : blocked_info.side_index;
-    target_d = ego.frenet.d;
-    if (target_index >= 0 && static_cast<std::size_t>(target_index) < opponents.size()) {
+    target_d = std::clamp(config_.corner_yield_target_d_m, lower_d, upper_d);
+    if (
+      !blocked_info.corner_side_by_side &&
+      wallClearance(ego.frenet.d) >= config_.yield_rejoin_wall_clearance_m &&
+      target_index >= 0 && static_cast<std::size_t>(target_index) < opponents.size()) {
       const auto & opp = opponents[static_cast<std::size_t>(target_index)];
       target_d = std::clamp(opp.frenet.d, lower_d, upper_d);
     }
@@ -368,7 +381,8 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
     const auto & opp = opponents[static_cast<std::size_t>(blocked_info.nearest_index)];
     speed_cap = std::max(0.5, opp.v - config_.follow_speed_margin_mps);
   } else if (type == CandidateType::RECOVERY) {
-    speed_cap = config_.recovery_v_max_mps;
+    speed_cap = wallClearance(ego.frenet.d) < 0.0 ?
+      config_.wall_margin_recovery_v_max_mps : config_.recovery_v_max_mps;
   } else if (type == CandidateType::SIDE_BY_SIDE_KEEP) {
     speed_cap = config_.side_by_side_speed_cap_mps;
     if (blocked_info.side_index >= 0) {
@@ -381,7 +395,9 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
       blocked_info.nearest_index >= 0 ? blocked_info.nearest_index : blocked_info.side_index;
     if (target_index >= 0 && static_cast<std::size_t>(target_index) < opponents.size()) {
       const auto & opp = opponents[static_cast<std::size_t>(target_index)];
-      speed_cap = std::max(0.5, opp.v - config_.yield_speed_margin_mps);
+      const double margin = blocked_info.corner_side_by_side ?
+        config_.corner_follow_speed_margin_mps : config_.yield_speed_margin_mps;
+      speed_cap = std::max(0.5, opp.v - margin);
     }
   }
 
@@ -391,7 +407,11 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
     const double ds = std::max(0.5, ego.v) * t;
     const double s = frame_.wrapS(ego.frenet.s + ds);
     const double ratio = smoothstep(ds / std::max(1.0, shift_distance));
-    const double d = ego.frenet.d + (target_d - ego.frenet.d) * ratio;
+    double start_d = ego.frenet.d;
+    if (type == CandidateType::RECOVERY || type == CandidateType::YIELD_BEHIND) {
+      start_d = std::clamp(start_d, lower_d, upper_d);
+    }
+    const double d = start_d + (target_d - start_d) * ratio;
     const auto p = frame_.frenetToCartesian(s, d);
     candidate.t.push_back(t);
     candidate.s.push_back(s);
@@ -411,6 +431,24 @@ double OvertakePlannerCore::candidateScore(
 {
   // 候補の優先順位を単純なコストへ落とし、まず安全性、その後に追い越し意欲を見る。
   if (!candidate.feasible) {
+    if (
+      candidate.reject_reason == "wall_margin" &&
+      blocked_info.side_by_side &&
+      candidate.type == CandidateType::YIELD_BEHIND) {
+      return blocked_info.corner_side_by_side ? -90.0 : -40.0;
+    }
+    if (
+      candidate.reject_reason == "opponent_collision" &&
+      blocked_info.side_by_side &&
+      candidate.type == CandidateType::SIDE_BY_SIDE_KEEP &&
+      !blocked_info.corner_side_by_side) {
+      return -30.0;
+    }
+    if (
+      candidate.reject_reason == "opponent_collision" &&
+      candidate.type == CandidateType::YIELD_BEHIND) {
+      return blocked_info.corner_side_by_side ? -70.0 : -50.0;
+    }
     return 1.0e9;
   }
   double score = 0.0;
@@ -429,10 +467,12 @@ double OvertakePlannerCore::candidateScore(
       score = 40.0;
       break;
     case CandidateType::SIDE_BY_SIDE_KEEP:
-      score = blocked_info.side_by_side ? -30.0 : 80.0;
+      score = blocked_info.side_by_side && !blocked_info.corner_side_by_side ? -30.0 : 80.0;
       break;
     case CandidateType::YIELD_BEHIND:
-      if (shouldYieldBehindSideBySide(blocked_info)) {
+      if (blocked_info.corner_side_by_side) {
+        score = -70.0;
+      } else if (blocked_info.side_by_side && blocked_info.side_delta_s > config_.side_yield_s_m) {
         score = -60.0;
       } else if (currentPassGapLost(mode_, blocked_info)) {
         score = -50.0;
@@ -445,16 +485,53 @@ double OvertakePlannerCore::candidateScore(
     (mode_ == BehaviorMode::OVERTAKE_LEFT && candidate.type == CandidateType::PASS_LEFT) ||
     (mode_ == BehaviorMode::OVERTAKE_RIGHT && candidate.type == CandidateType::PASS_RIGHT) ||
     (mode_ == BehaviorMode::FOLLOW_BLOCKED && candidate.type == CandidateType::FOLLOW) ||
-    (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP && candidate.type == CandidateType::SIDE_BY_SIDE_KEEP)) {
+    (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP && candidate.type == CandidateType::SIDE_BY_SIDE_KEEP) ||
+    (mode_ == BehaviorMode::YIELD_BEHIND && candidate.type == CandidateType::YIELD_BEHIND)) {
     // いまのモードに沿う候補を少し優遇し、左右や追従/追い越しが細かく揺れないようにする。
     score -= config_.keep_mode_bonus;
   }
   return score;
 }
 
-bool OvertakePlannerCore::shouldYieldBehindSideBySide(const BlockedInfo & blocked_info) const
+double OvertakePlannerCore::maxAbsCurvatureAhead(double s, double lookahead_m) const
 {
-  return blocked_info.side_by_side && blocked_info.side_delta_s > config_.side_yield_s_m;
+  if (frame_.empty() || lookahead_m <= 0.0) {
+    return 0.0;
+  }
+  const int sample_count = 8;
+  const double ds = lookahead_m / static_cast<double>(sample_count);
+  double max_abs_kappa = 0.0;
+  for (int i = 0; i <= sample_count; ++i) {
+    const auto ref = frame_.interpolate(s + ds * static_cast<double>(i));
+    max_abs_kappa = std::max(max_abs_kappa, std::abs(ref.kappa));
+  }
+  return max_abs_kappa;
+}
+
+double OvertakePlannerCore::wallClearance(double d) const
+{
+  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
+  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
+  return std::min(d - lower_d, upper_d - d);
+}
+
+bool OvertakePlannerCore::shouldYieldBehindSideBySide(
+  const EgoState & ego,
+  const BlockedInfo & blocked_info) const
+{
+  if (!blocked_info.side_by_side) {
+    return false;
+  }
+  if (blocked_info.side_delta_s > config_.side_yield_s_m) {
+    return true;
+  }
+  if (!blocked_info.corner_side_by_side) {
+    return false;
+  }
+  const bool opponent_not_clearly_behind = blocked_info.side_delta_s > -config_.side_yield_s_m;
+  const bool close_to_wall =
+    wallClearance(ego.frenet.d) <= config_.corner_side_yield_wall_clearance_m;
+  return opponent_not_clearly_behind || close_to_wall;
 }
 
 CandidateTrajectory OvertakePlannerCore::selectCandidate(

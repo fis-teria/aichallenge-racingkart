@@ -20,6 +20,13 @@ overtake_planner_node:
     side_by_side_target_gap_m: 1.10
     side_by_side_shift_distance_m: 5.0
     side_by_side_speed_cap_mps: 4.5
+    corner_side_yield_curvature_m_inv: 0.06
+    corner_side_yield_lookahead_m: 8.0
+    corner_side_yield_wall_clearance_m: 0.25
+    corner_yield_target_d_m: 0.0
+    corner_yield_rejoin_gap_m: 5.5
+    yield_rejoin_wall_clearance_m: 0.15
+    corner_follow_speed_margin_mps: 0.20
     min_pass_gap_m: 1.45
     pass_gap_hysteresis_m: 0.15
     yield_speed_margin_mps: 0.60
@@ -30,6 +37,7 @@ overtake_planner_node:
     merge_distance_m: 12.0
     follow_speed_margin_mps: 0.20
     recovery_v_max_mps: 5.0
+    wall_margin_recovery_v_max_mps: 2.5
     v_passthrough_mps: 50.0
     d_min_m: -1.35
     d_max_m: 1.35

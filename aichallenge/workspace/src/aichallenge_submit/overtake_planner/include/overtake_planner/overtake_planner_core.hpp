@@ -51,8 +51,13 @@ private:
   double candidateScore(
     const CandidateTrajectory & candidate,
     const BlockedInfo & blocked_info) const;
+  // 横並び中に近い先の曲率を見て、カーブで横へ押し出す判断を抑える。
+  double maxAbsCurvatureAhead(double s, double lookahead_m) const;
+  double wallClearance(double d) const;
   // 横並びで相手が縦方向に前へ出ている場合は、無理に並走せず後ろへ譲る。
-  bool shouldYieldBehindSideBySide(const BlockedInfo & blocked_info) const;
+  bool shouldYieldBehindSideBySide(
+    const EgoState & ego,
+    const BlockedInfo & blocked_info) const;
 
   FrenetFrame frame_;
   PlannerConfig config_;

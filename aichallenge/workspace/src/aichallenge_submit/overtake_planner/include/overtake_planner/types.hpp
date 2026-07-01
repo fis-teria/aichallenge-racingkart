@@ -113,6 +113,7 @@ struct BlockedInfo
   // 前方の遅い車両や横並び状態をまとめた、追い越し開始/継続判断の入力。
   bool blocked{false};
   bool side_by_side{false};
+  bool corner_side_by_side{false};
   int nearest_index{-1};
   std::string nearest_id{};
   double front_delta_s{std::numeric_limits<double>::infinity()};
@@ -123,11 +124,13 @@ struct BlockedInfo
   double side_delta_s{std::numeric_limits<double>::infinity()};
   double side_delta_d{0.0};
   double side_rel_v{0.0};
+  double ego_wall_clearance_m{std::numeric_limits<double>::infinity()};
   double left_pass_gap_m{std::numeric_limits<double>::infinity()};
   double right_pass_gap_m{std::numeric_limits<double>::infinity()};
   bool can_pass_left{false};
   bool can_pass_right{false};
   double pass_gap_required_m{0.0};
+  double corner_abs_curvature{0.0};
   std::string pass_gap_reason{};
 };
 
@@ -149,6 +152,13 @@ struct PlannerConfig
   double side_by_side_target_gap_m{1.10};
   double side_by_side_shift_distance_m{5.0};
   double side_by_side_speed_cap_mps{4.5};
+  double corner_side_yield_curvature_m_inv{0.06};
+  double corner_side_yield_lookahead_m{8.0};
+  double corner_side_yield_wall_clearance_m{0.25};
+  double corner_yield_target_d_m{0.0};
+  double corner_yield_rejoin_gap_m{5.5};
+  double yield_rejoin_wall_clearance_m{0.15};
+  double corner_follow_speed_margin_mps{0.20};
   double min_pass_gap_m{1.45};
   double pass_gap_hysteresis_m{0.15};
   double yield_speed_margin_mps{0.60};
@@ -161,6 +171,7 @@ struct PlannerConfig
   double follow_speed_margin_mps{0.20};
   double max_overtake_v_bonus_mps{0.30};
   double recovery_v_max_mps{5.0};
+  double wall_margin_recovery_v_max_mps{2.5};
   double v_passthrough_mps{50.0};
   double d_min_m{-1.35};
   double d_max_m{1.35};

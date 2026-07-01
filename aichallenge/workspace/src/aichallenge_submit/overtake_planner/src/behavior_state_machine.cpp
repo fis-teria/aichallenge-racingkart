@@ -1,5 +1,7 @@
 #include "overtake_planner/behavior_state_machine.hpp"
 
+#include <algorithm>
+
 namespace overtake_planner
 {
 
@@ -31,7 +33,9 @@ BehaviorMode BehaviorStateMachine::update(
 
   if (!selected_feasible) {
     // 選択候補が危険なら、前方閉塞中は追従、それ以外は中心線へ復帰する。
-    if (blocked_info.side_by_side) {
+    if (selected == CandidateType::YIELD_BEHIND) {
+      next = BehaviorMode::YIELD_BEHIND;
+    } else if (blocked_info.side_by_side && selected == CandidateType::SIDE_BY_SIDE_KEEP) {
       next = BehaviorMode::SIDE_BY_SIDE_KEEP;
     } else {
       next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::ABORT_RECOVERY;
@@ -59,7 +63,7 @@ BehaviorMode BehaviorStateMachine::update(
       // 通常走行中に前方閉塞を検出したら、まず追従しつつPASS安全周期を貯める。
       if (selected == CandidateType::YIELD_BEHIND) {
         next = BehaviorMode::YIELD_BEHIND;
-      } else if (blocked_info.side_by_side) {
+      } else if (blocked_info.side_by_side && selected == CandidateType::SIDE_BY_SIDE_KEEP) {
         next = BehaviorMode::SIDE_BY_SIDE_KEEP;
       } else if (blocked_info.blocked) {
         const bool left_ready =
@@ -80,7 +84,7 @@ BehaviorMode BehaviorStateMachine::update(
       // 追従中に閉塞が解けたら通常走行へ、十分安全なら追い越し準備へ移る。
       if (selected == CandidateType::YIELD_BEHIND) {
         next = BehaviorMode::YIELD_BEHIND;
-      } else if (blocked_info.side_by_side) {
+      } else if (blocked_info.side_by_side && selected == CandidateType::SIDE_BY_SIDE_KEEP) {
         next = BehaviorMode::SIDE_BY_SIDE_KEEP;
       } else if (!blocked_info.blocked) {
         next = BehaviorMode::FREE_RUN;
@@ -122,16 +126,24 @@ BehaviorMode BehaviorStateMachine::update(
       break;
     case BehaviorMode::MERGE_BACK:
       // 中心線復帰後、まだ前が詰まっていれば追従、空いていれば通常走行へ戻る。
-      if (blocked_info.side_by_side) {
-        next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+      if (selected == CandidateType::YIELD_BEHIND) {
+        next = BehaviorMode::YIELD_BEHIND;
+      } else if (blocked_info.side_by_side) {
+        next = selected == CandidateType::SIDE_BY_SIDE_KEEP ?
+          BehaviorMode::SIDE_BY_SIDE_KEEP : BehaviorMode::FREE_RUN;
       } else {
         next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
       }
       break;
     case BehaviorMode::ABORT_RECOVERY:
       // 中止復帰も中心線へ戻す処理なので、復帰後の状態はMERGE_BACKと同じ判定にする。
-      if (blocked_info.side_by_side) {
-        next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+      if (blocked_info.ego_wall_clearance_m < config_.yield_rejoin_wall_clearance_m) {
+        next = BehaviorMode::ABORT_RECOVERY;
+      } else if (selected == CandidateType::YIELD_BEHIND) {
+        next = BehaviorMode::YIELD_BEHIND;
+      } else if (blocked_info.side_by_side) {
+        next = selected == CandidateType::SIDE_BY_SIDE_KEEP ?
+          BehaviorMode::SIDE_BY_SIDE_KEEP : BehaviorMode::FREE_RUN;
       } else {
         next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
       }
@@ -140,16 +152,25 @@ BehaviorMode BehaviorStateMachine::update(
       // 横並び中は相手から離れる距離維持overrideを出し続け、解けたら通常の閉塞判定へ戻る。
       if (selected == CandidateType::YIELD_BEHIND) {
         next = BehaviorMode::YIELD_BEHIND;
-      } else if (!blocked_info.side_by_side) {
+      } else if (!blocked_info.side_by_side || selected != CandidateType::SIDE_BY_SIDE_KEEP) {
         next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
       }
       break;
     case BehaviorMode::YIELD_BEHIND:
       // 相手の後ろに入れる距離が戻ったら、通常の追従状態へ戻す。
-      if (blocked_info.nearest_index >= 0 && blocked_info.front_delta_s >= config_.yield_rejoin_gap_m) {
-        next = BehaviorMode::FOLLOW_BLOCKED;
-      } else if (!blocked_info.blocked && !blocked_info.side_by_side) {
-        next = BehaviorMode::FREE_RUN;
+      {
+        const bool lateral_ready =
+          blocked_info.ego_wall_clearance_m >= config_.yield_rejoin_wall_clearance_m;
+        const double rejoin_gap = blocked_info.corner_side_by_side ?
+          std::max(config_.yield_rejoin_gap_m, config_.corner_yield_rejoin_gap_m) :
+          config_.yield_rejoin_gap_m;
+        if (!lateral_ready) {
+          next = BehaviorMode::YIELD_BEHIND;
+        } else if (blocked_info.nearest_index >= 0 && blocked_info.front_delta_s >= rejoin_gap) {
+          next = BehaviorMode::FOLLOW_BLOCKED;
+        } else if (!blocked_info.blocked && !blocked_info.side_by_side) {
+          next = BehaviorMode::FREE_RUN;
+        }
       }
       break;
   }
