@@ -8,8 +8,10 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <cstddef>
 #include <optional>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
 
 namespace simple_pure_pursuit {
 
@@ -20,6 +22,7 @@ using geometry_msgs::msg::Pose;
 using geometry_msgs::msg::PointStamped;
 using geometry_msgs::msg::Twist;
 using nav_msgs::msg::Odometry;
+using std_msgs::msg::String;
 
 class SimplePurePursuit : public rclcpp::Node {
  public:
@@ -33,6 +36,7 @@ class SimplePurePursuit : public rclcpp::Node {
   rclcpp::Publisher<AckermannControlCommand>::SharedPtr pub_cmd_;
   rclcpp::Publisher<AckermannControlCommand>::SharedPtr pub_raw_cmd_;
   rclcpp::Publisher<PointStamped>::SharedPtr pub_lookahead_point_;  
+  rclcpp::Publisher<String>::SharedPtr pub_debug_;
 
   // timer
   rclcpp::TimerBase::SharedPtr timer_;
@@ -51,11 +55,18 @@ class SimplePurePursuit : public rclcpp::Node {
   const bool use_external_target_vel_;
   const double external_target_vel_;
   const double steering_tire_angle_gain_;
+  const double debug_publish_period_sec_;
+  double last_debug_publish_sec_{-1.0e9};
 
 
  private:
   void onTimer();
   bool subscribeMessageAvailable();
+  void publishDebug(
+    const rclcpp::Time & stamp, std::size_t nearest_traj_point_idx, double target_longitudinal_vel,
+    double current_longitudinal_vel, double command_accel, double lookahead_distance,
+    double lookahead_point_x, double lookahead_point_y, double rear_x, double rear_y, double alpha,
+    double raw_steering_tire_angle, double steering_tire_angle);
 };
 
 }  // namespace simple_pure_pursuit

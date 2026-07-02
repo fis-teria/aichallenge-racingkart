@@ -16,6 +16,7 @@ aichallenge/workspace/src/aichallenge_submit/overtake_planner/config/overtake_pl
 - 左右追い越し候補をどれだけ出しやすくするか
 - 壁や他車に対する安全余裕
 - 状態遷移の粘り、チャタリング抑制
+- 回避不能時の安全停止 `SAFE_STOP`
 
 ## まず見るべき項目
 
@@ -140,6 +141,22 @@ upper_d = d_max_m - min_wall_margin_m
 
 現在値では `-1.10 <= d <= 1.10` が候補生成・安全評価で使える横範囲です。
 
+## 安全停止 SAFE_STOP
+
+`SAFE_STOP` は、追い越し、追従、譲り、復帰の通常候補が安全に成立しないときだけ使う最後のplanner内fallbackです。
+MPC側では `0.0 m/s` の速度capが無効扱いになるため、停止意図は小さい正の速度上限で表現します。
+
+| パラメータ | 現在値 | 変更すると何が変わるか |
+|---|---:|---|
+| `safe_stop_enabled` | `true` | `false` にすると安全停止候補を使わない。通常のFOLLOW/YIELD/RECOVERYだけで判断する。 |
+| `safe_stop_v_mps` | `0.20` | SAFE_STOP中に出す速度上限。`0.0` は使わない。上げると停止意図が弱く、下げるとより停止寄りになる。 |
+| `safe_stop_trigger_cycles` | `3` | 通常fallbackがunsafeな状態が何周期続いたらSAFE_STOPへ入るか。上げると誤停止しにくいが反応が遅い。 |
+| `safe_stop_release_cycles` | `5` | 解除条件が何周期続いたらSAFE_STOPを抜けるか。上げると安定するが再発進が遅い。 |
+| `safe_stop_release_front_gap_m` | `5.0` | 再発進に必要な前方ギャップ。上げると前走車から離れるまで待つ。 |
+| `safe_stop_release_wall_clearance_m` | `0.20` | 再発進に必要な壁余裕。上げると壁から離れるまで待つ。 |
+| `safe_stop_lateral_error_threshold_m` | `0.40` | SAFE_STOP目標dからの許容横ずれ。上げると解除しやすく、下げると保持しやすい。 |
+| `safe_stop_release_speed_mps` | `0.50` | 再発進判定に入る自車速度上限。上げると動きながら解除しやすくなる。 |
+
 ## 状態遷移・チャタリング抑制
 
 | パラメータ | 現在値 | 変更すると何が変わるか |
@@ -218,6 +235,10 @@ pass_gap_hysteresis_m: 0.25
   - `corner_side_by_side`
   - `active_override`
   - `pass_gap_reason`
+  - `safe_stop_triggered`
+  - `safe_stop_reason`
+  - `safe_stop_trigger_count`
+  - `safe_stop_release_count`
   - `reason`
   - `target_lateral_offset_m`
   - `left_pass_gap_m`

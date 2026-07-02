@@ -65,6 +65,7 @@ private:
   BehaviorStateMachine state_machine_;
   BehaviorMode mode_{BehaviorMode::FREE_RUN};
   double overtake_start_sec_{0.0};
+  int safe_stop_trigger_count_{0};
 };
 
 }  // namespace overtake_planner

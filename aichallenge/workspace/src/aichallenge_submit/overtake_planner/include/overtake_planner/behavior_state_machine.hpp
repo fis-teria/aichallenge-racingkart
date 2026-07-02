@@ -16,9 +16,12 @@ public:
     BehaviorMode current,
     CandidateType selected,
     const BlockedInfo & blocked_info,
-    bool selected_feasible);
+    bool selected_feasible,
+    SafeStopContext safe_stop_context = SafeStopContext{});
 
   double modeEnterTime() const { return mode_enter_time_sec_; }
+  int safeStopHoldCount() const { return safe_stop_hold_count_; }
+  int safeStopReleaseCount() const { return safe_stop_release_count_; }
 
 private:
   // モードが短時間で振動しないよう、最低保持時間を満たしたかを見る。
@@ -29,6 +32,8 @@ private:
   double mode_enter_time_sec_{0.0};
   int pass_left_safe_cycles_{0};
   int pass_right_safe_cycles_{0};
+  int safe_stop_hold_count_{0};
+  int safe_stop_release_count_{0};
 };
 
 }  // namespace overtake_planner

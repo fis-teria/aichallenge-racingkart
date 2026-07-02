@@ -173,6 +173,18 @@ public:
     config.abort_timeout_sec = declare_parameter<double>("abort_timeout_sec", 5.0);
     config.min_mode_hold_time_sec = declare_parameter<double>("min_mode_hold_time_sec", 0.60);
     config.keep_mode_bonus = declare_parameter<double>("keep_mode_bonus", 25.0);
+    config.safe_stop_enabled = declare_parameter<bool>("safe_stop_enabled", true);
+    config.safe_stop_v_mps = declare_parameter<double>("safe_stop_v_mps", 0.20);
+    config.safe_stop_trigger_cycles = declare_parameter<int>("safe_stop_trigger_cycles", 3);
+    config.safe_stop_release_cycles = declare_parameter<int>("safe_stop_release_cycles", 5);
+    config.safe_stop_release_front_gap_m =
+      declare_parameter<double>("safe_stop_release_front_gap_m", 5.0);
+    config.safe_stop_release_wall_clearance_m =
+      declare_parameter<double>("safe_stop_release_wall_clearance_m", 0.20);
+    config.safe_stop_lateral_error_threshold_m =
+      declare_parameter<double>("safe_stop_lateral_error_threshold_m", 0.40);
+    config.safe_stop_release_speed_mps =
+      declare_parameter<double>("safe_stop_release_speed_mps", 0.50);
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 20.0);
 
     FrenetFrame frame;
@@ -237,6 +249,13 @@ private:
     std::string side_vehicle_id{};
     std::string pass_gap_reason{};
     std::string reason{};
+    bool safe_stop_triggered{false};
+    bool safe_stop_release_ready{false};
+    std::string safe_stop_reason{};
+    std::string safe_stop_reject_reason{};
+    int safe_stop_trigger_count{0};
+    int safe_stop_hold_count{0};
+    int safe_stop_release_count{0};
   };
 
   double stampToSec(const builtin_interfaces::msg::Time & stamp) const
@@ -346,7 +365,8 @@ private:
       (((mode == BehaviorMode::FREE_RUN || mode == BehaviorMode::FOLLOW_BLOCKED) &&
         (last_mode_ == BehaviorMode::MERGE_BACK ||
          last_mode_ == BehaviorMode::ABORT_RECOVERY ||
-         last_mode_ == BehaviorMode::YIELD_BEHIND)) ||
+         last_mode_ == BehaviorMode::YIELD_BEHIND ||
+         last_mode_ == BehaviorMode::SAFE_STOP)) ||
        yield_finishes_attempt)) {
       publish_id = current_attempt_id_;
       attempt_active_ = false;
@@ -401,6 +421,16 @@ private:
         << "\"min_cbf_h\":" << jsonNumber(output.min_cbf_h) << ","
         << "\"cbf_slack\":" << jsonNumber(output.cbf_slack) << ","
         << "\"active_cbf_constraint_count\":" << output.active_cbf_constraint_count << ","
+        << "\"safe_stop_triggered\":"
+        << (output.safe_stop_triggered ? "true" : "false") << ","
+        << "\"safe_stop_release_ready\":"
+        << (output.safe_stop_release_ready ? "true" : "false") << ","
+        << "\"safe_stop_reason\":\"" << output.safe_stop_reason << "\","
+        << "\"safe_stop_reject_reason\":\"" << output.safe_stop_reject_reason << "\","
+        << "\"safe_stop_v_mps\":" << jsonNumber(output.safe_stop_v_mps) << ","
+        << "\"safe_stop_trigger_count\":" << output.safe_stop_trigger_count << ","
+        << "\"safe_stop_hold_count\":" << output.safe_stop_hold_count << ","
+        << "\"safe_stop_release_count\":" << output.safe_stop_release_count << ","
         << "\"closest_vehicle_id\":\"" << output.blocked_info.nearest_id << "\","
         << "\"closest_vehicle_distance_m\":" << jsonNumber(output.blocked_info.front_delta_s) << ","
         << "\"active_override\":" << (output.active_override ? "true" : "false") << ","
@@ -427,6 +457,13 @@ private:
     snapshot.side_vehicle_id = output.blocked_info.side_id;
     snapshot.pass_gap_reason = output.blocked_info.pass_gap_reason;
     snapshot.reason = output.reason;
+    snapshot.safe_stop_triggered = output.safe_stop_triggered;
+    snapshot.safe_stop_release_ready = output.safe_stop_release_ready;
+    snapshot.safe_stop_reason = output.safe_stop_reason;
+    snapshot.safe_stop_reject_reason = output.safe_stop_reject_reason;
+    snapshot.safe_stop_trigger_count = output.safe_stop_trigger_count;
+    snapshot.safe_stop_hold_count = output.safe_stop_hold_count;
+    snapshot.safe_stop_release_count = output.safe_stop_release_count;
     return snapshot;
   }
 
@@ -440,6 +477,7 @@ private:
            snapshot.side_by_side ||
            snapshot.corner_side_by_side ||
            snapshot.active_override ||
+           snapshot.safe_stop_triggered ||
            !snapshot.front_vehicle_id.empty() ||
            !snapshot.side_vehicle_id.empty() ||
            has_pass_gap_context ||
@@ -466,6 +504,13 @@ private:
       current.front_vehicle_id != previous.front_vehicle_id ||
       current.side_vehicle_id != previous.side_vehicle_id ||
       current.pass_gap_reason != previous.pass_gap_reason ||
+      current.safe_stop_triggered != previous.safe_stop_triggered ||
+      current.safe_stop_release_ready != previous.safe_stop_release_ready ||
+      current.safe_stop_reason != previous.safe_stop_reason ||
+      current.safe_stop_reject_reason != previous.safe_stop_reject_reason ||
+      current.safe_stop_trigger_count != previous.safe_stop_trigger_count ||
+      current.safe_stop_hold_count != previous.safe_stop_hold_count ||
+      current.safe_stop_release_count != previous.safe_stop_release_count ||
       current.reason != previous.reason;
     return changed && (isInterestingDecisionEvent(current) || isInterestingDecisionEvent(previous));
   }
@@ -489,7 +534,10 @@ private:
       "front_id=%s front_ds=%.2f "
       "front_dd=%.2f rel_v=%.2f side_id=%s side_ds=%.2f side_dd=%.2f "
       "can_left=%d can_right=%d pass_gap_reason=%s corner_abs_curvature=%.3f "
-      "ego_s=%.2f ego_d=%.2f target_d=%.2f min_cbf_h=%.3f cbf_slack=%.3f reason=%s",
+      "ego_s=%.2f ego_d=%.2f target_d=%.2f min_cbf_h=%.3f cbf_slack=%.3f "
+      "safe_stop_triggered=%d safe_stop_reason=%s safe_stop_reject_reason=%s "
+      "safe_stop_trigger_count=%d safe_stop_hold_count=%d safe_stop_release_count=%d "
+      "safe_stop_release_ready=%d reason=%s",
       own_vehicle_id_.c_str(), static_cast<unsigned long>(attempt_id), toString(output.mode),
       toString(output.selected), output.blocked_info.blocked, output.blocked_info.side_by_side,
       output.blocked_info.corner_side_by_side, output.active_override,
@@ -500,7 +548,11 @@ private:
       output.blocked_info.can_pass_left, output.blocked_info.can_pass_right,
       output.blocked_info.pass_gap_reason.c_str(), output.blocked_info.corner_abs_curvature,
       ego.frenet.s, ego.frenet.d,
-      output.target_lateral_offset_m, output.min_cbf_h, output.cbf_slack, output.reason.c_str());
+      output.target_lateral_offset_m, output.min_cbf_h, output.cbf_slack,
+      output.safe_stop_triggered, output.safe_stop_reason.c_str(),
+      output.safe_stop_reject_reason.c_str(), output.safe_stop_trigger_count,
+      output.safe_stop_hold_count, output.safe_stop_release_count,
+      output.safe_stop_release_ready, output.reason.c_str());
   }
 
   void onTimer()

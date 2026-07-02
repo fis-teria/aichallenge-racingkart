@@ -171,3 +171,80 @@ TEST(BehaviorStateMachine, AbortRecoveryWaitsUntilEgoHasWallClearance)
 
   EXPECT_EQ(next, overtake_planner::BehaviorMode::ABORT_RECOVERY);
 }
+
+TEST(BehaviorStateMachine, SafeStopRequestTransitionsToSafeStop)
+{
+  overtake_planner::PlannerConfig config;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.blocked = true;
+  overtake_planner::SafeStopContext safe_stop;
+  safe_stop.requested = true;
+  safe_stop.candidate_feasible = true;
+
+  const auto next = sm.update(
+    2.0, overtake_planner::BehaviorMode::FOLLOW_BLOCKED,
+    overtake_planner::CandidateType::SAFE_STOP, info, true, safe_stop);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::SAFE_STOP);
+  EXPECT_EQ(sm.safeStopHoldCount(), 1);
+}
+
+TEST(BehaviorStateMachine, SafeStopHoldsUntilReleaseCyclesSatisfied)
+{
+  overtake_planner::PlannerConfig config;
+  config.safe_stop_release_cycles = 2;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  overtake_planner::SafeStopContext safe_stop;
+  safe_stop.requested = true;
+
+  auto mode = sm.update(
+    2.0, overtake_planner::BehaviorMode::FOLLOW_BLOCKED,
+    overtake_planner::CandidateType::SAFE_STOP, info, true, safe_stop);
+  ASSERT_EQ(mode, overtake_planner::BehaviorMode::SAFE_STOP);
+
+  safe_stop.requested = false;
+  safe_stop.candidate_feasible = true;
+  safe_stop.release_ready = false;
+  mode = sm.update(
+    2.1, mode, overtake_planner::CandidateType::FASTEST, info, true, safe_stop);
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::SAFE_STOP);
+  EXPECT_EQ(sm.safeStopReleaseCount(), 0);
+
+  safe_stop.release_ready = true;
+  mode = sm.update(
+    2.2, mode, overtake_planner::CandidateType::FASTEST, info, true, safe_stop);
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::SAFE_STOP);
+  EXPECT_EQ(sm.safeStopReleaseCount(), 1);
+
+  mode = sm.update(
+    2.3, mode, overtake_planner::CandidateType::FASTEST, info, true, safe_stop);
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::FREE_RUN);
+}
+
+TEST(BehaviorStateMachine, SafeStopLeavesWhenStopCandidateBecomesInfeasible)
+{
+  overtake_planner::PlannerConfig config;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.blocked = true;
+  overtake_planner::SafeStopContext safe_stop;
+  safe_stop.requested = true;
+  safe_stop.candidate_feasible = true;
+
+  auto mode = sm.update(
+    2.0, overtake_planner::BehaviorMode::FOLLOW_BLOCKED,
+    overtake_planner::CandidateType::SAFE_STOP, info, true, safe_stop);
+  ASSERT_EQ(mode, overtake_planner::BehaviorMode::SAFE_STOP);
+
+  safe_stop.requested = false;
+  safe_stop.candidate_feasible = false;
+  mode = sm.update(
+    2.1, mode, overtake_planner::CandidateType::FOLLOW, info, false, safe_stop);
+
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+}

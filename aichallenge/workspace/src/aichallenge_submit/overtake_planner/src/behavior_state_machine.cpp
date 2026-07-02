@@ -26,10 +26,56 @@ BehaviorMode BehaviorStateMachine::update(
   BehaviorMode current,
   CandidateType selected,
   const BlockedInfo & blocked_info,
-  bool selected_feasible)
+  bool selected_feasible,
+  SafeStopContext safe_stop_context)
 {
   // コアが選んだ候補を、そのまま使うのではなく運転状態として安定化する。
   BehaviorMode next = current;
+  const int release_cycles_required = std::max(1, config_.safe_stop_release_cycles);
+
+  if (current == BehaviorMode::SAFE_STOP) {
+    // SAFE_STOP中は解除条件が連続で満たされるまで低速停止overrideを維持する。
+    if (!safe_stop_context.candidate_feasible) {
+      if (selected_feasible && selected == CandidateType::YIELD_BEHIND) {
+        next = BehaviorMode::YIELD_BEHIND;
+      } else if (
+        selected_feasible &&
+        blocked_info.side_by_side &&
+        selected == CandidateType::SIDE_BY_SIDE_KEEP) {
+        next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+      } else {
+        next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::ABORT_RECOVERY;
+      }
+      safe_stop_hold_count_ = 0;
+      safe_stop_release_count_ = 0;
+      pass_left_safe_cycles_ = 0;
+      pass_right_safe_cycles_ = 0;
+      markIfChanged(now_sec, current, next);
+      return next;
+    }
+
+    ++safe_stop_hold_count_;
+    if (safe_stop_context.release_ready) {
+      ++safe_stop_release_count_;
+    } else {
+      safe_stop_release_count_ = 0;
+    }
+
+    if (safe_stop_release_count_ >= release_cycles_required) {
+      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::FREE_RUN;
+      safe_stop_hold_count_ = 0;
+      safe_stop_release_count_ = 0;
+    } else {
+      next = BehaviorMode::SAFE_STOP;
+    }
+    pass_left_safe_cycles_ = 0;
+    pass_right_safe_cycles_ = 0;
+    markIfChanged(now_sec, current, next);
+    return next;
+  }
+
+  safe_stop_hold_count_ = 0;
+  safe_stop_release_count_ = 0;
 
   if (!selected_feasible) {
     // 選択候補が危険なら、前方閉塞中は追従、それ以外は中心線へ復帰する。
@@ -40,6 +86,17 @@ BehaviorMode BehaviorStateMachine::update(
     } else {
       next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED : BehaviorMode::ABORT_RECOVERY;
     }
+    markIfChanged(now_sec, current, next);
+    return next;
+  }
+
+  if (selected == CandidateType::SAFE_STOP && safe_stop_context.requested) {
+    // 回避不能判定が確定した時だけ、通常回避の外側にある低速停止へ入る。
+    next = BehaviorMode::SAFE_STOP;
+    safe_stop_hold_count_ = 1;
+    safe_stop_release_count_ = 0;
+    pass_left_safe_cycles_ = 0;
+    pass_right_safe_cycles_ = 0;
     markIfChanged(now_sec, current, next);
     return next;
   }
@@ -172,6 +229,8 @@ BehaviorMode BehaviorStateMachine::update(
           next = BehaviorMode::FREE_RUN;
         }
       }
+      break;
+    case BehaviorMode::SAFE_STOP:
       break;
   }
 

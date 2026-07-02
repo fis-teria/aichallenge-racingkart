@@ -19,6 +19,7 @@ enum class BehaviorMode {
   ABORT_RECOVERY = 7,
   SIDE_BY_SIDE_KEEP = 8,
   YIELD_BEHIND = 9,
+  SAFE_STOP = 10,
 };
 
 enum class CandidateType {
@@ -30,6 +31,7 @@ enum class CandidateType {
   RECOVERY = 4,
   SIDE_BY_SIDE_KEEP = 5,
   YIELD_BEHIND = 6,
+  SAFE_STOP = 7,
 };
 
 struct ReferencePoint
@@ -134,6 +136,18 @@ struct BlockedInfo
   std::string pass_gap_reason{};
 };
 
+struct SafeStopContext
+{
+  // SAFE_STOPの遷移/解除に必要な、通常候補選択だけでは表せない補助入力。
+  bool requested{false};
+  bool candidate_feasible{false};
+  bool release_ready{false};
+  double ego_speed_mps{std::numeric_limits<double>::infinity()};
+  double lateral_error_m{std::numeric_limits<double>::infinity()};
+  int trigger_count{0};
+  std::string reason{};
+};
+
 struct PlannerConfig
 {
   // 追い越し候補生成、安全マージン、状態遷移をまとめて調整するパラメータ群。
@@ -186,6 +200,14 @@ struct PlannerConfig
   double abort_timeout_sec{5.0};
   double min_mode_hold_time_sec{0.60};
   double keep_mode_bonus{25.0};
+  bool safe_stop_enabled{true};
+  double safe_stop_v_mps{0.20};
+  int safe_stop_trigger_cycles{3};
+  int safe_stop_release_cycles{5};
+  double safe_stop_release_front_gap_m{5.0};
+  double safe_stop_release_wall_clearance_m{0.20};
+  double safe_stop_lateral_error_threshold_m{0.40};
+  double safe_stop_release_speed_mps{0.50};
 };
 
 struct PlannerOutput
@@ -202,6 +224,14 @@ struct PlannerOutput
   double min_cbf_h{std::numeric_limits<double>::quiet_NaN()};
   double cbf_slack{0.0};
   int active_cbf_constraint_count{0};
+  bool safe_stop_triggered{false};
+  bool safe_stop_release_ready{false};
+  std::string safe_stop_reason{};
+  std::string safe_stop_reject_reason{};
+  double safe_stop_v_mps{0.0};
+  int safe_stop_trigger_count{0};
+  int safe_stop_hold_count{0};
+  int safe_stop_release_count{0};
 };
 
 const char * toString(BehaviorMode mode);

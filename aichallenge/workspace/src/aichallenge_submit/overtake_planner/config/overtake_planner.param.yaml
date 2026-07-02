@@ -9,7 +9,7 @@ overtake_planner_node:
     control_rate_hz: 20.0
     horizon_points: 30
     horizon_dt_sec: 0.025
-    lookahead_s_m: 35.0
+    lookahead_s_m: 10.0
     follow_trigger_s_m: 12.0
     same_corridor_width_m: 0.90
     dv_block_threshold_mps: 0.20
@@ -30,7 +30,7 @@ overtake_planner_node:
     corner_yield_v_max_mps: 3.0
     large_lateral_error_threshold_m: 0.60
     large_lateral_error_v_max_mps: 2.5
-    min_pass_gap_m: 1.45
+    min_pass_gap_m: 1.8
     pass_gap_hysteresis_m: 0.15
     yield_speed_margin_mps: 0.60
     yield_rejoin_gap_m: 3.0
@@ -44,12 +44,20 @@ overtake_planner_node:
     v_passthrough_mps: 50.0
     d_min_m: -1.35
     d_max_m: 1.35
-    min_wall_margin_m: 0.25
+    min_wall_margin_m: 0.5
     safety_ellipse_a_m: 3.0
-    safety_ellipse_b_m: 1.2
+    safety_ellipse_b_m: 1.8
     min_ellipse_h: 0.20
     pass_safe_required_cycles: 5.0
     merge_front_gap_m: 6.0
     abort_timeout_sec: 5.0
     min_mode_hold_time_sec: 0.60
     keep_mode_bonus: 25.0
+    safe_stop_enabled: true
+    safe_stop_v_mps: 0.0
+    safe_stop_trigger_cycles: 1
+    safe_stop_release_cycles: 5
+    safe_stop_release_front_gap_m: 5.0
+    safe_stop_release_wall_clearance_m: 0.20
+    safe_stop_lateral_error_threshold_m: 0.40
+    safe_stop_release_speed_mps: 0.50

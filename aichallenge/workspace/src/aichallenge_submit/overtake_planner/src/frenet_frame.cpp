@@ -62,6 +62,8 @@ const char * toString(BehaviorMode mode)
       return "SIDE_BY_SIDE_KEEP";
     case BehaviorMode::YIELD_BEHIND:
       return "YIELD_BEHIND";
+    case BehaviorMode::SAFE_STOP:
+      return "SAFE_STOP";
   }
   return "UNKNOWN";
 }
@@ -83,6 +85,8 @@ const char * toString(CandidateType type)
       return "SIDE_BY_SIDE_KEEP";
     case CandidateType::YIELD_BEHIND:
       return "YIELD_BEHIND";
+    case CandidateType::SAFE_STOP:
+      return "SAFE_STOP";
   }
   return "UNKNOWN";
 }

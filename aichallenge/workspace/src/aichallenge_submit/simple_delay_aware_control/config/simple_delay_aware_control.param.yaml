@@ -1,0 +1,42 @@
+simple_delay_aware_control_node:
+  ros__parameters:
+    wheel_base: 1.087
+    control_period_ms: 10.0
+
+    lookahead_gain: 0.45
+    lookahead_min_distance: 3.0
+    speed_proportional_gain: 1.0
+    max_acceleration_mps2: 2.0
+    max_deceleration_mps2: 4.0
+    steering_tire_angle_gain: 1.50
+    max_steering_tire_angle_rad: 0.70
+
+    delay_enabled: true
+    steering_delay_sec: 0.20
+    prediction_dt: 0.02
+    use_steering_lag: true
+    steering_time_constant_sec: 0.30
+    use_steering_status: true
+    steering_status_timeout_sec: 0.20
+    # delay-aware MPCと同じく、目標ステアはcontrol_cmdから受け取ります。
+    use_control_cmd_input: true
+    control_cmd_timeout_sec: 0.50
+    use_yaw_rate_fallback: true
+    min_velocity_for_yaw_prediction: 0.20
+
+    curvature_speed_enabled: true
+    use_trajectory_velocity: true
+    max_speed_mps: 8.333333333333334
+    min_speed_mps: 1.50
+    lateral_accel_limit_mps2: 3.0
+    curvature_epsilon: 0.0001
+    curvature_lookahead_points: 8
+    trajectory_is_closed: true
+
+    # delay-aware MPCと同じように、補償済み姿勢をOdometryとしてpublishします。
+    publish_delay_aware_odometry: true
+    # trueにするとOdometry.twist.twist.linear.xへ曲率速度上限後のtarget speedを書きます。
+    # downstreamが「現在速度」として読む場合はfalseのままが安全です。
+    write_target_speed_to_output_twist: false
+
+    debug_publish_period_sec: 0.25

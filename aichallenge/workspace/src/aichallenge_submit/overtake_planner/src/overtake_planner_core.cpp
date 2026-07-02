@@ -37,6 +37,57 @@ bool currentPassGapLost(BehaviorMode mode, const BlockedInfo & blocked_info)
          (isRightPassMode(mode) && !blocked_info.can_pass_right);
 }
 
+bool isPassCandidate(CandidateType type)
+{
+  return type == CandidateType::PASS_LEFT || type == CandidateType::PASS_RIGHT;
+}
+
+bool isFallbackCandidate(CandidateType type)
+{
+  return type == CandidateType::FOLLOW ||
+         type == CandidateType::YIELD_BEHIND ||
+         type == CandidateType::RECOVERY ||
+         type == CandidateType::SIDE_BY_SIDE_KEEP;
+}
+
+bool hasFeasibleCandidate(
+  const std::vector<CandidateTrajectory> & candidates,
+  bool (*predicate)(CandidateType))
+{
+  return std::any_of(
+    candidates.begin(), candidates.end(),
+    [predicate](const CandidateTrajectory & candidate) {
+      return candidate.feasible && predicate(candidate.type);
+    });
+}
+
+bool isFeasibleReleaseCandidate(
+  const CandidateTrajectory & selected,
+  const BlockedInfo & blocked_info)
+{
+  if (!selected.feasible || selected.type == CandidateType::SAFE_STOP) {
+    return false;
+  }
+  if (!blocked_info.blocked && !blocked_info.side_by_side) {
+    return selected.type == CandidateType::FASTEST || selected.type == CandidateType::RECOVERY;
+  }
+  return isPassCandidate(selected.type) ||
+         selected.type == CandidateType::FOLLOW ||
+         selected.type == CandidateType::YIELD_BEHIND ||
+         selected.type == CandidateType::RECOVERY;
+}
+
+bool hasFeasibleReleaseCandidate(
+  const std::vector<CandidateTrajectory> & candidates,
+  const BlockedInfo & blocked_info)
+{
+  return std::any_of(
+    candidates.begin(), candidates.end(),
+    [&blocked_info](const CandidateTrajectory & candidate) {
+      return isFeasibleReleaseCandidate(candidate, blocked_info);
+    });
+}
+
 }  // namespace
 
 OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame, PlannerConfig config)
@@ -60,6 +111,7 @@ PlannerOutput OvertakePlannerCore::update(
   if (!config_.enabled || !ego.valid || frame_.empty()) {
     // 自車状態や参照線が無いとFrenet判断ができないので、何も介入しない。
     mode_ = BehaviorMode::FREE_RUN;
+    safe_stop_trigger_count_ = 0;
     output.mode = mode_;
     output.reason = "disabled_or_invalid";
     return output;
@@ -104,6 +156,18 @@ PlannerOutput OvertakePlannerCore::update(
     // 追い越し中や中止中は、中心線へ戻るRECOVERY候補も常に評価する。
     candidates.push_back(makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
   }
+  const bool needs_safe_stop_fallback_check =
+    config_.safe_stop_enabled &&
+    (blocked.blocked || blocked.side_by_side || currentPassGapLost(mode_, blocked));
+  const bool has_recovery_candidate = std::any_of(
+    candidates.begin(), candidates.end(),
+    [](const CandidateTrajectory & candidate) {
+      return candidate.type == CandidateType::RECOVERY;
+    });
+  if (needs_safe_stop_fallback_check && !has_recovery_candidate) {
+    // SAFE_STOP判定前に、通常fallbackであるRECOVERYも必ず安全評価へ含める。
+    candidates.push_back(makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
+  }
 
   for (auto & candidate : candidates) {
     // 壁/他車との安全余裕を見てから、目的に応じたスコアを付ける。
@@ -111,10 +175,74 @@ PlannerOutput OvertakePlannerCore::update(
     candidate.score = candidateScore(candidate, blocked);
   }
 
+  const bool no_feasible_pass = !hasFeasibleCandidate(candidates, isPassCandidate);
+  const bool no_feasible_fallback = !hasFeasibleCandidate(candidates, isFallbackCandidate);
+  const bool safe_stop_base_condition =
+    config_.safe_stop_enabled &&
+    (blocked.blocked || blocked.side_by_side || currentPassGapLost(mode_, blocked)) &&
+    !blocked.can_pass_left &&
+    !blocked.can_pass_right &&
+    no_feasible_pass &&
+    no_feasible_fallback;
+
+  if (safe_stop_base_condition) {
+    ++safe_stop_trigger_count_;
+  } else {
+    safe_stop_trigger_count_ = 0;
+  }
+
+  const int safe_stop_trigger_cycles_required = std::max(1, config_.safe_stop_trigger_cycles);
+  SafeStopContext safe_stop_context;
+  safe_stop_context.requested =
+    safe_stop_base_condition &&
+    safe_stop_trigger_count_ >= safe_stop_trigger_cycles_required;
+  safe_stop_context.trigger_count = safe_stop_trigger_count_;
+  safe_stop_context.ego_speed_mps = ego.v;
+  const double safe_stop_target_d = std::clamp(
+    ego.frenet.d,
+    config_.d_min_m + config_.min_wall_margin_m,
+    config_.d_max_m - config_.min_wall_margin_m);
+  safe_stop_context.lateral_error_m = std::abs(ego.frenet.d - safe_stop_target_d);
+
+  bool safe_stop_candidate_infeasible = false;
+  bool safe_stop_request_infeasible = false;
+  CandidateTrajectory safe_stop_candidate;
+  if (safe_stop_context.requested || mode_ == BehaviorMode::SAFE_STOP) {
+    // STOP要求時とSTOP保持中は、停止候補自体の安全性も毎周期確認する。
+    safe_stop_candidate = makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
+    safety_.evaluate(safe_stop_candidate, predictions);
+    safe_stop_candidate.score = candidateScore(safe_stop_candidate, blocked);
+    safe_stop_context.candidate_feasible = safe_stop_candidate.feasible;
+    safe_stop_context.reason = safe_stop_candidate.feasible ?
+      "no_pass_and_no_safe_fallback" : "safe_stop_infeasible";
+    if (safe_stop_context.requested && safe_stop_candidate.feasible) {
+      candidates.push_back(safe_stop_candidate);
+    } else if (!safe_stop_candidate.feasible) {
+      safe_stop_candidate_infeasible = true;
+      safe_stop_request_infeasible = safe_stop_context.requested;
+    }
+  }
+
   CandidateTrajectory selected = selectCandidate(candidates);
+  const bool release_front_gap_ready =
+    blocked.nearest_index < 0 ||
+    blocked.front_delta_s >= config_.safe_stop_release_front_gap_m;
+  safe_stop_context.release_ready =
+    ego.valid &&
+    blocked.ego_wall_clearance_m >= config_.safe_stop_release_wall_clearance_m &&
+    !blocked.side_by_side &&
+    release_front_gap_ready &&
+    hasFeasibleReleaseCandidate(candidates, blocked) &&
+    ego.v <= config_.safe_stop_release_speed_mps &&
+    safe_stop_context.lateral_error_m <= config_.safe_stop_lateral_error_threshold_m;
+
   // 候補選択だけで急にモードを切り替えず、状態機械で保持時間や継続条件をかける。
-  mode_ = state_machine_.update(now_sec, mode_, selected.type, blocked, selected.feasible);
-  if (mode_ == BehaviorMode::ABORT_RECOVERY) {
+  mode_ = state_machine_.update(
+    now_sec, mode_, selected.type, blocked, selected.feasible, safe_stop_context);
+  if (mode_ == BehaviorMode::SAFE_STOP) {
+    selected = makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
+    safety_.evaluate(selected, predictions);
+  } else if (mode_ == BehaviorMode::ABORT_RECOVERY) {
     // 中止時は必ず中心線へ戻す候補を再生成し、最新予測で安全評価する。
     selected = makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
     safety_.evaluate(selected, predictions);
@@ -145,6 +273,33 @@ PlannerOutput OvertakePlannerCore::update(
   output.selected = selected.type;
   output.blocked_info = blocked;
   output.reason = selected.reject_reason;
+  output.safe_stop_triggered =
+    safe_stop_context.requested || mode_ == BehaviorMode::SAFE_STOP;
+  output.safe_stop_release_ready = safe_stop_context.release_ready;
+  output.safe_stop_v_mps = std::max(1.0e-3, config_.safe_stop_v_mps);
+  output.safe_stop_trigger_count = safe_stop_trigger_count_;
+  output.safe_stop_hold_count = state_machine_.safeStopHoldCount();
+  output.safe_stop_release_count = state_machine_.safeStopReleaseCount();
+  if (mode_ == BehaviorMode::SAFE_STOP) {
+    if (!selected.feasible) {
+      output.safe_stop_reason = "safe_stop_infeasible";
+      output.safe_stop_reject_reason = selected.reject_reason;
+    } else if (safe_stop_context.requested && output.safe_stop_hold_count <= 1) {
+      output.safe_stop_reason = "no_pass_and_no_safe_fallback";
+    } else if (safe_stop_context.release_ready) {
+      output.safe_stop_reason = "safe_stop_release_pending";
+    } else {
+      output.safe_stop_reason = "safe_stop_holding";
+    }
+  } else if (safe_stop_candidate_infeasible) {
+    output.safe_stop_triggered = true;
+    output.safe_stop_reason = "safe_stop_infeasible";
+    output.safe_stop_reject_reason = safe_stop_candidate.reject_reason;
+  }
+  if (!output.safe_stop_reason.empty()) {
+    output.reason = output.safe_stop_reason == "no_pass_and_no_safe_fallback" ?
+      "no_safe_avoidance" : output.safe_stop_reason;
+  }
   const bool side_by_side_best_effort =
     selected.type == CandidateType::SIDE_BY_SIDE_KEEP &&
     selected.reject_reason == "opponent_collision";
@@ -155,9 +310,14 @@ PlannerOutput OvertakePlannerCore::update(
     selected.reject_reason == "wall_margin" &&
     selected.type == CandidateType::YIELD_BEHIND;
   const double selected_target_d = selected.d.empty() ? ego.frenet.d : selected.d.back();
-  output.active_override =
-    selected.type != CandidateType::FASTEST &&
-    (selected.feasible || side_by_side_best_effort || yield_best_effort || wall_margin_escape);
+  if (selected.type == CandidateType::SAFE_STOP) {
+    output.active_override = selected.feasible;
+  } else {
+    output.active_override =
+      selected.type != CandidateType::FASTEST &&
+      !safe_stop_request_infeasible &&
+      (selected.feasible || side_by_side_best_effort || yield_best_effort || wall_margin_escape);
+  }
   output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected_target_d;
   output.min_cbf_h = selected.min_safety_margin;
   output.cbf_slack = selected.cbf_slack;
@@ -374,6 +534,9 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
       const auto & opp = opponents[static_cast<std::size_t>(target_index)];
       target_d = std::clamp(opp.frenet.d, lower_d, upper_d);
     }
+  } else if (type == CandidateType::SAFE_STOP) {
+    target_d = std::clamp(ego.frenet.d, lower_d, upper_d);
+    shift_distance = std::max(config_.merge_distance_m, config_.prepare_distance_m);
   }
 
   double speed_cap = config_.v_passthrough_mps;
@@ -404,6 +567,8 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
     if (blocked_info.corner_side_by_side && config_.corner_yield_v_max_mps > 0.0) {
       speed_cap = std::min(speed_cap, config_.corner_yield_v_max_mps);
     }
+  } else if (type == CandidateType::SAFE_STOP) {
+    speed_cap = std::max(1.0e-3, config_.safe_stop_v_mps);
   }
 
   const bool recovery_like =
@@ -422,13 +587,18 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
   }
 
   for (std::size_t i = 0; i < config_.horizon_points; ++i) {
-    // 現在速度で進む想定のs列を作り、smoothstepで横方向を急変させない。
+    // 候補ごとの速度想定でs列を作り、smoothstepで横方向を急変させない。
     const double t = static_cast<double>(i) * config_.horizon_dt_sec;
-    const double ds = std::max(0.5, ego.v) * t;
+    const double longitudinal_speed = type == CandidateType::SAFE_STOP ?
+      std::max(1.0e-3, config_.safe_stop_v_mps) : std::max(0.5, ego.v);
+    const double ds = longitudinal_speed * t;
     const double s = frame_.wrapS(ego.frenet.s + ds);
     const double ratio = smoothstep(ds / std::max(1.0, shift_distance));
     double start_d = ego.frenet.d;
-    if (type == CandidateType::RECOVERY || type == CandidateType::YIELD_BEHIND) {
+    if (
+      type == CandidateType::RECOVERY ||
+      type == CandidateType::YIELD_BEHIND ||
+      type == CandidateType::SAFE_STOP) {
       start_d = std::clamp(start_d, lower_d, upper_d);
     }
     const double d = start_d + (target_d - start_d) * ratio;
@@ -500,13 +670,17 @@ double OvertakePlannerCore::candidateScore(
         score = (!blocked_info.can_pass_left && !blocked_info.can_pass_right) ? 5.0 : 70.0;
       }
       break;
+    case CandidateType::SAFE_STOP:
+      score = -120.0;
+      break;
   }
   if (
     (mode_ == BehaviorMode::OVERTAKE_LEFT && candidate.type == CandidateType::PASS_LEFT) ||
     (mode_ == BehaviorMode::OVERTAKE_RIGHT && candidate.type == CandidateType::PASS_RIGHT) ||
     (mode_ == BehaviorMode::FOLLOW_BLOCKED && candidate.type == CandidateType::FOLLOW) ||
     (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP && candidate.type == CandidateType::SIDE_BY_SIDE_KEEP) ||
-    (mode_ == BehaviorMode::YIELD_BEHIND && candidate.type == CandidateType::YIELD_BEHIND)) {
+    (mode_ == BehaviorMode::YIELD_BEHIND && candidate.type == CandidateType::YIELD_BEHIND) ||
+    (mode_ == BehaviorMode::SAFE_STOP && candidate.type == CandidateType::SAFE_STOP)) {
     // いまのモードに沿う候補を少し優遇し、左右や追従/追い越しが細かく揺れないようにする。
     score -= config_.keep_mode_bonus;
   }

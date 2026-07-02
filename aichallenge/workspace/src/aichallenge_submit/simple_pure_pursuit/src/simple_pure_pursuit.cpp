@@ -6,6 +6,8 @@
 #include <tf2/utils.h>
 
 #include <algorithm>
+#include <cmath>
+#include <sstream>
 
 namespace simple_pure_pursuit
 {
@@ -23,11 +25,13 @@ SimplePurePursuit::SimplePurePursuit()
   speed_proportional_gain_(declare_parameter<float>("speed_proportional_gain", 1.0)),
   use_external_target_vel_(declare_parameter<bool>("use_external_target_vel", false)),
   external_target_vel_(declare_parameter<float>("external_target_vel", 0.0)),
-  steering_tire_angle_gain_(declare_parameter<float>("steering_tire_angle_gain", 1.0))
+  steering_tire_angle_gain_(declare_parameter<float>("steering_tire_angle_gain", 1.0)),
+  debug_publish_period_sec_(declare_parameter<float>("debug_publish_period_sec", 0.25))
 {
   pub_cmd_ = create_publisher<AckermannControlCommand>("output/control_cmd", 1);
   pub_raw_cmd_ = create_publisher<AckermannControlCommand>("output/raw_control_cmd", 1);
   pub_lookahead_point_ = create_publisher<PointStamped>("/control/debug/lookahead_point", 1);
+  pub_debug_ = create_publisher<String>("/pure_pursuit/debug", 1);
 
   const auto bv_qos = rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile().best_effort();
   sub_kinematics_ = create_subscription<Odometry>(
@@ -105,11 +109,17 @@ void SimplePurePursuit::onTimer()
   // calc steering angle for lateral control
   double alpha = std::atan2(lookahead_point_y - rear_y, lookahead_point_x - rear_x) -
                  tf2::getYaw(odometry_->pose.pose.orientation);
-  cmd.lateral.steering_tire_angle =
-    steering_tire_angle_gain_ * std::atan2(2.0 * wheel_base_ * std::sin(alpha), lookahead_distance);
+  const double raw_steering_tire_angle =
+    std::atan2(2.0 * wheel_base_ * std::sin(alpha), lookahead_distance);
+  cmd.lateral.steering_tire_angle = steering_tire_angle_gain_ * raw_steering_tire_angle;
+
+  publishDebug(
+    cmd.stamp, closet_traj_point_idx, target_longitudinal_vel, current_longitudinal_vel,
+    cmd.longitudinal.acceleration, lookahead_distance, lookahead_point_x, lookahead_point_y, rear_x,
+    rear_y, alpha, raw_steering_tire_angle, cmd.lateral.steering_tire_angle);
 
   pub_cmd_->publish(cmd);
-  cmd.lateral.steering_tire_angle /=  steering_tire_angle_gain_;
+  cmd.lateral.steering_tire_angle = raw_steering_tire_angle;
   pub_raw_cmd_->publish(cmd);
 }
 
@@ -128,6 +138,58 @@ bool SimplePurePursuit::subscribeMessageAvailable()
       return false;
     }
   return true;
+}
+
+void SimplePurePursuit::publishDebug(
+  const rclcpp::Time & stamp, std::size_t nearest_traj_point_idx, double target_longitudinal_vel,
+  double current_longitudinal_vel, double command_accel, double lookahead_distance,
+  double lookahead_point_x, double lookahead_point_y, double rear_x, double rear_y, double alpha,
+  double raw_steering_tire_angle, double steering_tire_angle)
+{
+  if (debug_publish_period_sec_ <= 0.0 || !pub_debug_) {
+    return;
+  }
+
+  const double now_sec = stamp.seconds();
+  if (now_sec - last_debug_publish_sec_ < debug_publish_period_sec_) {
+    return;
+  }
+  last_debug_publish_sec_ = now_sec;
+
+  const auto & nearest = trajectory_->points.at(nearest_traj_point_idx);
+  const double ego_x = odometry_->pose.pose.position.x;
+  const double ego_y = odometry_->pose.pose.position.y;
+  const double ref_x = nearest.pose.position.x;
+  const double ref_y = nearest.pose.position.y;
+  const double ref_yaw = tf2::getYaw(nearest.pose.orientation);
+  const double ego_yaw = tf2::getYaw(odometry_->pose.pose.orientation);
+  const double dx = ego_x - ref_x;
+  const double dy = ego_y - ref_y;
+  const double lateral_error_m = -std::sin(ref_yaw) * dx + std::cos(ref_yaw) * dy;
+  const double yaw_error_rad = std::atan2(std::sin(ego_yaw - ref_yaw), std::cos(ego_yaw - ref_yaw));
+
+  std::ostringstream json;
+  json << "{"
+       << "\"controller\":\"simple_pure_pursuit\","
+       << "\"nearest_trajectory_index\":" << nearest_traj_point_idx << ","
+       << "\"target_speed_mps\":" << target_longitudinal_vel << ","
+       << "\"current_speed_mps\":" << current_longitudinal_vel << ","
+       << "\"command_accel_mps2\":" << command_accel << ","
+       << "\"lookahead_distance_m\":" << lookahead_distance << ","
+       << "\"lookahead_point_x\":" << lookahead_point_x << ","
+       << "\"lookahead_point_y\":" << lookahead_point_y << ","
+       << "\"rear_x\":" << rear_x << ","
+       << "\"rear_y\":" << rear_y << ","
+       << "\"alpha_rad\":" << alpha << ","
+       << "\"raw_steering_tire_angle_rad\":" << raw_steering_tire_angle << ","
+       << "\"steering_tire_angle_rad\":" << steering_tire_angle << ","
+       << "\"lateral_error_m\":" << lateral_error_m << ","
+       << "\"yaw_error_rad\":" << yaw_error_rad << ","
+       << "\"use_external_target_vel\":" << (use_external_target_vel_ ? "true" : "false") << "}";
+
+  String msg;
+  msg.data = json.str();
+  pub_debug_->publish(msg);
 }
 }  // namespace simple_pure_pursuit
 

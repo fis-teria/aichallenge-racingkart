@@ -143,6 +143,7 @@ MPCへ渡す候補軌道です。
 6. 候補軌道を生成
    - `FASTEST`
    - 必要に応じて `FOLLOW`, `PASS_LEFT`, `PASS_RIGHT`, `SIDE_BY_SIDE_KEEP`, `YIELD_BEHIND`, `RECOVERY`
+   - 通常fallbackが成立しないときだけ `SAFE_STOP`
 7. 各候補を安全評価
 8. 候補スコアで1つ選ぶ
 9. `BehaviorStateMachine` でモードを安定化
@@ -176,6 +177,8 @@ MPCへ渡す候補軌道です。
   - 横並び時に相手から距離を取る
 - `YIELD_BEHIND`
   - 相手の後ろへ入るために減速する
+- `SAFE_STOP`
+  - 回避、追従、譲り、復帰が安全に成立しないとき、正の低速capで停止意図を出す
 
 ## CandidateType
 
@@ -195,6 +198,8 @@ MPCへ渡す候補軌道です。
   - 相手と横方向距離を保つ
 - `YIELD_BEHIND`
   - 後ろに入るための速度上限と横目標を作る
+- `SAFE_STOP`
+  - 現在dを安全コリドー内にclampし、`safe_stop_v_mps` の速度上限を全点へ入れる
 
 ## 状態遷移の要点
 
@@ -209,6 +214,9 @@ MPCへ渡す候補軌道です。
 - 相手が少し前へ出たら `YIELD_BEHIND`
 - `YIELD_BEHIND` は前方ギャップと壁余裕が戻るまで解除しない
 - `ABORT_RECOVERY` も壁余裕が戻るまで解除しない
+- `SAFE_STOP` は通常fallback候補が全てunsafeな周期が `safe_stop_trigger_cycles` 続いたときだけ入る
+- `SAFE_STOP` 中は停止候補がfeasibleな間だけoverrideを出し、解除条件が `safe_stop_release_cycles` 続くまで保持する
+- `SAFE_STOP` 候補が途中でunsafeになった場合は、`SAFE_STOP` に居座らず通常fallback側へ戻す
 
 最後のルールが重要です。
 壁外または壁際で `RECOVERY -> FREE_RUN -> FASTEST wall_margin -> RECOVERY` と揺れると、速度指令やステアがチャタります。
