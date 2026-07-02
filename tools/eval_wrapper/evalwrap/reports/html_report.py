@@ -53,6 +53,9 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
         "<section><h2>Track Diagnostics</h2>",
         _track_diagnostics_section(run_dir),
         "</section>",
+        "<section><h2>MPC Health Map</h2>",
+        _mpc_health_section(run_dir),
+        "</section>",
         "<section><h2>Control Response</h2>",
         _control_response_section(run_dir),
         "</section>",
@@ -364,6 +367,43 @@ def _track_diagnostics_section(run_dir: Path) -> str:
     return "\n".join(parts)
 
 
+def _mpc_health_section(run_dir: Path) -> str:
+    processed_dir = run_dir / "processed"
+    vehicle_rows = _read_csv_rows(processed_dir / "vehicle_timeseries.csv")
+    control_rows = _read_csv_rows(processed_dir / "control_timeseries.csv")
+    speed_debug_rows = _read_csv_rows(processed_dir / "speed_profile_debug.csv")
+    if not vehicle_rows:
+        return "<p>No vehicle time-series data was generated.</p>"
+
+    domain_ids = sorted({row.get("domain_id", "") for row in vehicle_rows if row.get("domain_id")})
+    parts: list[str] = []
+    for domain_id in domain_ids:
+        rows = _mpc_health_rows(
+            [row for row in vehicle_rows if row.get("domain_id") == domain_id],
+            [row for row in control_rows if row.get("domain_id") == domain_id],
+            [row for row in speed_debug_rows if row.get("domain_id") == domain_id],
+        )
+        if len(rows) < 2:
+            continue
+        parts.append(
+            "\n".join(
+                [
+                    "<article class='speed-profile-domain'>",
+                    f"<h3 class='speed-profile-title'>{_e(domain_id)}</h3>",
+                    "<div class='speed-profile-layout'>",
+                    f"<div class='speed-panel'>{_mpc_health_map_svg(rows, f'mpc-health-{domain_id}')}</div>",
+                    f"<div class='speed-panel'>{_mpc_health_summary(rows)}</div>",
+                    "</div>",
+                    _mpc_health_table(rows),
+                    "</article>",
+                ]
+            )
+        )
+    if not parts:
+        return "<p>No MPC health rows could be matched to vehicle position.</p>"
+    return "\n".join(parts)
+
+
 def _control_response_section(run_dir: Path) -> str:
     processed_dir = run_dir / "processed"
     vehicle_rows = _read_csv_rows(processed_dir / "vehicle_timeseries.csv")
@@ -579,6 +619,118 @@ def _event_marker_rows(event_rows: list[dict[str, str]], profile_rows: list[dict
             }
         )
     return markers
+
+
+def _mpc_health_rows(
+    vehicle_rows: list[dict[str, str]],
+    control_rows: list[dict[str, str]],
+    speed_debug_rows: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    vehicles = sorted(vehicle_rows, key=lambda row: _to_float(row.get("time_sec")) or 0.0)
+    controls = sorted(control_rows, key=lambda row: _to_float(row.get("time_sec")) or 0.0)
+    debug_rows = sorted(speed_debug_rows, key=lambda row: _to_float(row.get("time_sec")) or 0.0)
+    health_rows: list[dict[str, Any]] = []
+
+    for vehicle in vehicles:
+        time_sec = _to_float(vehicle.get("time_sec"))
+        x_m = _to_float(vehicle.get("x_m"))
+        y_m = _to_float(vehicle.get("y_m"))
+        if time_sec is None or x_m is None or y_m is None:
+            continue
+        control = _nearest_csv_row(controls, time_sec, tolerance_sec=0.25)
+        debug = _nearest_csv_row(debug_rows, time_sec, tolerance_sec=0.4)
+        speed = _to_float(vehicle.get("speed_mps"))
+        target_speed = _to_float(control.get("target_speed_mps")) if control else None
+        row: dict[str, Any] = {
+            "time_sec": time_sec,
+            "x_m": x_m,
+            "y_m": y_m,
+            "distance_m": _to_float(vehicle.get("distance_m")),
+            "track_s_m": _to_float(vehicle.get("track_s_m")),
+            "corner_id": vehicle.get("corner_id") or "",
+            "speed_mps": speed,
+            "target_speed_mps": target_speed,
+            "speed_error_mps": speed - target_speed if speed is not None and target_speed is not None else None,
+            "path_error_m": _to_float(vehicle.get("path_error_m")),
+            "steering_rad": _to_float(vehicle.get("steering_rad")),
+            "command_steer_rad": _to_float(control.get("steer_rad")) if control else None,
+            "command_accel_mps2": _to_float(control.get("accel_mps2")) if control else None,
+            "mpc_status": debug.get("mpc_status") if debug else "",
+            "mpc_solve_time_ms": _to_float(debug.get("mpc_solve_time_ms")) if debug else None,
+            "mpc_infeasible_count": _to_float(debug.get("mpc_infeasible_count")) if debug else None,
+        }
+        health_rows.append(row)
+
+    _attach_mpc_health_scores(health_rows)
+    return health_rows
+
+
+def _attach_mpc_health_scores(rows: list[dict[str, Any]]) -> None:
+    previous_steer: float | None = None
+    previous_steer_time: float | None = None
+    previous_infeasible_count: float | None = None
+    for row in rows:
+        time_sec = row.get("time_sec")
+        steer = row.get("command_steer_rad")
+        if not isinstance(steer, (int, float)):
+            steer = row.get("steering_rad")
+
+        steer_rate: float | None = None
+        if (
+            isinstance(steer, (int, float))
+            and isinstance(time_sec, (int, float))
+            and previous_steer is not None
+            and previous_steer_time is not None
+        ):
+            dt = max(float(time_sec) - previous_steer_time, 1e-6)
+            steer_rate = (float(steer) - previous_steer) / dt
+        if isinstance(steer, (int, float)) and isinstance(time_sec, (int, float)):
+            previous_steer = float(steer)
+            previous_steer_time = float(time_sec)
+        row["steer_rate_radps"] = steer_rate
+
+        infeasible_count = row.get("mpc_infeasible_count")
+        infeasible_delta = 0.0
+        if isinstance(infeasible_count, (int, float)):
+            if previous_infeasible_count is not None:
+                infeasible_delta = max(0.0, float(infeasible_count) - previous_infeasible_count)
+            previous_infeasible_count = float(infeasible_count)
+        row["mpc_infeasible_delta"] = infeasible_delta
+
+        scores = {
+            "path": _score_abs(row.get("path_error_m"), 1.5),
+            "speed": _score_abs(row.get("speed_error_mps"), 2.0),
+            "steer": _score_abs(steer, 0.64),
+            "steer_rate": _score_abs(steer_rate, 1.2),
+            "solve": _score_abs(row.get("mpc_solve_time_ms"), 80.0),
+            "infeasible": _mpc_infeasible_score(row.get("mpc_status"), infeasible_delta),
+        }
+        health_score = max(scores.values()) if scores else 0.0
+        row["mpc_health_score"] = health_score
+        row["mpc_health_level"] = _mpc_health_level(health_score)
+        row["mpc_health_reason"] = max(scores.items(), key=lambda item: item[1])[0] if scores else ""
+
+
+def _score_abs(value: Any, critical_value: float) -> float:
+    number = _to_float(value)
+    if number is None:
+        return 0.0
+    return _clamp01(abs(number) / max(critical_value, 1e-6))
+
+
+def _mpc_infeasible_score(status: Any, infeasible_delta: float) -> float:
+    text = str(status or "").lower()
+    if infeasible_delta > 0.0 or any(word in text for word in ("infeasible", "fail", "error")):
+        return 1.0
+    return 0.0
+
+
+def _mpc_health_level(score: float) -> str:
+    if score >= 0.85:
+        return "critical"
+    if score >= 0.5:
+        return "warning"
+    return "ok"
 
 
 def _nearest_csv_row(rows: list[dict[str, str]], time_sec: float, tolerance_sec: float) -> dict[str, str] | None:
@@ -949,6 +1101,95 @@ def _target_speed_drops(rows: list[dict[str, Any]], min_drop_mps: float = 0.2) -
                 drops.append(drop)
         previous = row
     return drops
+
+
+def _mpc_health_map_svg(rows: list[dict[str, Any]], gradient_id: str) -> str:
+    value_rows = [row for row in rows if isinstance(row.get("mpc_health_score"), (int, float))]
+    if len(value_rows) < 2:
+        return "<div class='corner-map-empty'>No MPC health map data.</div>"
+    return _metric_track_map_svg(
+        value_rows,
+        "mpc_health_score",
+        "mpc health map",
+        "health",
+        _format_health_score,
+        _health_color,
+        gradient_id,
+        legend=[
+            ("ok", _format_health_score(0.0), _health_color(0.0)),
+            ("warning", _format_health_score(0.5), _health_color(0.5)),
+            ("critical", _format_health_score(1.0), _health_color(1.0)),
+        ],
+    )
+
+
+def _mpc_health_summary(rows: list[dict[str, Any]]) -> str:
+    scores = [float(row["mpc_health_score"]) for row in rows if isinstance(row.get("mpc_health_score"), (int, float))]
+    if not scores:
+        return "<p>No MPC health scores were computed.</p>"
+    worst = max(rows, key=lambda row: float(row.get("mpc_health_score") or 0.0))
+    critical_count = sum(1 for score in scores if score >= 0.85)
+    warning_count = sum(1 for score in scores if 0.5 <= score < 0.85)
+    return _kv_table(
+        {
+            "max_health_score": _format_health_score(max(scores)),
+            "critical_samples": critical_count,
+            "warning_samples": warning_count,
+            "worst_time_sec": _format_number(worst.get("time_sec"), 3),
+            "worst_distance_m": _format_number(worst.get("distance_m"), 1),
+            "worst_corner_id": worst.get("corner_id"),
+            "dominant_reason": worst.get("mpc_health_reason"),
+            "thresholds": "path 1.5m / speed 2.0mps / steer 0.64rad / steer_rate 1.2radps / solve 80ms",
+        }
+    )
+
+
+def _mpc_health_table(rows: list[dict[str, Any]], limit: int = 20) -> str:
+    worst_rows = sorted(
+        [row for row in rows if isinstance(row.get("mpc_health_score"), (int, float))],
+        key=lambda row: float(row.get("mpc_health_score") or 0.0),
+        reverse=True,
+    )[:limit]
+    headers = [
+        "score",
+        "level",
+        "reason",
+        "time_sec",
+        "distance_m",
+        "track_s_m",
+        "corner_id",
+        "path_error_m",
+        "speed_error_mps",
+        "cmd_steer_rad",
+        "steer_rate_radps",
+        "mpc_status",
+        "solve_ms",
+        "infeasible_delta",
+    ]
+    table = ["<div class='speed-drop-table'><h4>Worst MPC Health Samples</h4><table><thead><tr>"]
+    table.extend(f"<th>{_e(header)}</th>" for header in headers)
+    table.append("</tr></thead><tbody>")
+    for row in worst_rows:
+        table.append("<tr>")
+        table.append(f"<td>{_e(_format_health_score(row.get('mpc_health_score')))}</td>")
+        table.append(f"<td>{_e(row.get('mpc_health_level'))}</td>")
+        table.append(f"<td>{_e(row.get('mpc_health_reason'))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('time_sec'), 3))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('distance_m'), 1))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('track_s_m'), 1))}</td>")
+        table.append(f"<td>{_e(row.get('corner_id'))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('path_error_m'), 3))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('speed_error_mps'), 3))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('command_steer_rad'), 3))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('steer_rate_radps'), 3))}</td>")
+        table.append(f"<td>{_e(row.get('mpc_status'))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('mpc_solve_time_ms'), 1))}</td>")
+        table.append(f"<td>{_e(_format_number(row.get('mpc_infeasible_delta'), 0))}</td>")
+        table.append("</tr>")
+    if not worst_rows:
+        table.append(f"<tr><td colspan='{len(headers)}'>No MPC health samples found.</td></tr>")
+    table.append("</tbody></table></div>")
+    return "\n".join(table)
 
 
 def _target_speed_map_svg(rows: list[dict[str, Any]], drops: list[dict[str, Any]], gradient_id: str) -> str:
@@ -1666,6 +1907,17 @@ def _error_color(value: float, max_value: float) -> str:
     )
 
 
+def _health_color(value: float) -> str:
+    return _multi_stop_color(
+        _clamp01(value),
+        [
+            (0.0, "#16a34a"),
+            (0.5, "#f59e0b"),
+            (1.0, "#dc2626"),
+        ],
+    )
+
+
 def _source_color(source: str) -> str:
     normalized = str(source or "").lower()
     if "section" in normalized:
@@ -1963,6 +2215,13 @@ def _format_percent(value: Any) -> str:
     if number is None:
         return ""
     return f"{number:.2f}%"
+
+
+def _format_health_score(value: Any) -> str:
+    number = _to_float(value)
+    if number is None:
+        return ""
+    return f"{number:.2f}"
 
 
 def _to_float(value: str | float | None) -> float | None:

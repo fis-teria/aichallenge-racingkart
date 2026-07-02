@@ -4,6 +4,7 @@ const state = {
   currentContent: "",
   currentKind: "text",
   editorMode: "text",
+  diffVisible: false,
   structuredRows: [],
   structuredDirty: false,
   structuredDescriptionsDirty: false,
@@ -374,6 +375,7 @@ async function openFile(path) {
   state.currentKind = fileKind(data.path);
   state.structuredDirty = false;
   state.structuredDescriptionsDirty = false;
+  state.diffVisible = false;
   $("fileTitle").textContent = fileLabel(data.path);
   $("filePath").textContent = data.path;
   $("fileEditor").value = data.content;
@@ -425,7 +427,11 @@ function renderEditorMode() {
   $("structuredEditor").hidden = !(tableAvailable && state.editorMode === "table");
   $("pathEditor").hidden = !pathActive;
   $("fileEditor").classList.toggle("hidden-editor", pathActive || (tableAvailable && state.editorMode === "table"));
-  $("diffOutput").classList.toggle("hidden-editor", pathActive);
+  $("diffOutput").classList.toggle("hidden-editor", pathActive || !state.diffVisible);
+  $("diffFile").classList.toggle("active", !pathActive && state.diffVisible);
+  $("diffFile").setAttribute("aria-pressed", String(!pathActive && state.diffVisible));
+  $("diffFile").textContent = !pathActive && state.diffVisible ? "Diff OFF" : "Diff";
+  $("diffFile").title = !pathActive && state.diffVisible ? "差分欄を閉じて表を下まで表示" : "差分欄を表示";
   $("tableMode").classList.toggle("active", tableAvailable && state.editorMode === "table");
   $("textMode").classList.toggle("active", !pathActive && (!tableAvailable || state.editorMode === "text"));
   $("pathMode").classList.toggle("active", pathActive);
@@ -462,13 +468,15 @@ function renderScalarStructuredRows() {
   });
   tbody.innerHTML = rows
     .map((row) => {
+      const description = valueOr(row.description, "");
+      const value = valueOr(row.value, "");
       return `<tr data-row-id="${escapeHtml(row.id)}">
         <td>${escapeHtml(valueOr(row.line, ""))}</td>
         <td>${escapeHtml(row.path || row.label || "")}</td>
         <td>${escapeHtml(row.name || "")}</td>
         <td class="structured-type">${escapeHtml(row.type || "")}</td>
-        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.description, ""))}"></td>
-        <td><input class="structured-value" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.value, ""))}"></td>
+        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(description)}" title="${escapeHtml(description)}" style="${structuredInputStyle(description, 28)}"></td>
+        <td><input class="structured-value" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(value)}" title="${escapeHtml(value)}" style="${structuredInputStyle(value, 16)}"></td>
       </tr>`;
     })
     .join("");
@@ -481,6 +489,7 @@ function renderScalarStructuredRows() {
       if (!row) return;
       row.value = input.value;
       state.structuredDirty = true;
+      refreshStructuredInputWidth(input, 16);
     });
   }
   bindStructuredDescriptionInputs(tbody);
@@ -509,13 +518,15 @@ function renderXmlStructuredRows() {
           if (!Object.prototype.hasOwnProperty.call(attrs, column)) {
             return "<td class=\"structured-empty\"></td>";
           }
-          return `<td><input class="structured-value xml-attr-value" data-row-id="${escapeHtml(row.id)}" data-attr="${escapeHtml(column)}" value="${escapeHtml(valueOr(attrs[column], ""))}"></td>`;
+          const value = valueOr(attrs[column], "");
+          return `<td><input class="structured-value xml-attr-value" data-row-id="${escapeHtml(row.id)}" data-attr="${escapeHtml(column)}" value="${escapeHtml(value)}" title="${escapeHtml(value)}" style="${structuredInputStyle(value, 16)}"></td>`;
         })
         .join("");
+      const description = valueOr(row.description, "");
       return `<tr data-row-id="${escapeHtml(row.id)}">
         <td>${escapeHtml(valueOr(row.line, ""))}</td>
         <td class="structured-tag">${escapeHtml(row.tag || "")}</td>
-        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(valueOr(row.description, ""))}"></td>
+        <td><input class="structured-description" data-row-id="${escapeHtml(row.id)}" value="${escapeHtml(description)}" title="${escapeHtml(description)}" style="${structuredInputStyle(description, 28)}"></td>
         ${cells}
       </tr>`;
     })
@@ -530,6 +541,7 @@ function renderXmlStructuredRows() {
       row.attrs = row.attrs || {};
       row.attrs[input.dataset.attr] = input.value;
       state.structuredDirty = true;
+      refreshStructuredInputWidth(input, 16);
     });
   }
   bindStructuredDescriptionInputs(tbody);
@@ -542,8 +554,20 @@ function bindStructuredDescriptionInputs(tbody) {
       if (!row) return;
       row.description = input.value;
       state.structuredDescriptionsDirty = true;
+      refreshStructuredInputWidth(input, 28);
     });
   }
+}
+
+function structuredInputStyle(value, minCh) {
+  const length = Array.from(String(valueOr(value, ""))).length;
+  const width = Math.max(minCh, length + 2);
+  return `min-width:${width}ch`;
+}
+
+function refreshStructuredInputWidth(input, minCh) {
+  input.style.minWidth = `${Math.max(minCh, Array.from(input.value || "").length + 2)}ch`;
+  input.title = input.value;
 }
 
 function xmlColumns(rows) {
@@ -1378,7 +1402,18 @@ async function diffFile() {
     method: "POST",
     body: JSON.stringify({ path: state.currentFile, content: $("fileEditor").value }),
   });
+  state.diffVisible = true;
   $("diffOutput").textContent = data.diff || "差分なし";
+  renderEditorMode();
+}
+
+async function toggleDiff() {
+  if (state.diffVisible) {
+    state.diffVisible = false;
+    renderEditorMode();
+    return;
+  }
+  await diffFile();
 }
 
 async function saveFile(autoRebuild) {
@@ -1861,7 +1896,7 @@ function bind() {
   $("saveControl").addEventListener("click", () => saveControl(false).catch((e) => toast(e.message)));
   $("saveControlBuild").addEventListener("click", () => saveControl(true).catch((e) => toast(e.message)));
   $("validateFile").addEventListener("click", () => validateFile().catch((e) => toast(e.message)));
-  $("diffFile").addEventListener("click", () => diffFile().catch((e) => toast(e.message)));
+  $("diffFile").addEventListener("click", () => toggleDiff().catch((e) => toast(e.message)));
   $("saveFile").addEventListener("click", () => saveFile(false).catch((e) => toast(e.message)));
   $("saveFileBuild").addEventListener("click", () => saveFile(true).catch((e) => toast(e.message)));
   $("runBuild").addEventListener("click", () => run("build").catch((e) => toast(e.message)));

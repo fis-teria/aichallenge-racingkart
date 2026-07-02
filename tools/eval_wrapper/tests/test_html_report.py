@@ -64,11 +64,11 @@ def test_generate_run_report_renders_corner_split_table(tmp_path: Path) -> None:
     (processed_dir / "speed_profile_debug.csv").write_text(
         "\n".join(
             [
-                "run_id,domain_id,time_sec,wp_id,source,target_speed_mps,curvature_speed_mps,section_cap_mps,global_cap_mps,actual_speed_mps,command_speed_mps",
-                "run,d1,1.0,10,global,8.0,9.0,,8.0,7.0,1.0",
-                "run,d1,2.0,20,curvature,8.0,8.0,,9.0,7.5,0.0",
-                "run,d1,3.0,30,section,5.0,8.0,5.0,9.0,6.5,0.0",
-                "run,d1,4.0,40,section,5.0,8.0,5.0,9.0,5.2,0.0",
+                "run_id,domain_id,time_sec,wp_id,source,target_speed_mps,curvature_speed_mps,section_cap_mps,global_cap_mps,actual_speed_mps,command_speed_mps,mpc_status,mpc_solve_time_ms,mpc_infeasible_count",
+                "run,d1,1.0,10,global,8.0,9.0,,8.0,7.0,1.0,solved,4.0,0",
+                "run,d1,2.0,20,curvature,8.0,8.0,,9.0,7.5,0.0,solved,4.5,0",
+                "run,d1,3.0,30,section,5.0,8.0,5.0,9.0,6.5,0.0,infeasible,96.0,1",
+                "run,d1,4.0,40,section,5.0,8.0,5.0,9.0,5.2,0.0,solved,5.0,1",
             ]
         )
         + "\n",
@@ -130,6 +130,11 @@ def test_generate_run_report_renders_corner_split_table(tmp_path: Path) -> None:
     assert "Event Marker Map" in html
     assert "event marker map" in html
     assert "path_error warning" in html
+    assert "MPC Health Map" in html
+    assert "mpc health map" in html
+    assert "Worst MPC Health Samples" in html
+    assert "infeasible" in html
+    assert "thresholds" in html
     assert "Control Response" in html
     assert "Acceleration Response" in html
     assert "acceleration response chart" in html
