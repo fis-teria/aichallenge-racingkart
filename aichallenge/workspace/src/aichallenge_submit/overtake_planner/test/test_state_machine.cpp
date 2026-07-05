@@ -85,6 +85,22 @@ TEST(BehaviorStateMachine, SideBySideReturnsToFreeRunWhenClear)
   EXPECT_EQ(next, overtake_planner::BehaviorMode::FREE_RUN);
 }
 
+TEST(BehaviorStateMachine, SideBySideKeepReturnsToFollowWhenSideClearsButFrontStillBlocked)
+{
+  overtake_planner::PlannerConfig config;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.side_by_side = false;
+  info.blocked = true;
+
+  const auto next = sm.update(
+    1.0, overtake_planner::BehaviorMode::SIDE_BY_SIDE_KEEP,
+    overtake_planner::CandidateType::FOLLOW, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+}
+
 TEST(BehaviorStateMachine, SideBySideKeepsOvertakeAndDoesNotMerge)
 {
   overtake_planner::PlannerConfig config;
