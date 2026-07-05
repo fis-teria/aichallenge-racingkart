@@ -1,0 +1,231 @@
+#include "overtake_planner/planner_output_builder.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace overtake_planner {
+
+namespace {
+
+double finitePositiveOr(double value, double fallback) {
+  return std::isfinite(value) && value > 0.0 ? value : fallback;
+}
+
+double candidateSpeedCapOr(const CandidateTrajectory &candidate,
+                           double fallback) {
+  double out = fallback;
+  for (double cap : candidate.v_ref) {
+    if (std::isfinite(cap) && cap > 0.0) {
+      out = std::min(out, cap);
+    }
+  }
+  return out;
+}
+
+void applyUniformSpeedCap(std::vector<double> &speed_caps, double cap) {
+  if (!std::isfinite(cap) || cap <= 0.0) {
+    return;
+  }
+  if (speed_caps.empty()) {
+    speed_caps.push_back(cap);
+    return;
+  }
+  for (double &existing : speed_caps) {
+    existing = std::isfinite(existing) && existing > 0.0
+                   ? std::min(existing, cap)
+                   : cap;
+  }
+}
+
+std::vector<double> uniformVector(std::size_t count, double value) {
+  return std::vector<double>(std::max<std::size_t>(1, count), value);
+}
+
+} // namespace
+
+PlannerOutputBuilder::PlannerOutputBuilder(const PlannerConfig &config)
+    : config_(config) {}
+
+PlannerOutput PlannerOutputBuilder::build(
+    const PlannerOutputBuildInput &input) const {
+  const auto &selected = input.selected;
+  const auto &blocked = input.blocked_info;
+  const auto &safe_stop_context = input.safe_stop_context;
+  const auto &safe_stop_candidate = input.safe_stop_candidate;
+  const auto &active_section = input.active_section;
+  const auto &mpc_health = input.mpc_health;
+
+  PlannerOutput output;
+  output.mode = input.mode;
+  output.selected = selected.type;
+  output.blocked_info = blocked;
+  output.reason = selected.reject_reason;
+  output.safe_stop_triggered =
+      safe_stop_context.requested || input.mode == BehaviorMode::SAFE_STOP;
+  output.safe_stop_release_ready = safe_stop_context.release_ready;
+  output.safe_stop_v_mps = std::max(1.0e-3, config_.safe_stop_v_mps);
+  output.safe_stop_trigger_count = input.safe_stop_trigger_count;
+  output.safe_stop_hold_count = input.safe_stop_hold_count;
+  output.safe_stop_release_count = input.safe_stop_release_count;
+  if (input.mode == BehaviorMode::SAFE_STOP) {
+    if (!selected.feasible) {
+      output.safe_stop_reason = "safe_stop_infeasible";
+      output.safe_stop_reject_reason = selected.reject_reason;
+    } else if (safe_stop_context.requested &&
+               output.safe_stop_hold_count <= 1) {
+      output.safe_stop_reason = "no_pass_and_no_safe_fallback";
+    } else if (safe_stop_context.release_ready) {
+      output.safe_stop_reason = "safe_stop_release_pending";
+    } else {
+      output.safe_stop_reason = "safe_stop_holding";
+    }
+  } else if (input.safe_stop_candidate_infeasible) {
+    output.safe_stop_triggered = true;
+    output.safe_stop_reason = "safe_stop_infeasible";
+    output.safe_stop_reject_reason = safe_stop_candidate.reject_reason;
+  }
+  if (!output.safe_stop_reason.empty()) {
+    output.reason = output.safe_stop_reason == "no_pass_and_no_safe_fallback"
+                        ? "no_safe_avoidance"
+                        : output.safe_stop_reason;
+  }
+
+  const double selected_target_d =
+      selected.d.empty() ? input.ego.frenet.d : selected.d.back();
+  bool selected_override_active = false;
+  if (selected.type == CandidateType::SAFE_STOP) {
+    selected_override_active = selected.feasible;
+  } else {
+    selected_override_active = selected.type != CandidateType::FASTEST &&
+                               !input.safe_stop_candidate_infeasible &&
+                               selected.feasible;
+  }
+
+  double requested_speed_cap = std::numeric_limits<double>::infinity();
+  std::string speed_cap_reason;
+  bool speed_only_fallback = false;
+  bool wall_risk_guard = false;
+  bool mpc_health_guard = false;
+  const bool allow_speed_guard = true;
+  const auto requestSpeedCap = [&](double cap_mps, const std::string &reason) {
+    if (!std::isfinite(cap_mps) || cap_mps <= 0.0) {
+      return;
+    }
+    if (cap_mps < requested_speed_cap) {
+      requested_speed_cap = cap_mps;
+      speed_cap_reason = reason;
+    }
+  };
+
+  if (allow_speed_guard && config_.speed_only_fallback_enabled &&
+      input.safe_stop_candidate_infeasible) {
+    requestSpeedCap(config_.speed_only_fallback_v_max_mps,
+                    "speed_only_fallback_safe_stop_infeasible");
+    speed_only_fallback = true;
+  }
+
+  if (allow_speed_guard && config_.speed_only_fallback_enabled &&
+      !input.safe_stop_candidate_infeasible && !selected.feasible &&
+      selected.type != CandidateType::FASTEST &&
+      selected.type != CandidateType::SAFE_STOP) {
+    const double selected_cap =
+        candidateSpeedCapOr(selected, config_.speed_only_fallback_v_max_mps);
+    requestSpeedCap(
+        std::min(selected_cap, config_.speed_only_fallback_v_max_mps),
+        selected.reject_reason.empty()
+            ? "speed_only_fallback"
+            : "speed_only_fallback_" + selected.reject_reason);
+    speed_only_fallback = true;
+  }
+
+  if (allow_speed_guard && config_.wall_risk_speed_guard_enabled &&
+      input.wall_soft_margin_m > 0.0 &&
+      blocked.ego_wall_clearance_m < input.wall_soft_margin_m) {
+    requestSpeedCap(config_.wall_risk_v_max_mps, "wall_risk_speed_guard");
+    wall_risk_guard = true;
+  }
+
+  if (allow_speed_guard && active_section.active &&
+      active_section.profile == "side_by_side_corner_strict" &&
+      (blocked.side_by_side || blocked.parallel_side_candidate ||
+       blocked.future_yield_required || blocked.corner_side_by_side ||
+       blocked.future_corner_side_by_side)) {
+    requestSpeedCap(config_.corner_yield_v_max_mps,
+                    "section_profile_speed_guard");
+  }
+
+  const bool mpc_health_infeasible_guard =
+      config_.mpc_health_infeasible_count_threshold > 0 &&
+      mpc_health.infeasible_count >=
+          config_.mpc_health_infeasible_count_threshold;
+  const bool mpc_health_solve_time_guard =
+      config_.mpc_health_solve_time_warn_ms > 0.0 &&
+      std::isfinite(mpc_health.solve_time_ms) &&
+      mpc_health.solve_time_ms >= config_.mpc_health_solve_time_warn_ms;
+  const bool mpc_health_stale_guard =
+      config_.mpc_health_stale_time_sec > 0.0 &&
+      std::isfinite(mpc_health.age_sec) &&
+      mpc_health.age_sec > config_.mpc_health_stale_time_sec;
+  if (allow_speed_guard && config_.mpc_health_speed_guard_enabled &&
+      mpc_health.valid &&
+      (mpc_health_infeasible_guard || mpc_health_solve_time_guard ||
+       mpc_health_stale_guard)) {
+    const std::string reason = mpc_health_infeasible_guard
+                                   ? "mpc_health_infeasible_guard"
+                               : mpc_health_solve_time_guard
+                                   ? "mpc_health_solve_time_guard"
+                                   : "mpc_health_stale_guard";
+    requestSpeedCap(config_.mpc_health_v_max_mps, reason);
+    mpc_health_guard = true;
+  }
+
+  if (std::isfinite(requested_speed_cap)) {
+    requested_speed_cap = scaledSpeedCap(requested_speed_cap, active_section);
+  }
+
+  output.active_override = selected_override_active;
+  output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected_target_d;
+  output.min_cbf_h = selected.min_safety_margin;
+  output.cbf_slack = selected.cbf_slack;
+  output.active_cbf_constraint_count = selected.active_safety_constraint_count;
+  output.lateral_offsets = selected.d;
+  output.speed_caps = selected.v_ref;
+  if (std::isfinite(requested_speed_cap)) {
+    if (selected_override_active && selected.feasible) {
+      applyUniformSpeedCap(output.speed_caps, requested_speed_cap);
+    } else {
+      output.active_override = true;
+      output.lateral_offsets = uniformVector(config_.horizon_points, 0.0);
+      output.speed_caps =
+          uniformVector(config_.horizon_points, requested_speed_cap);
+      output.target_lateral_offset_m = 0.0;
+      if (output.mode == BehaviorMode::FREE_RUN) {
+        output.mode = BehaviorMode::SPEED_GUARD;
+      }
+    }
+    output.applied_speed_cap_mps = requested_speed_cap;
+    output.speed_cap_reason = speed_cap_reason;
+    if (output.reason.empty() && !selected_override_active) {
+      output.reason = speed_cap_reason;
+    }
+  }
+  output.speed_only_fallback_active = speed_only_fallback;
+  output.wall_risk_speed_guard_active = wall_risk_guard;
+  output.mpc_health_speed_guard_active = mpc_health_guard;
+  output.wall_soft_margin_m = input.wall_soft_margin_m;
+  output.active_section = active_section;
+  output.mpc_health = mpc_health;
+  return output;
+}
+
+double PlannerOutputBuilder::scaledSpeedCap(
+    double speed_cap_mps, const ActiveSectionSafety &section) const {
+  const double scale =
+      section.active ? std::clamp(section.speed_cap_scale, 0.05, 1.0) : 1.0;
+  return finitePositiveOr(speed_cap_mps * scale, speed_cap_mps);
+}
+
+} // namespace overtake_planner

@@ -2,31 +2,28 @@
 
 #include "overtake_planner/types.hpp"
 
-namespace overtake_planner
-{
+namespace overtake_planner {
 
-class BehaviorStateMachine
-{
+class BehaviorStateMachine {
 public:
   explicit BehaviorStateMachine(PlannerConfig config);
 
   // 選ばれた候補とblocked状態から、追従・追い越し・復帰のモードを更新する。
-  BehaviorMode update(
-    double now_sec,
-    BehaviorMode current,
-    CandidateType selected,
-    const BlockedInfo & blocked_info,
-    bool selected_feasible,
-    SafeStopContext safe_stop_context = SafeStopContext{});
+  BehaviorMode update(double now_sec, BehaviorMode current,
+                      CandidateType selected, const BlockedInfo &blocked_info,
+                      bool selected_feasible,
+                      SafeStopContext safe_stop_context = SafeStopContext{});
 
   double modeEnterTime() const { return mode_enter_time_sec_; }
   int safeStopHoldCount() const { return safe_stop_hold_count_; }
   int safeStopReleaseCount() const { return safe_stop_release_count_; }
+  bool futureYieldHoldActive() const { return future_yield_hold_active_; }
 
 private:
   // モードが短時間で振動しないよう、最低保持時間を満たしたかを見る。
   bool canSwitch(double now_sec) const;
   void markIfChanged(double now_sec, BehaviorMode before, BehaviorMode after);
+  bool shouldHoldFutureYield(const BlockedInfo &blocked_info) const;
 
   PlannerConfig config_;
   double mode_enter_time_sec_{0.0};
@@ -34,6 +31,7 @@ private:
   int pass_right_safe_cycles_{0};
   int safe_stop_hold_count_{0};
   int safe_stop_release_count_{0};
+  bool future_yield_hold_active_{false};
 };
 
-}  // namespace overtake_planner
+} // namespace overtake_planner

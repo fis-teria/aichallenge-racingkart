@@ -34,6 +34,28 @@ TEST(BehaviorStateMachine, RepeatedSafePassTransitionsToPrepare)
   EXPECT_EQ(mode, overtake_planner::BehaviorMode::PREPARE_OVERTAKE_RIGHT);
 }
 
+TEST(BehaviorStateMachine, CurvedStartGateKeepsBlockedFollow)
+{
+  overtake_planner::PlannerConfig config;
+  config.pass_safe_required_cycles = 1.0;
+  config.min_mode_hold_time_sec = 0.0;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo blocked;
+  blocked.blocked = true;
+  blocked.straight_overtake_start_allowed = false;
+  blocked.overtake_start_gate_reason = "curve";
+
+  auto mode = sm.update(
+    1.0, overtake_planner::BehaviorMode::FREE_RUN,
+    overtake_planner::CandidateType::PASS_LEFT, blocked, true);
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+
+  mode = sm.update(
+    1.1, mode, overtake_planner::CandidateType::PASS_LEFT, blocked, true);
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+}
+
 TEST(BehaviorStateMachine, SideBySideFromFreeRunUsesDistanceKeepMode)
 {
   overtake_planner::PlannerConfig config;
@@ -72,12 +94,47 @@ TEST(BehaviorStateMachine, SideBySideKeepsOvertakeAndDoesNotMerge)
   info.side_by_side = true;
   info.blocked = false;
   info.front_delta_s = 10.0;
+  info.straight_overtake_start_allowed = false;
+  info.overtake_start_gate_reason = "curve";
 
   const auto next = sm.update(
     2.0, overtake_planner::BehaviorMode::OVERTAKE_LEFT,
     overtake_planner::CandidateType::PASS_LEFT, info, true);
 
   EXPECT_EQ(next, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
+}
+
+TEST(BehaviorStateMachine, CurvedStartGateDoesNotAbortActiveOvertake)
+{
+  overtake_planner::PlannerConfig config;
+  config.abort_timeout_sec = 5.0;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.blocked = true;
+  info.front_delta_s = 3.0;
+  info.straight_overtake_start_allowed = false;
+  info.overtake_start_gate_reason = "curve";
+
+  const auto next = sm.update(
+    2.0, overtake_planner::BehaviorMode::OVERTAKE_LEFT,
+    overtake_planner::CandidateType::PASS_LEFT, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
+}
+
+TEST(BehaviorStateMachine, FeasibleRecoveryFromFreeRunEntersAbortRecovery)
+{
+  overtake_planner::PlannerConfig config;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+
+  const auto next = sm.update(
+    2.0, overtake_planner::BehaviorMode::FREE_RUN,
+    overtake_planner::CandidateType::RECOVERY, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::ABORT_RECOVERY);
 }
 
 TEST(BehaviorStateMachine, OvertakeTransitionsToYieldWhenGapIsLost)
@@ -135,6 +192,42 @@ TEST(BehaviorStateMachine, CornerYieldWaitsForWiderRejoinGap)
     overtake_planner::CandidateType::FOLLOW, info, true);
 
   EXPECT_EQ(next, overtake_planner::BehaviorMode::YIELD_BEHIND);
+}
+
+TEST(BehaviorStateMachine, FutureYieldHoldStaysUntilCornerClears)
+{
+  overtake_planner::PlannerConfig config;
+  config.corner_side_yield_curvature_m_inv = 0.06;
+  config.yield_rejoin_wall_clearance_m = 0.15;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.future_yield_required = true;
+  info.future_corner_side_by_side = true;
+  info.corner_abs_curvature = 0.08;
+  info.ego_wall_clearance_m = 0.5;
+
+  auto mode = sm.update(
+    2.0, overtake_planner::BehaviorMode::FREE_RUN,
+    overtake_planner::CandidateType::YIELD_BEHIND, info, true);
+  ASSERT_EQ(mode, overtake_planner::BehaviorMode::YIELD_BEHIND);
+  ASSERT_TRUE(sm.futureYieldHoldActive());
+
+  overtake_planner::BlockedInfo near_corner;
+  near_corner.corner_abs_curvature = 0.08;
+  near_corner.ego_wall_clearance_m = 0.5;
+  mode = sm.update(
+    2.1, mode, overtake_planner::CandidateType::FASTEST, near_corner, true);
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::YIELD_BEHIND);
+  EXPECT_TRUE(sm.futureYieldHoldActive());
+
+  overtake_planner::BlockedInfo after_corner;
+  after_corner.corner_abs_curvature = 0.0;
+  after_corner.ego_wall_clearance_m = 0.5;
+  mode = sm.update(
+    2.2, mode, overtake_planner::CandidateType::FASTEST, after_corner, true);
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::FREE_RUN);
+  EXPECT_FALSE(sm.futureYieldHoldActive());
 }
 
 TEST(BehaviorStateMachine, YieldWaitsUntilEgoHasWallClearance)

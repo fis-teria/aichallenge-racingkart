@@ -1,75 +1,66 @@
 #include "overtake_planner/overtake_planner_core.hpp"
 
+#include "overtake_planner/candidate_builder.hpp"
+#include "overtake_planner/planner_output_builder.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
 
-namespace overtake_planner
-{
+namespace overtake_planner {
 
-namespace
-{
+namespace {
 
-double smoothstep(double z)
-{
+double smoothstep(double z) {
   z = std::clamp(z, 0.0, 1.0);
   return z * z * (3.0 - 2.0 * z);
 }
 
 constexpr double kSideDirectionEpsilon = 0.05;
 
-bool isLeftPassMode(BehaviorMode mode)
-{
+bool isLeftPassMode(BehaviorMode mode) {
   return mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
          mode == BehaviorMode::OVERTAKE_LEFT;
 }
 
-bool isRightPassMode(BehaviorMode mode)
-{
+bool isRightPassMode(BehaviorMode mode) {
   return mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
          mode == BehaviorMode::OVERTAKE_RIGHT;
 }
 
-bool currentPassGapLost(BehaviorMode mode, const BlockedInfo & blocked_info)
-{
+bool currentPassGapLost(BehaviorMode mode, const BlockedInfo &blocked_info) {
   return (isLeftPassMode(mode) && !blocked_info.can_pass_left) ||
          (isRightPassMode(mode) && !blocked_info.can_pass_right);
 }
 
-bool isPassCandidate(CandidateType type)
-{
+bool isPassCandidate(CandidateType type) {
   return type == CandidateType::PASS_LEFT || type == CandidateType::PASS_RIGHT;
 }
 
-bool isFallbackCandidate(CandidateType type)
-{
-  return type == CandidateType::FOLLOW ||
-         type == CandidateType::YIELD_BEHIND ||
+bool isFallbackCandidate(CandidateType type) {
+  return type == CandidateType::FOLLOW || type == CandidateType::YIELD_BEHIND ||
          type == CandidateType::RECOVERY ||
          type == CandidateType::SIDE_BY_SIDE_KEEP;
 }
 
-bool hasFeasibleCandidate(
-  const std::vector<CandidateTrajectory> & candidates,
-  bool (*predicate)(CandidateType))
-{
-  return std::any_of(
-    candidates.begin(), candidates.end(),
-    [predicate](const CandidateTrajectory & candidate) {
-      return candidate.feasible && predicate(candidate.type);
-    });
+bool hasFeasibleCandidate(const std::vector<CandidateTrajectory> &candidates,
+                          bool (*predicate)(CandidateType)) {
+  return std::any_of(candidates.begin(), candidates.end(),
+                     [predicate](const CandidateTrajectory &candidate) {
+                       return candidate.feasible && predicate(candidate.type);
+                     });
 }
 
-bool isFeasibleReleaseCandidate(
-  const CandidateTrajectory & selected,
-  const BlockedInfo & blocked_info)
-{
+bool isFeasibleReleaseCandidate(const CandidateTrajectory &selected,
+                                const BlockedInfo &blocked_info) {
   if (!selected.feasible || selected.type == CandidateType::SAFE_STOP) {
     return false;
   }
-  if (!blocked_info.blocked && !blocked_info.side_by_side) {
-    return selected.type == CandidateType::FASTEST || selected.type == CandidateType::RECOVERY;
+  if (!blocked_info.blocked && !blocked_info.side_by_side &&
+      !blocked_info.future_yield_required) {
+    return selected.type == CandidateType::FASTEST ||
+           selected.type == CandidateType::RECOVERY;
   }
   return isPassCandidate(selected.type) ||
          selected.type == CandidateType::FOLLOW ||
@@ -78,31 +69,47 @@ bool isFeasibleReleaseCandidate(
 }
 
 bool hasFeasibleReleaseCandidate(
-  const std::vector<CandidateTrajectory> & candidates,
-  const BlockedInfo & blocked_info)
-{
-  return std::any_of(
-    candidates.begin(), candidates.end(),
-    [&blocked_info](const CandidateTrajectory & candidate) {
-      return isFeasibleReleaseCandidate(candidate, blocked_info);
-    });
+    const std::vector<CandidateTrajectory> &candidates,
+    const BlockedInfo &blocked_info) {
+  return std::any_of(candidates.begin(), candidates.end(),
+                     [&blocked_info](const CandidateTrajectory &candidate) {
+                       return isFeasibleReleaseCandidate(candidate,
+                                                         blocked_info);
+                     });
 }
 
-}  // namespace
-
-OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame, PlannerConfig config)
-: frame_(std::move(frame)),
-  config_(config),
-  safety_(config),
-  state_machine_(config)
-{
+double signedDeltaS(double ego_s, double other_s, double track_length) {
+  double signed_delta_s = other_s - ego_s;
+  if (track_length > 0.0) {
+    signed_delta_s = std::fmod(signed_delta_s, track_length);
+    if (signed_delta_s > track_length * 0.5) {
+      signed_delta_s -= track_length;
+    } else if (signed_delta_s < -track_length * 0.5) {
+      signed_delta_s += track_length;
+    }
+  }
+  return signed_delta_s;
 }
 
-PlannerOutput OvertakePlannerCore::update(
-  double now_sec,
-  const EgoState & ego,
-  const std::vector<OpponentState> & opponents)
-{
+int sideRiskIndex(const BlockedInfo &info) {
+  return info.side_index >= 0 ? info.side_index : info.parallel_side_index;
+}
+
+int yieldTargetIndex(const BlockedInfo &info) {
+  return info.nearest_index >= 0 ? info.nearest_index : sideRiskIndex(info);
+}
+
+} // namespace
+
+OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame,
+                                         PlannerConfig config)
+    : frame_(std::move(frame)), config_(config), safety_(config),
+      state_machine_(config) {}
+
+PlannerOutput
+OvertakePlannerCore::update(double now_sec, const EgoState &ego,
+                            const std::vector<OpponentState> &opponents,
+                            const MpcHealthStatus &mpc_health) {
   // デフォルトはMPCの元参照をそのまま使う。安全に判断できる時だけoverrideを有効化する。
   PlannerOutput output;
   output.lateral_offsets.assign(config_.horizon_points, 0.0);
@@ -117,73 +124,150 @@ PlannerOutput OvertakePlannerCore::update(
     return output;
   }
 
+  const ActiveSectionSafety active_section = activeSectionSafety(ego.frenet.s);
+  const double wall_soft_margin = effectiveWallSoftMargin(active_section);
   BlockedInfo blocked = detectBlocked(ego, opponents, now_sec);
   const auto predictions = predictOpponents(opponents, now_sec);
   blocked = evaluatePassGap(blocked, opponents, predictions);
   blocked.corner_abs_curvature =
-    maxAbsCurvatureAhead(ego.frenet.s, config_.corner_side_yield_lookahead_m);
+      maxAbsCurvatureAhead(ego.frenet.s, config_.corner_side_yield_lookahead_m);
   blocked.corner_side_by_side =
-    blocked.side_by_side &&
-    config_.corner_side_yield_curvature_m_inv > 0.0 &&
-    blocked.corner_abs_curvature >= config_.corner_side_yield_curvature_m_inv;
+      blocked.side_by_side && config_.corner_side_yield_curvature_m_inv > 0.0 &&
+      blocked.corner_abs_curvature >= config_.corner_side_yield_curvature_m_inv;
+  blocked.overtake_start_abs_curvature =
+      maxAbsCurvatureAhead(ego.frenet.s, config_.straight_overtake_lookahead_m);
+  blocked.straight_overtake_start_allowed = true;
+  if (config_.straight_only_overtake_enabled &&
+      config_.straight_overtake_max_curvature_m_inv > 0.0) {
+    const double close_threshold =
+        std::max(0.0, config_.straight_overtake_max_curvature_m_inv);
+    const double open_threshold = std::max(
+        0.0, close_threshold -
+                 std::max(0.0,
+                          config_.straight_overtake_release_hysteresis_m_inv));
+    if (straight_overtake_start_allowed_) {
+      straight_overtake_start_allowed_ =
+          blocked.overtake_start_abs_curvature <= close_threshold;
+    } else {
+      straight_overtake_start_allowed_ =
+          blocked.overtake_start_abs_curvature <= open_threshold;
+    }
+    blocked.straight_overtake_start_allowed =
+        straight_overtake_start_allowed_;
+    if (!blocked.straight_overtake_start_allowed) {
+      blocked.overtake_start_gate_reason = "curve";
+    }
+  } else {
+    straight_overtake_start_allowed_ = true;
+  }
   blocked.ego_wall_clearance_m = wallClearance(ego.frenet.d);
+  blocked = evaluateFutureSideBySideRisk(ego, blocked, opponents);
+  if (active_section.force_outer_yield &&
+      (blocked.side_by_side || blocked.parallel_side_candidate ||
+       blocked.future_side_by_side) &&
+      blocked.ego_wall_clearance_m <= wall_soft_margin) {
+    blocked.future_yield_required = true;
+    blocked.future_corner_side_by_side = true;
+    blocked.future_outer_wall_risk = true;
+    if (blocked.yield_reason.empty()) {
+      blocked.yield_reason = "section_outer_yield";
+    }
+  }
+  const bool large_lateral_error =
+      config_.large_lateral_error_threshold_m >= 0.0 &&
+      std::abs(ego.frenet.d) > config_.large_lateral_error_threshold_m;
+  const bool freeze_overtake_decisions =
+      large_lateral_error &&
+      (blocked.ego_wall_clearance_m < wall_soft_margin || blocked.blocked ||
+       blocked.side_by_side || blocked.parallel_side_candidate ||
+       blocked.future_side_by_side || blocked.future_yield_required ||
+       currentPassGapLost(mode_, blocked));
+  if (freeze_overtake_decisions) {
+    blocked.can_pass_left = false;
+    blocked.can_pass_right = false;
+    if (blocked.pass_gap_reason.empty() || blocked.pass_gap_reason == "ok") {
+      blocked.pass_gap_reason = "large_lateral_error";
+    }
+  }
 
   // まず全状況でFASTEST候補を作り、閉塞時だけ追従/左右追い越し候補を増やす。
   std::vector<CandidateTrajectory> candidates;
-  candidates.push_back(makeCandidate(CandidateType::FASTEST, ego, blocked, opponents));
-  if (blocked.side_by_side && !blocked.corner_side_by_side) {
-    candidates.push_back(makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego, blocked, opponents));
-  }
-  if (shouldYieldBehindSideBySide(ego, blocked)) {
-    candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
-  }
-  if (blocked.blocked) {
-    candidates.push_back(makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents));
-    if (blocked.can_pass_left) {
-      candidates.push_back(makeCandidate(CandidateType::PASS_LEFT, ego, blocked, opponents));
+  candidates.push_back(
+      makeCandidate(CandidateType::FASTEST, ego, blocked, opponents));
+  if (freeze_overtake_decisions) {
+    candidates.push_back(
+        makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
+  } else {
+    if (blocked.side_by_side && !blocked.corner_side_by_side &&
+        !blocked.future_yield_required) {
+      candidates.push_back(makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego,
+                                         blocked, opponents));
     }
-    if (blocked.can_pass_right) {
-      candidates.push_back(makeCandidate(CandidateType::PASS_RIGHT, ego, blocked, opponents));
+    if (shouldYieldBehindSideBySide(ego, blocked)) {
+      candidates.push_back(
+          makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
     }
-    if (!blocked.can_pass_left && !blocked.can_pass_right) {
-      candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
+    if (blocked.blocked) {
+      candidates.push_back(
+          makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents));
+      if (blocked.can_pass_left) {
+        candidates.push_back(
+            makeCandidate(CandidateType::PASS_LEFT, ego, blocked, opponents));
+      }
+      if (blocked.can_pass_right) {
+        candidates.push_back(
+            makeCandidate(CandidateType::PASS_RIGHT, ego, blocked, opponents));
+      }
+      if (!blocked.can_pass_left && !blocked.can_pass_right) {
+        candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego,
+                                           blocked, opponents));
+      }
     }
   }
   if (currentPassGapLost(mode_, blocked)) {
-    candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
+    candidates.push_back(
+        makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
   }
   if (isPassMode(mode_) || mode_ == BehaviorMode::ABORT_RECOVERY) {
     // 追い越し中や中止中は、中心線へ戻るRECOVERY候補も常に評価する。
-    candidates.push_back(makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
+    candidates.push_back(
+        makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
   }
   const bool needs_safe_stop_fallback_check =
-    config_.safe_stop_enabled &&
-    (blocked.blocked || blocked.side_by_side || currentPassGapLost(mode_, blocked));
-  const bool has_recovery_candidate = std::any_of(
-    candidates.begin(), candidates.end(),
-    [](const CandidateTrajectory & candidate) {
-      return candidate.type == CandidateType::RECOVERY;
-    });
+      config_.safe_stop_enabled &&
+      (blocked.blocked || blocked.side_by_side ||
+       blocked.future_yield_required || currentPassGapLost(mode_, blocked));
+  const bool has_recovery_candidate =
+      std::any_of(candidates.begin(), candidates.end(),
+                  [](const CandidateTrajectory &candidate) {
+                    return candidate.type == CandidateType::RECOVERY;
+                  });
   if (needs_safe_stop_fallback_check && !has_recovery_candidate) {
     // SAFE_STOP判定前に、通常fallbackであるRECOVERYも必ず安全評価へ含める。
-    candidates.push_back(makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
+    candidates.push_back(
+        makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
   }
 
-  for (auto & candidate : candidates) {
+  for (auto &candidate : candidates) {
     // 壁/他車との安全余裕を見てから、目的に応じたスコアを付ける。
     safety_.evaluate(candidate, predictions);
     candidate.score = candidateScore(candidate, blocked);
+    if (freeze_overtake_decisions) {
+      candidate.score =
+          candidate.type == CandidateType::RECOVERY ? -100.0 : 1000.0;
+    }
   }
 
-  const bool no_feasible_pass = !hasFeasibleCandidate(candidates, isPassCandidate);
-  const bool no_feasible_fallback = !hasFeasibleCandidate(candidates, isFallbackCandidate);
+  const bool no_feasible_pass =
+      !hasFeasibleCandidate(candidates, isPassCandidate);
+  const bool no_feasible_fallback =
+      !hasFeasibleCandidate(candidates, isFallbackCandidate);
   const bool safe_stop_base_condition =
-    config_.safe_stop_enabled &&
-    (blocked.blocked || blocked.side_by_side || currentPassGapLost(mode_, blocked)) &&
-    !blocked.can_pass_left &&
-    !blocked.can_pass_right &&
-    no_feasible_pass &&
-    no_feasible_fallback;
+      config_.safe_stop_enabled &&
+      (blocked.blocked || blocked.side_by_side ||
+       blocked.future_yield_required || currentPassGapLost(mode_, blocked)) &&
+      !blocked.can_pass_left && !blocked.can_pass_right && no_feasible_pass &&
+      no_feasible_fallback;
 
   if (safe_stop_base_condition) {
     ++safe_stop_trigger_count_;
@@ -191,54 +275,71 @@ PlannerOutput OvertakePlannerCore::update(
     safe_stop_trigger_count_ = 0;
   }
 
-  const int safe_stop_trigger_cycles_required = std::max(1, config_.safe_stop_trigger_cycles);
+  const int safe_stop_trigger_cycles_required =
+      std::max(1, config_.safe_stop_trigger_cycles);
   SafeStopContext safe_stop_context;
   safe_stop_context.requested =
-    safe_stop_base_condition &&
-    safe_stop_trigger_count_ >= safe_stop_trigger_cycles_required;
+      safe_stop_base_condition &&
+      safe_stop_trigger_count_ >= safe_stop_trigger_cycles_required;
   safe_stop_context.trigger_count = safe_stop_trigger_count_;
   safe_stop_context.ego_speed_mps = ego.v;
-  const double safe_stop_target_d = std::clamp(
-    ego.frenet.d,
-    config_.d_min_m + config_.min_wall_margin_m,
-    config_.d_max_m - config_.min_wall_margin_m);
-  safe_stop_context.lateral_error_m = std::abs(ego.frenet.d - safe_stop_target_d);
+  const double safe_stop_target_d =
+      std::clamp(ego.frenet.d, config_.d_min_m + config_.min_wall_margin_m,
+                 config_.d_max_m - config_.min_wall_margin_m);
+  safe_stop_context.lateral_error_m =
+      std::abs(ego.frenet.d - safe_stop_target_d);
 
   bool safe_stop_candidate_infeasible = false;
-  bool safe_stop_request_infeasible = false;
   CandidateTrajectory safe_stop_candidate;
   if (safe_stop_context.requested || mode_ == BehaviorMode::SAFE_STOP) {
     // STOP要求時とSTOP保持中は、停止候補自体の安全性も毎周期確認する。
-    safe_stop_candidate = makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
+    safe_stop_candidate =
+        makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
     safety_.evaluate(safe_stop_candidate, predictions);
     safe_stop_candidate.score = candidateScore(safe_stop_candidate, blocked);
     safe_stop_context.candidate_feasible = safe_stop_candidate.feasible;
-    safe_stop_context.reason = safe_stop_candidate.feasible ?
-      "no_pass_and_no_safe_fallback" : "safe_stop_infeasible";
+    safe_stop_context.reason = safe_stop_candidate.feasible
+                                   ? "no_pass_and_no_safe_fallback"
+                                   : "safe_stop_infeasible";
     if (safe_stop_context.requested && safe_stop_candidate.feasible) {
       candidates.push_back(safe_stop_candidate);
     } else if (!safe_stop_candidate.feasible) {
       safe_stop_candidate_infeasible = true;
-      safe_stop_request_infeasible = safe_stop_context.requested;
     }
   }
 
   CandidateTrajectory selected = selectCandidate(candidates);
   const bool release_front_gap_ready =
-    blocked.nearest_index < 0 ||
-    blocked.front_delta_s >= config_.safe_stop_release_front_gap_m;
+      blocked.nearest_index < 0 ||
+      blocked.front_delta_s >= config_.safe_stop_release_front_gap_m;
   safe_stop_context.release_ready =
-    ego.valid &&
-    blocked.ego_wall_clearance_m >= config_.safe_stop_release_wall_clearance_m &&
-    !blocked.side_by_side &&
-    release_front_gap_ready &&
-    hasFeasibleReleaseCandidate(candidates, blocked) &&
-    ego.v <= config_.safe_stop_release_speed_mps &&
-    safe_stop_context.lateral_error_m <= config_.safe_stop_lateral_error_threshold_m;
+      ego.valid &&
+      blocked.ego_wall_clearance_m >=
+          config_.safe_stop_release_wall_clearance_m &&
+      !blocked.side_by_side && !blocked.future_yield_required &&
+      release_front_gap_ready &&
+      hasFeasibleReleaseCandidate(candidates, blocked) &&
+      ego.v <= config_.safe_stop_release_speed_mps &&
+      safe_stop_context.lateral_error_m <=
+          config_.safe_stop_lateral_error_threshold_m;
 
   // 候補選択だけで急にモードを切り替えず、状態機械で保持時間や継続条件をかける。
-  mode_ = state_machine_.update(
-    now_sec, mode_, selected.type, blocked, selected.feasible, safe_stop_context);
+  mode_ = state_machine_.update(now_sec, mode_, selected.type, blocked,
+                                selected.feasible, safe_stop_context);
+  if (mode_ == BehaviorMode::YIELD_BEHIND &&
+      state_machine_.futureYieldHoldActive()) {
+    const bool corner_still_relevant =
+        config_.corner_side_yield_curvature_m_inv > 0.0 &&
+        blocked.corner_abs_curvature >=
+            config_.corner_side_yield_curvature_m_inv;
+    blocked.future_yield_required = true;
+    blocked.future_corner_side_by_side = blocked.future_corner_side_by_side ||
+                                         blocked.corner_side_by_side ||
+                                         corner_still_relevant;
+    if (blocked.yield_reason.empty()) {
+      blocked.yield_reason = "future_yield_hold";
+    }
+  }
   if (mode_ == BehaviorMode::SAFE_STOP) {
     selected = makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
     safety_.evaluate(selected, predictions);
@@ -250,17 +351,21 @@ PlannerOutput OvertakePlannerCore::update(
     selected = makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
     safety_.evaluate(selected, predictions);
   } else if (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP) {
-    selected = makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego, blocked, opponents);
+    selected = makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego, blocked,
+                             opponents);
     safety_.evaluate(selected, predictions);
   } else if (mode_ == BehaviorMode::YIELD_BEHIND) {
-    selected = makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents);
+    selected =
+        makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents);
     safety_.evaluate(selected, predictions);
-  } else if (mode_ == BehaviorMode::FOLLOW_BLOCKED && selected.type != CandidateType::FOLLOW) {
+  } else if (mode_ == BehaviorMode::FOLLOW_BLOCKED &&
+             selected.type != CandidateType::FOLLOW) {
     // 追従モードでは速度上限だけを落とすFOLLOW候補を優先する。
     selected = makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents);
     safety_.evaluate(selected, predictions);
     if (!selected.feasible) {
-      selected = makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
+      selected =
+          makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
       safety_.evaluate(selected, predictions);
     }
   } else if (mode_ == BehaviorMode::FREE_RUN) {
@@ -268,101 +373,88 @@ PlannerOutput OvertakePlannerCore::update(
     safety_.evaluate(selected, predictions);
   }
 
-  output.mode = mode_;
   // ROSノードがMPC overrideとdebug JSONを作れるよう、選択結果を平坦な出力に詰める。
-  output.selected = selected.type;
-  output.blocked_info = blocked;
-  output.reason = selected.reject_reason;
-  output.safe_stop_triggered =
-    safe_stop_context.requested || mode_ == BehaviorMode::SAFE_STOP;
-  output.safe_stop_release_ready = safe_stop_context.release_ready;
-  output.safe_stop_v_mps = std::max(1.0e-3, config_.safe_stop_v_mps);
-  output.safe_stop_trigger_count = safe_stop_trigger_count_;
-  output.safe_stop_hold_count = state_machine_.safeStopHoldCount();
-  output.safe_stop_release_count = state_machine_.safeStopReleaseCount();
-  if (mode_ == BehaviorMode::SAFE_STOP) {
-    if (!selected.feasible) {
-      output.safe_stop_reason = "safe_stop_infeasible";
-      output.safe_stop_reject_reason = selected.reject_reason;
-    } else if (safe_stop_context.requested && output.safe_stop_hold_count <= 1) {
-      output.safe_stop_reason = "no_pass_and_no_safe_fallback";
-    } else if (safe_stop_context.release_ready) {
-      output.safe_stop_reason = "safe_stop_release_pending";
-    } else {
-      output.safe_stop_reason = "safe_stop_holding";
-    }
-  } else if (safe_stop_candidate_infeasible) {
-    output.safe_stop_triggered = true;
-    output.safe_stop_reason = "safe_stop_infeasible";
-    output.safe_stop_reject_reason = safe_stop_candidate.reject_reason;
-  }
-  if (!output.safe_stop_reason.empty()) {
-    output.reason = output.safe_stop_reason == "no_pass_and_no_safe_fallback" ?
-      "no_safe_avoidance" : output.safe_stop_reason;
-  }
-  const bool side_by_side_best_effort =
-    selected.type == CandidateType::SIDE_BY_SIDE_KEEP &&
-    selected.reject_reason == "opponent_collision";
-  const bool yield_best_effort =
-    selected.type == CandidateType::YIELD_BEHIND &&
-    selected.reject_reason == "opponent_collision";
-  const bool wall_margin_escape =
-    selected.reject_reason == "wall_margin" &&
-    selected.type == CandidateType::YIELD_BEHIND;
-  const double selected_target_d = selected.d.empty() ? ego.frenet.d : selected.d.back();
-  if (selected.type == CandidateType::SAFE_STOP) {
-    output.active_override = selected.feasible;
-  } else {
-    output.active_override =
-      selected.type != CandidateType::FASTEST &&
-      !safe_stop_request_infeasible &&
-      (selected.feasible || side_by_side_best_effort || yield_best_effort || wall_margin_escape);
-  }
-  output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected_target_d;
-  output.min_cbf_h = selected.min_safety_margin;
-  output.cbf_slack = selected.cbf_slack;
-  output.active_cbf_constraint_count = selected.active_safety_constraint_count;
-  output.lateral_offsets = selected.d;
-  output.speed_caps = selected.v_ref;
-  return output;
+  return PlannerOutputBuilder(config_).build(PlannerOutputBuildInput{
+      mode_,
+      ego,
+      selected,
+      blocked,
+      safe_stop_context,
+      safe_stop_candidate,
+      safe_stop_candidate_infeasible,
+      safe_stop_trigger_count_,
+      state_machine_.safeStopHoldCount(),
+      state_machine_.safeStopReleaseCount(),
+      wall_soft_margin,
+      active_section,
+      mpc_health});
 }
 
-BlockedInfo OvertakePlannerCore::detectBlocked(
-  const EgoState & ego,
-  const std::vector<OpponentState> & opponents,
-  double now_sec) const
-{
+BlockedInfo
+OvertakePlannerCore::detectBlocked(const EgoState &ego,
+                                   const std::vector<OpponentState> &opponents,
+                                   double now_sec) const {
   // 同一コリドー内の最も近い前方車両を探し、速度差/距離から閉塞を判断する。
   BlockedInfo info;
   for (std::size_t i = 0; i < opponents.size(); ++i) {
-    const auto & opp = opponents[i];
-    if (!opp.valid || now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
+    const auto &opp = opponents[i];
+    if (!opp.valid ||
+        now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
       continue;
     }
     const double delta_s = frame_.deltaS(ego.frenet.s, opp.frenet.s);
-    double signed_delta_s = opp.frenet.s - ego.frenet.s;
-    if (frame_.length() > 0.0) {
-      signed_delta_s = std::fmod(signed_delta_s, frame_.length());
-      if (signed_delta_s > frame_.length() * 0.5) {
-        signed_delta_s -= frame_.length();
-      } else if (signed_delta_s < -frame_.length() * 0.5) {
-        signed_delta_s += frame_.length();
-      }
+    const double signed_delta_s =
+        signedDeltaS(ego.frenet.s, opp.frenet.s, frame_.length());
+    const double s_dot = opponentSDot(opp);
+    const bool direction_known = opp.v >= config_.same_direction_min_speed_mps;
+    const bool same_direction =
+        !direction_known || s_dot >= config_.same_direction_min_s_dot_mps;
+    if (config_.same_direction_filter_enabled && direction_known &&
+        !same_direction) {
+      ++info.ignored_opposite_direction_count;
+      continue;
     }
     const double delta_d = opp.frenet.d - ego.frenet.d;
     const bool front = delta_s > 0.0 && delta_s < config_.lookahead_s_m;
-    const bool same_corridor = std::abs(delta_d) < config_.same_corridor_width_m;
-    const bool side_by_side = std::abs(signed_delta_s) < config_.side_by_side_s_m &&
-      std::abs(delta_d) < config_.side_margin_m;
+    const bool same_corridor =
+        std::abs(delta_d) < config_.same_corridor_width_m;
+    const bool side_by_side =
+        std::abs(signed_delta_s) < config_.side_by_side_s_m &&
+        std::abs(delta_d) < config_.side_margin_m;
+    const bool parallel_side_candidate =
+        config_.parallel_side_detection_enabled && !side_by_side &&
+        config_.parallel_side_s_m > 0.0 &&
+        config_.parallel_side_margin_m > 0.0 &&
+        std::abs(signed_delta_s) < config_.parallel_side_s_m &&
+        std::abs(delta_d) < config_.parallel_side_margin_m;
     if (side_by_side) {
       // 横並び中は不用意なmerge backを避けるため、状態機械へ明示的に伝える。
       info.side_by_side = true;
-      if (info.side_index < 0 || std::abs(signed_delta_s) < std::abs(info.side_delta_s)) {
+      if (info.side_index < 0 ||
+          std::abs(signed_delta_s) < std::abs(info.side_delta_s)) {
         info.side_index = static_cast<int>(i);
         info.side_id = opp.id;
         info.side_delta_s = signed_delta_s;
         info.side_delta_d = delta_d;
         info.side_rel_v = ego.v - opp.v;
+        info.side_s_dot_mps = s_dot;
+        info.side_direction_known = direction_known;
+        info.side_same_direction = same_direction;
+      }
+    }
+    if (parallel_side_candidate) {
+      // スタート直後の別ライン並走など、通常の横並び幅より広いがコーナーで収束し得る相手。
+      info.parallel_side_candidate = true;
+      if (info.parallel_side_index < 0 ||
+          std::abs(signed_delta_s) < std::abs(info.parallel_side_delta_s)) {
+        info.parallel_side_index = static_cast<int>(i);
+        info.parallel_side_id = opp.id;
+        info.parallel_side_delta_s = signed_delta_s;
+        info.parallel_side_delta_d = delta_d;
+        info.parallel_side_rel_v = ego.v - opp.v;
+        info.parallel_side_s_dot_mps = s_dot;
+        info.parallel_side_direction_known = direction_known;
+        info.parallel_side_same_direction = same_direction;
       }
     }
     if (!front || !same_corridor) {
@@ -374,6 +466,9 @@ BlockedInfo OvertakePlannerCore::detectBlocked(
       info.front_delta_s = delta_s;
       info.front_delta_d = delta_d;
       info.front_rel_v = ego.v - opp.v;
+      info.front_s_dot_mps = s_dot;
+      info.front_direction_known = direction_known;
+      info.front_same_direction = same_direction;
     }
   }
 
@@ -387,18 +482,19 @@ BlockedInfo OvertakePlannerCore::detectBlocked(
 }
 
 BlockedInfo OvertakePlannerCore::evaluatePassGap(
-  const BlockedInfo & blocked_info,
-  const std::vector<OpponentState> & opponents,
-  const std::vector<PredictedOpponent> & predictions) const
-{
+    const BlockedInfo &blocked_info,
+    const std::vector<OpponentState> &opponents,
+    const std::vector<PredictedOpponent> &predictions) const {
   BlockedInfo out = blocked_info;
   const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
   const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
-  const double ellipse_gap = config_.safety_ellipse_b_m * std::sqrt(1.0 + config_.min_ellipse_h);
+  const double ellipse_gap =
+      config_.safety_ellipse_b_m * std::sqrt(1.0 + config_.min_ellipse_h);
   out.pass_gap_required_m = std::max(config_.min_pass_gap_m, ellipse_gap);
 
-  const int target_index = out.nearest_index >= 0 ? out.nearest_index : out.side_index;
-  if (target_index < 0 || static_cast<std::size_t>(target_index) >= opponents.size()) {
+  const int target_index = yieldTargetIndex(out);
+  if (target_index < 0 ||
+      static_cast<std::size_t>(target_index) >= opponents.size()) {
     out.left_pass_gap_m = 0.0;
     out.right_pass_gap_m = 0.0;
     out.can_pass_left = false;
@@ -407,11 +503,11 @@ BlockedInfo OvertakePlannerCore::evaluatePassGap(
     return out;
   }
 
-  const auto & target = opponents[static_cast<std::size_t>(target_index)];
+  const auto &target = opponents[static_cast<std::size_t>(target_index)];
   double min_left_gap = upper_d - target.frenet.d;
   double min_right_gap = target.frenet.d - lower_d;
 
-  for (const auto & pred : predictions) {
+  for (const auto &pred : predictions) {
     if (pred.id != target.id) {
       continue;
     }
@@ -425,9 +521,11 @@ BlockedInfo OvertakePlannerCore::evaluatePassGap(
   out.left_pass_gap_m = min_left_gap;
   out.right_pass_gap_m = min_right_gap;
   const double left_threshold =
-    out.pass_gap_required_m - (isLeftPassMode(mode_) ? config_.pass_gap_hysteresis_m : 0.0);
+      out.pass_gap_required_m -
+      (isLeftPassMode(mode_) ? config_.pass_gap_hysteresis_m : 0.0);
   const double right_threshold =
-    out.pass_gap_required_m - (isRightPassMode(mode_) ? config_.pass_gap_hysteresis_m : 0.0);
+      out.pass_gap_required_m -
+      (isRightPassMode(mode_) ? config_.pass_gap_hysteresis_m : 0.0);
   out.can_pass_left = min_left_gap >= left_threshold;
   out.can_pass_right = min_right_gap >= right_threshold;
 
@@ -444,13 +542,12 @@ BlockedInfo OvertakePlannerCore::evaluatePassGap(
 }
 
 std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
-  const std::vector<OpponentState> & opponents,
-  double now_sec) const
-{
+    const std::vector<OpponentState> &opponents, double now_sec) const {
   // V2X位置から推定した速度を使い、短いhorizonでは等速直線運動として予測する。
   std::vector<PredictedOpponent> out;
-  for (const auto & opp : opponents) {
-    if (!opp.valid || now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
+  for (const auto &opp : opponents) {
+    if (!opp.valid ||
+        now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
       continue;
     }
     PredictedOpponent pred;
@@ -471,224 +568,241 @@ std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
   return out;
 }
 
-CandidateTrajectory OvertakePlannerCore::makeCandidate(
-  CandidateType type,
-  const EgoState & ego,
-  const BlockedInfo & blocked_info,
-  const std::vector<OpponentState> & opponents) const
-{
-  // 候補ごとに目標横オフセットと速度上限を決め、Frenet上で滑らかに接続する。
-  CandidateTrajectory candidate;
-  candidate.type = type;
-  candidate.t.reserve(config_.horizon_points);
-  candidate.s.reserve(config_.horizon_points);
-  candidate.d.reserve(config_.horizon_points);
-  candidate.x.reserve(config_.horizon_points);
-  candidate.y.reserve(config_.horizon_points);
-  candidate.yaw.reserve(config_.horizon_points);
-  candidate.v_ref.reserve(config_.horizon_points);
+BlockedInfo OvertakePlannerCore::evaluateFutureSideBySideRisk(
+    const EgoState &ego, const BlockedInfo &blocked_info,
+    const std::vector<OpponentState> &opponents) const {
+  BlockedInfo out = blocked_info;
+  const int target_index = sideRiskIndex(out);
+  if (!config_.future_side_prediction_enabled || target_index < 0 ||
+      static_cast<std::size_t>(target_index) >= opponents.size()) {
+    return out;
+  }
 
-  double target_d = 0.0;
-  double shift_distance = config_.merge_distance_m;
+  const bool exact_side_target = out.side_index >= 0;
+  const auto &opp = opponents[static_cast<std::size_t>(target_index)];
+  const bool direction_known = exact_side_target
+                                   ? out.side_direction_known
+                                   : out.parallel_side_direction_known;
+  const bool same_direction = exact_side_target
+                                  ? out.side_same_direction
+                                  : out.parallel_side_same_direction;
+  if (direction_known && !same_direction) {
+    return out;
+  }
+  const double target_delta_d =
+      exact_side_target ? out.side_delta_d : out.parallel_side_delta_d;
+  const double target_s_dot =
+      exact_side_target ? out.side_s_dot_mps : out.parallel_side_s_dot_mps;
+  const double future_side_s_m =
+      exact_side_target
+          ? config_.side_by_side_s_m
+          : std::max(config_.side_by_side_s_m, config_.parallel_side_s_m);
+  const double future_side_margin_m =
+      exact_side_target
+          ? config_.side_margin_m
+          : std::max(config_.side_margin_m, config_.parallel_side_margin_m);
+
   const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
   const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
-  if (type == CandidateType::PASS_LEFT) {
-    // 左右PASSは中心線から一定量オフセットした仮想参照をMPCへ渡す。
-    target_d = config_.left_offset_m;
-    shift_distance = config_.prepare_distance_m;
-  } else if (type == CandidateType::PASS_RIGHT) {
-    target_d = config_.right_offset_m;
-    shift_distance = config_.prepare_distance_m;
-  } else if (type == CandidateType::FOLLOW) {
-    target_d = 0.0;
-  } else if (type == CandidateType::RECOVERY) {
-    target_d = 0.0;
-  } else if (type == CandidateType::SIDE_BY_SIDE_KEEP) {
-    target_d = ego.frenet.d;
-    shift_distance = config_.side_by_side_shift_distance_m;
-    if (blocked_info.side_index >= 0) {
-      const auto & opp = opponents[static_cast<std::size_t>(blocked_info.side_index)];
-      const double left_space = upper_d - ego.frenet.d;
-      const double right_space = ego.frenet.d - lower_d;
-      double away_sign = 0.0;
-      if (std::abs(blocked_info.side_delta_d) > kSideDirectionEpsilon) {
-        away_sign = blocked_info.side_delta_d > 0.0 ? -1.0 : 1.0;
-      } else {
-        away_sign = left_space >= right_space ? 1.0 : -1.0;
+  const double left_space = upper_d - ego.frenet.d;
+  const double right_space = ego.frenet.d - lower_d;
+  double away_sign = 0.0;
+  if (std::abs(target_delta_d) > kSideDirectionEpsilon) {
+    away_sign = target_delta_d > 0.0 ? -1.0 : 1.0;
+  } else {
+    away_sign = left_space >= right_space ? 1.0 : -1.0;
+  }
+  const double gap_target =
+      opp.frenet.d + away_sign * config_.side_by_side_target_gap_m;
+  double side_keep_target_d = away_sign > 0.0
+                                  ? std::max(ego.frenet.d, gap_target)
+                                  : std::min(ego.frenet.d, gap_target);
+  side_keep_target_d = std::clamp(side_keep_target_d, lower_d, upper_d);
+
+  const double horizon_sec =
+      std::max(0.0, config_.future_side_prediction_horizon_sec);
+  const double dt_sec = std::max(1.0e-3, config_.future_side_prediction_dt_sec);
+  const double s_dot = target_s_dot;
+  const double ego_speed = std::max(0.0, ego.v);
+  double best_clearance = std::numeric_limits<double>::infinity();
+  double max_future_curvature = 0.0;
+  bool found_future_side = false;
+  bool found_future_corner = false;
+  bool found_outer_wall_risk = false;
+
+  for (double t = dt_sec; t <= horizon_sec + 1.0e-9; t += dt_sec) {
+    const double ego_s = frame_.wrapS(ego.frenet.s + ego_speed * t);
+    const double opp_s = frame_.wrapS(opp.frenet.s + s_dot * t);
+    const double progress = ego_speed * t;
+    const double ratio = smoothstep(
+        progress / std::max(1.0, config_.side_by_side_shift_distance_m));
+    const double ego_d =
+        ego.frenet.d + (side_keep_target_d - ego.frenet.d) * ratio;
+    const double opp_d = opp.frenet.d;
+    const double delta_s = signedDeltaS(ego_s, opp_s, frame_.length());
+    const double delta_d = opp_d - ego_d;
+    const bool future_side = std::abs(delta_s) < future_side_s_m &&
+                             std::abs(delta_d) < future_side_margin_m;
+    const double future_curvature =
+        maxAbsCurvatureAhead(ego_s, config_.corner_side_yield_lookahead_m);
+    const bool future_corner =
+        future_side && config_.corner_side_yield_curvature_m_inv > 0.0 &&
+        future_curvature >= config_.corner_side_yield_curvature_m_inv;
+    const double clearance = wallClearance(ego_d);
+    const double target_clearance = wallClearance(side_keep_target_d);
+    const double effective_clearance = std::min(clearance, target_clearance);
+    const bool outer_wall_risk =
+        future_side &&
+        effective_clearance < config_.future_side_yield_wall_clearance_m;
+
+    if (future_side) {
+      found_future_side = true;
+      if (future_corner) {
+        found_future_corner = true;
       }
-      const double gap_target =
-        opp.frenet.d + away_sign * config_.side_by_side_target_gap_m;
-      target_d = away_sign > 0.0 ?
-        std::max(ego.frenet.d, gap_target) :
-        std::min(ego.frenet.d, gap_target);
-      target_d = std::clamp(target_d, lower_d, upper_d);
+      if (outer_wall_risk) {
+        found_outer_wall_risk = true;
+      }
+      max_future_curvature = std::max(max_future_curvature, future_curvature);
+      if (effective_clearance < best_clearance) {
+        best_clearance = effective_clearance;
+        out.future_delta_s = delta_s;
+        out.future_delta_d = delta_d;
+        out.future_wall_clearance_m = effective_clearance;
+        out.future_abs_curvature = future_curvature;
+        out.predicted_opponent_s = opp_s;
+        out.predicted_opponent_d = opp_d;
+        out.future_prediction_time_sec = t;
+      }
     }
-  } else if (type == CandidateType::YIELD_BEHIND) {
-    const int target_index =
-      blocked_info.nearest_index >= 0 ? blocked_info.nearest_index : blocked_info.side_index;
-    target_d = std::clamp(config_.corner_yield_target_d_m, lower_d, upper_d);
-    if (
-      !blocked_info.corner_side_by_side &&
-      wallClearance(ego.frenet.d) >= config_.yield_rejoin_wall_clearance_m &&
-      target_index >= 0 && static_cast<std::size_t>(target_index) < opponents.size()) {
-      const auto & opp = opponents[static_cast<std::size_t>(target_index)];
-      target_d = std::clamp(opp.frenet.d, lower_d, upper_d);
+
+    if (future_side && future_corner &&
+        (effective_clearance < config_.future_side_yield_wall_clearance_m ||
+         outer_wall_risk)) {
+      out.future_side_by_side = true;
+      out.future_corner_side_by_side = true;
+      out.future_outer_wall_risk = outer_wall_risk;
+      out.future_yield_required = true;
+      out.future_delta_s = delta_s;
+      out.future_delta_d = delta_d;
+      out.future_wall_clearance_m = effective_clearance;
+      out.future_abs_curvature = future_curvature;
+      out.predicted_opponent_s = opp_s;
+      out.predicted_opponent_d = opp_d;
+      out.future_prediction_time_sec = t;
+      out.yield_reason =
+          outer_wall_risk ? "future_outer_wall_risk" : "future_wall_clearance";
+      return out;
     }
-  } else if (type == CandidateType::SAFE_STOP) {
-    target_d = std::clamp(ego.frenet.d, lower_d, upper_d);
-    shift_distance = std::max(config_.merge_distance_m, config_.prepare_distance_m);
   }
 
-  double speed_cap = config_.v_passthrough_mps;
-  const double ego_wall_clearance = wallClearance(ego.frenet.d);
-  if (type == CandidateType::FOLLOW && blocked_info.nearest_index >= 0) {
-    // FOLLOWは前走車より少し低い速度上限にして、MPC側の速度計画を抑える。
-    const auto & opp = opponents[static_cast<std::size_t>(blocked_info.nearest_index)];
-    speed_cap = std::max(0.5, opp.v - config_.follow_speed_margin_mps);
-  } else if (type == CandidateType::RECOVERY) {
-    speed_cap = ego_wall_clearance < 0.0 ?
-      config_.wall_margin_recovery_v_max_mps : config_.recovery_v_max_mps;
-  } else if (type == CandidateType::SIDE_BY_SIDE_KEEP) {
-    speed_cap = config_.side_by_side_speed_cap_mps;
-    if (blocked_info.side_index >= 0) {
-      const auto & opp = opponents[static_cast<std::size_t>(blocked_info.side_index)];
-      speed_cap = std::min(speed_cap, std::max(0.5, opp.v - config_.yield_speed_margin_mps));
+  out.future_side_by_side = found_future_side;
+  out.future_corner_side_by_side = found_future_corner;
+  out.future_outer_wall_risk = found_outer_wall_risk;
+  if (found_future_side && found_outer_wall_risk) {
+    out.future_yield_required = true;
+    if (out.yield_reason.empty()) {
+      out.yield_reason = "future_outer_wall_risk";
     }
-  } else if (type == CandidateType::YIELD_BEHIND) {
-    speed_cap = 0.5;
-    const int target_index =
-      blocked_info.nearest_index >= 0 ? blocked_info.nearest_index : blocked_info.side_index;
-    if (target_index >= 0 && static_cast<std::size_t>(target_index) < opponents.size()) {
-      const auto & opp = opponents[static_cast<std::size_t>(target_index)];
-      const double margin = blocked_info.corner_side_by_side ?
-        config_.corner_follow_speed_margin_mps : config_.yield_speed_margin_mps;
-      speed_cap = std::max(0.5, opp.v - margin);
-    }
-    if (blocked_info.corner_side_by_side && config_.corner_yield_v_max_mps > 0.0) {
-      speed_cap = std::min(speed_cap, config_.corner_yield_v_max_mps);
-    }
-  } else if (type == CandidateType::SAFE_STOP) {
-    speed_cap = std::max(1.0e-3, config_.safe_stop_v_mps);
   }
-
-  const bool recovery_like =
-    type == CandidateType::RECOVERY ||
-    type == CandidateType::YIELD_BEHIND ||
-    type == CandidateType::SIDE_BY_SIDE_KEEP;
-  if (recovery_like && ego_wall_clearance < 0.0) {
-    speed_cap = std::min(speed_cap, config_.wall_margin_recovery_v_max_mps);
+  out.future_abs_curvature =
+      std::max(out.future_abs_curvature, max_future_curvature);
+  if (!std::isfinite(out.future_wall_clearance_m) &&
+      std::isfinite(best_clearance)) {
+    out.future_wall_clearance_m = best_clearance;
   }
-  if (
-    recovery_like &&
-    config_.large_lateral_error_threshold_m >= 0.0 &&
-    config_.large_lateral_error_v_max_mps > 0.0 &&
-    std::abs(ego.frenet.d - target_d) > config_.large_lateral_error_threshold_m) {
-    speed_cap = std::min(speed_cap, config_.large_lateral_error_v_max_mps);
-  }
-
-  for (std::size_t i = 0; i < config_.horizon_points; ++i) {
-    // 候補ごとの速度想定でs列を作り、smoothstepで横方向を急変させない。
-    const double t = static_cast<double>(i) * config_.horizon_dt_sec;
-    const double longitudinal_speed = type == CandidateType::SAFE_STOP ?
-      std::max(1.0e-3, config_.safe_stop_v_mps) : std::max(0.5, ego.v);
-    const double ds = longitudinal_speed * t;
-    const double s = frame_.wrapS(ego.frenet.s + ds);
-    const double ratio = smoothstep(ds / std::max(1.0, shift_distance));
-    double start_d = ego.frenet.d;
-    if (
-      type == CandidateType::RECOVERY ||
-      type == CandidateType::YIELD_BEHIND ||
-      type == CandidateType::SAFE_STOP) {
-      start_d = std::clamp(start_d, lower_d, upper_d);
-    }
-    const double d = start_d + (target_d - start_d) * ratio;
-    const auto p = frame_.frenetToCartesian(s, d);
-    candidate.t.push_back(t);
-    candidate.s.push_back(s);
-    candidate.d.push_back(d);
-    candidate.x.push_back(p.x);
-    candidate.y.push_back(p.y);
-    candidate.yaw.push_back(p.yaw);
-    candidate.v_ref.push_back(speed_cap);
-  }
-
-  return candidate;
+  return out;
 }
 
-double OvertakePlannerCore::candidateScore(
-  const CandidateTrajectory & candidate,
-  const BlockedInfo & blocked_info) const
-{
+CandidateTrajectory OvertakePlannerCore::makeCandidate(
+    CandidateType type, const EgoState &ego, const BlockedInfo &blocked_info,
+    const std::vector<OpponentState> &opponents) const {
+  return CandidateBuilder(frame_, config_)
+      .makeCandidate(type, ego, blocked_info, opponents);
+}
+
+double
+OvertakePlannerCore::candidateScore(const CandidateTrajectory &candidate,
+                                    const BlockedInfo &blocked_info) const {
   // 候補の優先順位を単純なコストへ落とし、まず安全性、その後に追い越し意欲を見る。
   if (!candidate.feasible) {
-    if (
-      candidate.reject_reason == "wall_margin" &&
-      blocked_info.side_by_side &&
-      candidate.type == CandidateType::YIELD_BEHIND) {
+    if (candidate.reject_reason == "wall_margin" && blocked_info.side_by_side &&
+        candidate.type == CandidateType::YIELD_BEHIND) {
       return blocked_info.corner_side_by_side ? -90.0 : -40.0;
     }
-    if (
-      candidate.reject_reason == "opponent_collision" &&
-      blocked_info.side_by_side &&
-      candidate.type == CandidateType::SIDE_BY_SIDE_KEEP &&
-      !blocked_info.corner_side_by_side) {
+    if (candidate.reject_reason == "opponent_collision" &&
+        blocked_info.side_by_side &&
+        candidate.type == CandidateType::SIDE_BY_SIDE_KEEP &&
+        !blocked_info.corner_side_by_side) {
       return -30.0;
     }
-    if (
-      candidate.reject_reason == "opponent_collision" &&
-      candidate.type == CandidateType::YIELD_BEHIND) {
+    if (candidate.reject_reason == "opponent_collision" &&
+        candidate.type == CandidateType::YIELD_BEHIND) {
       return blocked_info.corner_side_by_side ? -70.0 : -50.0;
     }
     return 1.0e9;
   }
   double score = 0.0;
   switch (candidate.type) {
-    case CandidateType::FASTEST:
-      score = blocked_info.blocked ? 50.0 : 0.0;
-      break;
-    case CandidateType::FOLLOW:
-      score = 15.0;
-      break;
-    case CandidateType::PASS_LEFT:
-    case CandidateType::PASS_RIGHT:
-      score = blocked_info.side_by_side ? 200.0 : -10.0;
-      break;
-    case CandidateType::RECOVERY:
-      score = 40.0;
-      break;
-    case CandidateType::SIDE_BY_SIDE_KEEP:
-      score = blocked_info.side_by_side && !blocked_info.corner_side_by_side ? -30.0 : 80.0;
-      break;
-    case CandidateType::YIELD_BEHIND:
-      if (blocked_info.corner_side_by_side) {
-        score = -70.0;
-      } else if (blocked_info.side_by_side && blocked_info.side_delta_s > config_.side_yield_s_m) {
-        score = -60.0;
-      } else if (currentPassGapLost(mode_, blocked_info)) {
-        score = -50.0;
-      } else {
-        score = (!blocked_info.can_pass_left && !blocked_info.can_pass_right) ? 5.0 : 70.0;
-      }
-      break;
-    case CandidateType::SAFE_STOP:
-      score = -120.0;
-      break;
+  case CandidateType::FASTEST:
+    score = blocked_info.blocked ? 50.0 : 0.0;
+    break;
+  case CandidateType::FOLLOW:
+    score = 15.0;
+    break;
+  case CandidateType::PASS_LEFT:
+  case CandidateType::PASS_RIGHT:
+    score = blocked_info.side_by_side ? 200.0 : -10.0;
+    break;
+  case CandidateType::RECOVERY:
+    score = 40.0;
+    break;
+  case CandidateType::SIDE_BY_SIDE_KEEP:
+    score = blocked_info.side_by_side && !blocked_info.corner_side_by_side &&
+                    !blocked_info.future_yield_required
+                ? -30.0
+                : 80.0;
+    break;
+  case CandidateType::YIELD_BEHIND:
+    if (blocked_info.future_yield_required) {
+      score = -80.0;
+    } else if (blocked_info.corner_side_by_side) {
+      score = -70.0;
+    } else if (blocked_info.side_by_side &&
+               blocked_info.side_delta_s > config_.side_yield_s_m) {
+      score = -60.0;
+    } else if (currentPassGapLost(mode_, blocked_info)) {
+      score = -50.0;
+    } else {
+      score = (!blocked_info.can_pass_left && !blocked_info.can_pass_right)
+                  ? 5.0
+                  : 70.0;
+    }
+    break;
+  case CandidateType::SAFE_STOP:
+    score = -120.0;
+    break;
   }
-  if (
-    (mode_ == BehaviorMode::OVERTAKE_LEFT && candidate.type == CandidateType::PASS_LEFT) ||
-    (mode_ == BehaviorMode::OVERTAKE_RIGHT && candidate.type == CandidateType::PASS_RIGHT) ||
-    (mode_ == BehaviorMode::FOLLOW_BLOCKED && candidate.type == CandidateType::FOLLOW) ||
-    (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP && candidate.type == CandidateType::SIDE_BY_SIDE_KEEP) ||
-    (mode_ == BehaviorMode::YIELD_BEHIND && candidate.type == CandidateType::YIELD_BEHIND) ||
-    (mode_ == BehaviorMode::SAFE_STOP && candidate.type == CandidateType::SAFE_STOP)) {
+  if ((mode_ == BehaviorMode::OVERTAKE_LEFT &&
+       candidate.type == CandidateType::PASS_LEFT) ||
+      (mode_ == BehaviorMode::OVERTAKE_RIGHT &&
+       candidate.type == CandidateType::PASS_RIGHT) ||
+      (mode_ == BehaviorMode::FOLLOW_BLOCKED &&
+       candidate.type == CandidateType::FOLLOW) ||
+      (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP &&
+       candidate.type == CandidateType::SIDE_BY_SIDE_KEEP) ||
+      (mode_ == BehaviorMode::YIELD_BEHIND &&
+       candidate.type == CandidateType::YIELD_BEHIND) ||
+      (mode_ == BehaviorMode::SAFE_STOP &&
+       candidate.type == CandidateType::SAFE_STOP)) {
     // いまのモードに沿う候補を少し優遇し、左右や追従/追い越しが細かく揺れないようにする。
     score -= config_.keep_mode_bonus;
   }
   return score;
 }
 
-double OvertakePlannerCore::maxAbsCurvatureAhead(double s, double lookahead_m) const
-{
+double OvertakePlannerCore::maxAbsCurvatureAhead(double s,
+                                                 double lookahead_m) const {
   if (frame_.empty() || lookahead_m <= 0.0) {
     return 0.0;
   }
@@ -702,17 +816,72 @@ double OvertakePlannerCore::maxAbsCurvatureAhead(double s, double lookahead_m) c
   return max_abs_kappa;
 }
 
-double OvertakePlannerCore::wallClearance(double d) const
-{
+double OvertakePlannerCore::wallClearance(double d) const {
   const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
   const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
   return std::min(d - lower_d, upper_d - d);
 }
 
+double OvertakePlannerCore::opponentSDot(const OpponentState &opponent) const {
+  const auto ref = frame_.interpolate(opponent.frenet.s);
+  return opponent.vx * std::cos(ref.yaw) + opponent.vy * std::sin(ref.yaw);
+}
+
+ActiveSectionSafety OvertakePlannerCore::activeSectionSafety(double s) const {
+  ActiveSectionSafety active;
+  if (!config_.section_safety_profile_enabled) {
+    return active;
+  }
+  for (const auto &rule : config_.section_safety_rules) {
+    if (!sectionContainsS(rule, s)) {
+      continue;
+    }
+    active.active = true;
+    active.name = rule.name;
+    active.profile = rule.profile.empty() ? "default" : rule.profile;
+    active.role_policy =
+        rule.role_policy.empty() ? "default" : rule.role_policy;
+    if (active.profile == "wall_risk_moderate") {
+      active.wall_margin_scale = 1.15;
+      active.speed_cap_scale = 0.85;
+    } else if (active.profile == "side_by_side_corner_strict") {
+      active.wall_margin_scale = 1.35;
+      active.speed_cap_scale = 0.65;
+      active.force_outer_yield = true;
+    }
+    if (active.role_policy == "outer_yields") {
+      active.force_outer_yield = true;
+    }
+    return active;
+  }
+  return active;
+}
+
+bool OvertakePlannerCore::sectionContainsS(const SectionSafetyRule &rule,
+                                           double s) const {
+  if (frame_.empty()) {
+    return false;
+  }
+  const double start = frame_.wrapS(rule.s_start_m);
+  const double end = frame_.wrapS(rule.s_end_m);
+  const double wrapped_s = frame_.wrapS(s);
+  if (start <= end) {
+    return wrapped_s >= start && wrapped_s <= end;
+  }
+  return wrapped_s >= start || wrapped_s <= end;
+}
+
+double OvertakePlannerCore::effectiveWallSoftMargin(
+    const ActiveSectionSafety &section) const {
+  const double base = std::max(0.0, config_.wall_soft_margin_m);
+  return base * std::max(1.0, section.wall_margin_scale);
+}
+
 bool OvertakePlannerCore::shouldYieldBehindSideBySide(
-  const EgoState & ego,
-  const BlockedInfo & blocked_info) const
-{
+    const EgoState &ego, const BlockedInfo &blocked_info) const {
+  if (blocked_info.future_yield_required) {
+    return true;
+  }
   if (!blocked_info.side_by_side) {
     return false;
   }
@@ -722,25 +891,40 @@ bool OvertakePlannerCore::shouldYieldBehindSideBySide(
   if (!blocked_info.corner_side_by_side) {
     return false;
   }
-  const bool opponent_not_clearly_behind = blocked_info.side_delta_s > -config_.side_yield_s_m;
+  const bool opponent_not_clearly_behind =
+      blocked_info.side_delta_s > -config_.side_yield_s_m;
   const bool close_to_wall =
-    wallClearance(ego.frenet.d) <= config_.corner_side_yield_wall_clearance_m;
+      wallClearance(ego.frenet.d) <= config_.corner_side_yield_wall_clearance_m;
   return opponent_not_clearly_behind || close_to_wall;
 }
 
 CandidateTrajectory OvertakePlannerCore::selectCandidate(
-  std::vector<CandidateTrajectory> & candidates) const
-{
-  // スコア最小の候補を返す。空の場合はデフォルト候補を返して上位で安全側に倒す。
+    std::vector<CandidateTrajectory> &candidates) const {
+  // feasible候補があるなら必ずそれを優先する。unsafe候補は全候補がunsafeの時だけ診断用に返す。
+  const auto by_score = [](const CandidateTrajectory &a,
+                           const CandidateTrajectory &b) {
+    return a.score < b.score;
+  };
   auto best = std::min_element(
-    candidates.begin(), candidates.end(),
-    [](const CandidateTrajectory & a, const CandidateTrajectory & b) {
-      return a.score < b.score;
-    });
+      candidates.begin(), candidates.end(),
+      [&by_score](const CandidateTrajectory &a, const CandidateTrajectory &b) {
+        if (a.feasible != b.feasible) {
+          return a.feasible;
+        }
+        return by_score(a, b);
+      });
+  if (best == candidates.end()) {
+    return {};
+  }
+  if (best->feasible) {
+    return *best;
+  }
+
+  best = std::min_element(candidates.begin(), candidates.end(), by_score);
   if (best == candidates.end()) {
     return {};
   }
   return *best;
 }
 
-}  // namespace overtake_planner
+} // namespace overtake_planner
