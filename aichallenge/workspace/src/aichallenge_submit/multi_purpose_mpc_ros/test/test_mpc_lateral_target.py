@@ -79,6 +79,40 @@ def test_overtake_lateral_override_clips_to_corridor():
     assert target == pytest.approx([0.2, 1.0])
 
 
+def test_overtake_lateral_override_uses_snapshot_if_callback_clears(monkeypatch):
+    mpc = make_mpc(lateral_target_mode="reference_path")
+    mpc.set_overtake_reference_override([0.2, 0.4], [3.0, 4.0], mode_id=3)
+    original_lateral_reference = mpc._lateral_reference
+
+    def clearing_lateral_reference(ub, lb):
+        mpc.clear_overtake_reference_override()
+        return original_lateral_reference(ub, lb)
+
+    monkeypatch.setattr(mpc, "_lateral_reference", clearing_lateral_reference)
+
+    target = mpc._overtake_lateral_reference(
+        2, np.array([1.0, 1.0]), np.array([-1.0, -1.0]))
+
+    assert target == pytest.approx([0.2, 0.4])
+    assert mpc._overtake_lateral_reference(
+        2, np.array([1.0, 1.0]), np.array([-1.0, -1.0])) is None
+
+
+def test_overtake_override_snapshot_keeps_lateral_and_speed_same_generation():
+    mpc = make_mpc(lateral_target_mode="reference_path")
+    mpc.set_overtake_reference_override([0.2, 0.4], [3.0, 4.0], mode_id=3)
+    mode_id, lateral_offsets, speed_caps = mpc._overtake_override_snapshot()
+
+    mpc.set_overtake_reference_override([-0.5, -0.6], [1.0, 1.5], mode_id=4)
+
+    assert mode_id == 3
+    assert mpc._overtake_lateral_reference(
+        2, np.array([1.0, 1.0]), np.array([-1.0, -1.0]),
+        lateral_offsets) == pytest.approx([0.2, 0.4])
+    assert mpc._overtake_speed_cap(0, speed_caps) == pytest.approx(3.0)
+    assert mpc._overtake_speed_cap(1, speed_caps) == pytest.approx(4.0)
+
+
 def test_overtake_speed_cap_returns_none_for_invalid_values():
     mpc = make_mpc()
     mpc.set_overtake_reference_override([0.0], [4.0, -1.0], mode_id=1)

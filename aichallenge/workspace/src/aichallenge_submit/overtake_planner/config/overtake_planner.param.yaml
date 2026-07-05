@@ -57,6 +57,7 @@ overtake_planner_node:
     follow_speed_margin_mps: 0.20
     recovery_v_max_mps: 8.5
     wall_margin_recovery_v_max_mps: 8.5
+    outside_corridor_recovery_centering_time_sec: 1.0
     v_passthrough_mps: 50.0
     d_min_m: -1.35
     d_max_m: 1.35

@@ -174,12 +174,28 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
             : std::max(0.5, ego.v);
     const double ds = longitudinal_speed * t;
     const double s = frame_.wrapS(ego.frenet.s + ds);
-    const double ratio = smoothstep(ds / std::max(1.0, shift_distance));
     double start_d = ego.frenet.d;
     if (type == CandidateType::RECOVERY ||
         type == CandidateType::YIELD_BEHIND ||
         type == CandidateType::SAFE_STOP) {
       start_d = std::clamp(start_d, lower_d, upper_d);
+    }
+    const bool release_threshold_active =
+        std::isfinite(config_.recovery_release_lateral_error_m) &&
+        config_.recovery_release_lateral_error_m >= 0.0;
+    const bool recovery_lateral_error_remaining =
+        release_threshold_active &&
+        std::abs(start_d - target_d) >
+            config_.recovery_release_lateral_error_m;
+    const bool recovery_center_pull =
+        type == CandidateType::RECOVERY && !blocked_info.side_by_side &&
+        (outside_safe_corridor || recovery_lateral_error_remaining);
+    double ratio = smoothstep(ds / std::max(1.0, shift_distance));
+    if (recovery_center_pull &&
+        config_.outside_corridor_recovery_centering_time_sec > 0.0) {
+      ratio = std::max(
+          ratio,
+          smoothstep(t / config_.outside_corridor_recovery_centering_time_sec));
     }
     const double d = start_d + (target_d - start_d) * ratio;
     const auto p = frame_.frenetToCartesian(s, d);

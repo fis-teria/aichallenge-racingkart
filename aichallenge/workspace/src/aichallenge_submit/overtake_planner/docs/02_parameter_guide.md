@@ -39,11 +39,11 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 |---|---:|---:|---|
 | `future_side_yield_wall_clearance_m` | `0.35` | `0.35` | 未来の横並び維持目標が壁に近いと早めに譲る。上げると保守的。 |
 | `corner_side_yield_wall_clearance_m` | `0.55` | `0.55` | コーナー横並び中の壁余裕判定。上げると壁から遠いうちに譲る。 |
-| `corner_yield_v_max_mps` | `3.0` | `3.0` | コーナー譲り時の速度上限。下げると曲がりやすいが遅くなる。 |
+| `corner_yield_v_max_mps` | `8.0` | `3.0` | コーナー譲り時の速度上限。下げると曲がりやすいが遅くなる。 |
 | `side_by_side_target_gap_m` | `0.75` | `0.75` | 相手から離れる横距離。上げると接触余裕は増えるが壁側へ逃げやすい。 |
 | `side_by_side_shift_distance_m` | `7.0` | `7.0` | 横方向へ移る距離。上げると操舵が穏やか。 |
-| `wall_risk_v_max_mps` | `5.0` | `5.0` | 壁リスク時の速度上限。下げると壁際の破綻を抑えやすい。 |
-| `mpc_health_v_max_mps` | `3.0` | `3.0` | MPC不調時の速度上限。下げると計算破綻時に保守的。 |
+| `wall_risk_v_max_mps` | `8.0` | `5.0` | 壁リスク時の速度上限。下げると壁際の破綻を抑えやすい。 |
+| `mpc_health_v_max_mps` | `8.0` | `3.0` | MPC不調時の速度上限。下げると計算破綻時に保守的。 |
 
 スタート直後から第1コーナーまで横並びを認識しない場合:
 
@@ -159,7 +159,7 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 | `corner_side_yield_curvature_m_inv` | `0.05` | `0.05` | 横並び中に譲りを強めるコーナー曲率。下げるほど緩いカーブでも譲る。 |
 | `corner_side_yield_lookahead_m` | `10.0` | `10.0` | 横並びコーナー判定で曲率を見る前方距離。 |
 | `large_lateral_error_threshold_m` | `0.60` | `0.60` | 横ずれがこの値を超え、危険文脈があるとPASSを凍結して復帰寄りにする。 |
-| `large_lateral_error_v_max_mps` | `2.5` | `2.5` | 大きい横ずれ時の速度上限。 |
+| `large_lateral_error_v_max_mps` | `8.5` | `2.5` | 大きい横ずれ時の速度上限。 |
 
 ## CandidateBuilder
 
@@ -177,6 +177,7 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 | `side_by_side_target_gap_m` | `0.75` | `0.75` | 横並び時に相手から確保したい横距離。 |
 | `side_by_side_shift_distance_m` | `7.0` | `7.0` | 横並び維持目標へ移る距離。 |
 | `corner_yield_target_d_m` | `0.0` | `0.0` | コーナー譲り時の横目標。通常は中心線。 |
+| `outside_corridor_recovery_centering_time_sec` | `1.0` | `1.0` | 安全コリドー外、または `recovery_release_lateral_error_m` を超えるRECOVERYで、低速/停止中でも中心方向へ参照を寄せる時間目安。`0` 以下で距離ベースのみ。 |
 
 ### 候補速度
 
@@ -187,7 +188,7 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 | `yield_speed_margin_mps` | `0.60` | `0.60` | YIELD/SIDE_BY_SIDEで相手よりどれだけ遅くするか。 |
 | `corner_follow_speed_margin_mps` | `0.20` | `0.20` | コーナー譲り時に相手よりどれだけ遅くするか。 |
 | `side_by_side_speed_cap_mps` | `7.5` | `7.5` | SIDE_BY_SIDE_KEEPの通常速度上限。 |
-| `corner_yield_v_max_mps` | `3.0` | `3.0` | コーナー譲り時の最大速度。 |
+| `corner_yield_v_max_mps` | `8.0` | `3.0` | コーナー譲り時の最大速度。 |
 | `recovery_v_max_mps` | `8.5` | `8.5` | RECOVERY中の速度上限。 |
 | `wall_margin_recovery_v_max_mps` | `8.5` | `8.5` | 安全コリドー外から復帰する時の速度上限。 |
 | `safe_stop_v_mps` | `0.20` | `0.20` | SAFE_STOP候補の速度上限。0ではなく小さい正値を使う。 |
@@ -212,7 +213,7 @@ lower_d = d_min_m + min_wall_margin_m
 upper_d = d_max_m - min_wall_margin_m
 ```
 
-現在YAMLでは `-1.10 <= d <= 1.10`、fallbackでは `-0.85 <= d <= 0.85` です。
+現在YAMLとfallbackでは `-0.85 <= d <= 0.85` です。
 
 ## BehaviorStateMachine
 
@@ -242,14 +243,14 @@ upper_d = d_max_m - min_wall_margin_m
 | パラメータ | 現在値 | fallback | 変更すると何が変わるか |
 |---|---:|---:|---|
 | `speed_only_fallback_enabled` | `true` | `true` | unsafeな横方向候補やSAFE_STOP infeasible時に速度only fallbackを出す。 |
-| `speed_only_fallback_v_max_mps` | `3.0` | `3.0` | 速度only fallbackの上限。 |
+| `speed_only_fallback_v_max_mps` | `8.0` | `3.0` | 速度only fallbackの上限。 |
 | `wall_risk_speed_guard_enabled` | `true` | `true` | 壁余裕不足時に速度だけ落とす。 |
 | `wall_soft_margin_m` | `0.25` | `0.25` | 壁リスク速度ガードを始めるソフト余裕。 |
-| `wall_risk_v_max_mps` | `5.0` | `5.0` | 壁リスク時の速度上限。 |
+| `wall_risk_v_max_mps` | `8.0` | `5.0` | 壁リスク時の速度上限。 |
 | `mpc_health_speed_guard_enabled` | `true` | `true` | MPC health debugを見て速度を落とす。 |
 | `mpc_health_infeasible_count_threshold` | `1` | `1` | infeasible countがこの値以上なら速度ガード。 |
 | `mpc_health_solve_time_warn_ms` | `80.0` | `80.0` | solve timeがこの値以上なら速度ガード。 |
-| `mpc_health_v_max_mps` | `3.0` | `3.0` | MPC health悪化時の速度上限。 |
+| `mpc_health_v_max_mps` | `8.0` | `3.0` | MPC health悪化時の速度上限。 |
 | `mpc_health_stale_time_sec` | `0.60` | `0.60` | MPC health debugが古い場合のstale判定。 |
 
 ## Section safety profile
@@ -309,9 +310,10 @@ MPC側で `0.0 m/s` が無効扱いにならないよう、停止意図は小さ
 ```yaml
 future_side_yield_wall_clearance_m: 0.35
 corner_side_yield_wall_clearance_m: 0.55
-corner_yield_v_max_mps: 3.0
-wall_risk_v_max_mps: 5.0
-mpc_health_v_max_mps: 3.0
+corner_yield_v_max_mps: 8.0
+wall_risk_v_max_mps: 8.0
+mpc_health_v_max_mps: 8.0
+outside_corridor_recovery_centering_time_sec: 1.0
 recovery_release_lateral_error_m: 0.60
 yield_release_lateral_error_m: 0.60
 ```

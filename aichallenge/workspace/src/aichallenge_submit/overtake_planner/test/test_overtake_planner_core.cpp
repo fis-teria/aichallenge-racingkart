@@ -562,6 +562,57 @@ TEST(OvertakePlannerCore, WallMarginRecoveryStartsInsideCorridorAndSlows) {
               1.0e-9);
 }
 
+TEST(OvertakePlannerCore, StoppedOutsideCorridorRecoveryPullsTowardCenter) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.horizon_points = 20;
+  config.horizon_dt_sec = 0.025;
+  config.outside_corridor_recovery_centering_time_sec = 1.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  auto ego = makeEgo(frame, 5.0, 1.8);
+  ego.v = 0.0;
+
+  const auto output = core.update(0.1, ego, {});
+  const double upper_d = config.d_max_m - config.min_wall_margin_m;
+
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::RECOVERY);
+  EXPECT_TRUE(output.active_override);
+  ASSERT_FALSE(output.lateral_offsets.empty());
+  const auto max_offset = *std::max_element(output.lateral_offsets.begin(),
+                                            output.lateral_offsets.end());
+  EXPECT_LE(max_offset, upper_d + 1.0e-9);
+  EXPECT_LT(output.target_lateral_offset_m, upper_d - 0.25);
+}
+
+TEST(OvertakePlannerCore, StoppedRecoveryKeepsCenterPullAfterReEnteringCorridor) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.horizon_points = 20;
+  config.horizon_dt_sec = 0.025;
+  config.lateral_target_max_step_m = 0.25;
+  config.outside_corridor_recovery_centering_time_sec = 1.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  auto outside = makeEgo(frame, 5.0, 1.8);
+  outside.v = 0.0;
+  const auto first = core.update(0.1, outside, {});
+  ASSERT_EQ(first.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+
+  auto near_wall_inside = makeEgo(frame, 5.0, 0.8);
+  near_wall_inside.v = 0.0;
+  const auto second = core.update(0.2, near_wall_inside, {});
+
+  EXPECT_EQ(second.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+  EXPECT_EQ(second.selected, overtake_planner::CandidateType::RECOVERY);
+  EXPECT_TRUE(second.active_override);
+  EXPECT_LE(second.target_lateral_offset_m,
+            first.target_lateral_offset_m + 1.0e-9);
+  EXPECT_LT(std::abs(second.target_lateral_offset_m),
+            config.recovery_release_lateral_error_m);
+}
+
 TEST(OvertakePlannerCore, LargeLateralErrorRecoveryUsesSlowCap) {
   const auto frame = makeStraightFrame();
   auto config = makeConfig();

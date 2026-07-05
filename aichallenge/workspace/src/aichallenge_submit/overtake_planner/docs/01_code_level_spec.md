@@ -369,6 +369,7 @@ min(ego_d - lower_d, upper_d - ego_d)
 
 `RECOVERY` と `YIELD_BEHIND` の参照生成では、開始dを安全コリドー内にclampします。
 これは壁外d列をMPCへ渡さないためです。
+安全コリドー外、または `recovery_release_lateral_error_m` を超える横誤差が残る `RECOVERY` では `outside_corridor_recovery_centering_time_sec` を使い、低速/停止中でも距離ベース補間だけに依存せず中心方向へ参照を進めます。
 
 ## 安全評価
 
@@ -489,6 +490,7 @@ overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_G
 - `yield_rejoin_wall_clearance_m`
 - `recovery_v_max_mps`
 - `wall_margin_recovery_v_max_mps`
+- `outside_corridor_recovery_centering_time_sec`
 
 追い越し:
 

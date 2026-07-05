@@ -224,6 +224,9 @@ public:
         declare_parameter<double>("recovery_v_max_mps", 8.5);
     config.wall_margin_recovery_v_max_mps =
         declare_parameter<double>("wall_margin_recovery_v_max_mps", 8.5);
+    config.outside_corridor_recovery_centering_time_sec =
+        declare_parameter<double>("outside_corridor_recovery_centering_time_sec",
+                                  1.0);
     config.v_passthrough_mps =
         declare_parameter<double>("v_passthrough_mps", 50.0);
     config.d_min_m = declare_parameter<double>("d_min_m", -1.35);

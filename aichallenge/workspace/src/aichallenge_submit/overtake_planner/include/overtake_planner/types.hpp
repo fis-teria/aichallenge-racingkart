@@ -253,6 +253,7 @@ struct PlannerConfig {
   double max_overtake_v_bonus_mps{0.30};
   double recovery_v_max_mps{8.5};
   double wall_margin_recovery_v_max_mps{8.5};
+  double outside_corridor_recovery_centering_time_sec{1.0};
   double v_passthrough_mps{50.0};
   double d_min_m{-1.35};
   double d_max_m{1.35};
