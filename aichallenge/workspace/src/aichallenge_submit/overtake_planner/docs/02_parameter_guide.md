@@ -1,202 +1,331 @@
 # overtake_planner パラメータ調整ガイド
 
-この文書は、`overtake_planner` のパラメータを変更したときに「何が変わるか」を確認するための資料です。
+この文書は、`overtake_planner` のパラメータを変更したときに「どの責務のロジックが変わるか」を確認するための資料です。
 対象ファイルは次です。
 
 ```text
 aichallenge/workspace/src/aichallenge_submit/overtake_planner/config/overtake_planner.param.yaml
 ```
 
-`overtake_planner` は、V2Xで見える他車と自車位置をもとに、MPCへ渡す横方向オフセット列と速度上限列を作ります。
-主に次の動作を調整できます。
+## 読み方
 
-- 前走車をどの距離・速度差で「詰まっている」と見るか
-- 横並びをどの範囲で検出するか
-- 横並び時に離れる量、減速量、コーナーで譲る条件
-- 左右追い越し候補をどれだけ出しやすくするか
-- 壁や他車に対する安全余裕
-- 状態遷移の粘り、チャタリング抑制
-- 回避不能時の安全停止 `SAFE_STOP`
+表の「現在値」は上記YAMLの値です。
+「fallback」は `overtake_planner_node.cpp` の `declare_parameter()` と `PlannerConfig` の未指定時デフォルトです。
+YAMLに書かれている値が優先されるため、現在の実走値は「現在値」を見てください。
 
-## まず見るべき項目
+重要な注意:
 
-サイドバイサイドでコーナーに入ったとき、外側車両が曲がりきれない、または壁側へ膨らむ場合は、まず以下を見ます。
+- baseline MPCは `horizon_points=20` で使います。
+- delay-aware MPCでは launch から `horizon_points=50` へ上書きし、MPC側の `N: 50` と合わせます。
+- `pass_distance_m` と `max_overtake_v_bonus_mps` は `PlannerConfig` に残っていますが、現状のnodeではROS parameterとして宣言していません。YAMLに追加しても効かないため、通常の調整対象から外します。
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `side_by_side_speed_cap_mps` | `4.5` | 横並び維持中の速度上限。下げると横並び中に遅くなり、コーナーで曲がりやすくなる。下げすぎると相手に置いていかれやすい。 |
-| `side_by_side_target_gap_m` | `1.10` | 横並び時に相手から取ろうとする横距離。上げると強く離れる。外側に逃げる場面では壁へ寄りやすくなることがある。下げると膨らみは減るが接近しやすい。 |
-| `side_by_side_shift_distance_m` | `5.0` | 横並び時に目標横位置へ移る距離。上げると横移動がゆっくりになり、急なステアが減る。下げると早く離れるが挙動が急になる。 |
-| `side_yield_s_m` | `0.30` | 横並びで相手が少し前に出たと判定して譲るしきい値。下げると早めに `YIELD_BEHIND` に入りやすい。上げると横並び維持を粘る。 |
-| `corner_side_yield_curvature_m_inv` | `0.06` | この曲率以上のコーナーで横並び中の譲り判定を強くする。下げると緩いカーブでも譲りやすくなる。上げるときついコーナーだけ譲る。 |
-| `corner_yield_v_max_mps` | `3.0` | コーナー横並びで `YIELD_BEHIND` になったときの最大速度。下げるとより安全寄り、上げると失速しにくい。 |
+## 責務別の全体像
 
-## 基本設定
+| 責務 | 主な実装 | 主なパラメータ |
+|---|---|---|
+| 起動/入出力 | `overtake_planner_node.cpp` | reference, own vehicle ID, stale判定, V2X速度推定 |
+| 前方/横並び/pass gap判定 | `BlockedRiskAnalyzer` | lookahead, same direction, side-by-side, parallel side, pass gap |
+| 未来横並びリスク | `FutureSideBySideRiskAnalyzer` | future side prediction, future wall clearance |
+| 候補生成 | `CandidateBuilder` | offsets, shift distance, follow/yield/recovery/safe stop speed |
+| 安全評価 | `SafetyEvaluator` | wall corridor, safety ellipse |
+| 状態遷移 | `BehaviorStateMachine` | safe cycles, mode hold, merge/rejoin gap, abort timeout |
+| 出力整形/速度ガード | `PlannerOutputBuilder` | speed-only fallback, wall guard, MPC health guard, section profile |
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `enabled` | `true` | `false` にするとplannerは介入しない。MPCは元の参照を使う。 |
-| `reference_package` | `multi_purpose_mpc_ros` | 参照CSVを探すROSパッケージ。通常は変更しない。 |
-| `reference_csv` | `env/final_ver3/traj_mincurv_manual.csv` | Frenet座標の基準になる走行ライン。変更すると、前後関係、横方向d、壁余裕、追い越しオフセットの基準が全部変わる。 |
-| `own_vehicle_id` | `auto` | V2X上の自車ID。`auto` は `ROS_DOMAIN_ID=N` から `dN` を推定する。明示指定するとそのIDを自車として除外する。間違えると自車を他車扱いする可能性がある。 |
-| `control_rate_hz` | `20.0` | plannerの更新周期。上げると反応が細かくなるが負荷が増える。下げると判断が粗くなり、横並びや追従の反応が遅れる。 |
-| `ego_stale_time_sec` | `0.50` | 自車odometryがこの秒数より古いと無効扱い。短くすると古い自己位置で動きにくいが、通信や負荷でplannerが止まりやすくなる。 |
+## 最初に見る調整項目
 
-## 予測 horizon
+サイドバイサイドでコーナーに入ったときに外側が壁へ膨らむ場合:
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `horizon_points` | `30` | MPCへ渡すオフセット列・速度上限列の点数。他車予測と安全評価の点数も増える。上げると先まで見るが重くなる。 |
-| `horizon_dt_sec` | `0.025` | horizonの時間刻み。`horizon_points * horizon_dt_sec` が予測時間になる。上げると先まで見るが、予測が粗くなる。 |
+| パラメータ | 現在値 | fallback | 見る理由 |
+|---|---:|---:|---|
+| `future_side_yield_wall_clearance_m` | `0.35` | `0.35` | 未来の横並び維持目標が壁に近いと早めに譲る。上げると保守的。 |
+| `corner_side_yield_wall_clearance_m` | `0.55` | `0.55` | コーナー横並び中の壁余裕判定。上げると壁から遠いうちに譲る。 |
+| `corner_yield_v_max_mps` | `3.0` | `3.0` | コーナー譲り時の速度上限。下げると曲がりやすいが遅くなる。 |
+| `side_by_side_target_gap_m` | `0.75` | `0.75` | 相手から離れる横距離。上げると接触余裕は増えるが壁側へ逃げやすい。 |
+| `side_by_side_shift_distance_m` | `7.0` | `7.0` | 横方向へ移る距離。上げると操舵が穏やか。 |
+| `wall_risk_v_max_mps` | `5.0` | `5.0` | 壁リスク時の速度上限。下げると壁際の破綻を抑えやすい。 |
+| `mpc_health_v_max_mps` | `3.0` | `3.0` | MPC不調時の速度上限。下げると計算破綻時に保守的。 |
 
-現在値では `30 * 0.025 = 0.75 sec` 先まで見ます。
+スタート直後から第1コーナーまで横並びを認識しない場合:
 
-## 前走車・閉塞検出
+| パラメータ | 現在値 | fallback | 見る理由 |
+|---|---:|---:|---|
+| `side_by_side_s_m` | `4.0` | `4.0` | 狭義の横並び前後範囲。 |
+| `side_margin_m` | `1.20` | `1.20` | 狭義の横並び横幅。広げすぎると通常の横並びが過敏になる。 |
+| `parallel_side_detection_enabled` | `true` | `true` | 広めの並走候補を未来予測へ渡す。 |
+| `parallel_side_s_m` | `12.0` | `12.0` | 広めの並走候補の前後範囲。 |
+| `parallel_side_margin_m` | `4.0` | `4.0` | 広めの並走候補の横幅。 |
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `lookahead_s_m` | `35.0` | 前方何mまで他車を見るか。上げると早く前走車を意識する。下げると近づくまで反応しない。 |
-| `follow_trigger_s_m` | `12.0` | 前走車がこの距離より近いと `blocked=true` になりやすい。上げると早めに追従・追い越し準備へ入る。下げると接近してから反応する。 |
-| `same_corridor_width_m` | `0.90` | 自車と他車の横方向差がこの範囲なら同じ走行コリドーと見る。上げると斜め前の車も前走車扱いしやすい。下げると真正面に近い車だけ見る。 |
-| `dv_block_threshold_mps` | `0.20` | 自車が相手よりこの速度差以上速いと、距離が少しあっても詰まり判定しやすい。下げると追従・追い越し準備が早くなる。上げると遅くなる。 |
-| `opponent_stale_time_sec` | `0.50` | V2X他車情報がこの秒数より古いと無視する。短くすると古い相手情報に引っ張られにくいが、V2Xが途切れた瞬間に相手を見失いやすい。 |
+カーブで追い越し開始してほしくない場合:
 
-## 横並び検出
+| パラメータ | 現在値 | fallback | 見る理由 |
+|---|---:|---:|---|
+| `straight_only_overtake_enabled` | `true` | `true` | 直線以外で新規PASS開始を止める。 |
+| `straight_overtake_max_curvature_m_inv` | `0.025` | `0.025` | 追い越し開始を許可する最大曲率。下げるほど保守的。 |
+| `straight_overtake_lookahead_m` | `12.0` | `12.0` | 追い越し開始ゲートが先読みする距離。 |
+| `straight_overtake_release_hysteresis_m_inv` | `0.005` | `0.005` | 一度閉じたゲートを開き直すためのヒステリシス。 |
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `side_by_side_s_m` | `4.0` | 前後方向でこの範囲内なら横並び候補。上げると横並び判定が広くなり、merge backや追い越しを抑えやすい。下げると本当に隣にいる時だけ反応する。 |
-| `side_margin_m` | `1.20` | 横方向でこの範囲内なら横並び候補。上げると隣車を検出しやすいが、離れた車にも反応しやすい。下げると接近した時だけ反応する。 |
-| `side_yield_s_m` | `0.30` | 相手が前に出たとみなす前後差。相手の `side_delta_s` がこれより大きいと `YIELD_BEHIND` が選ばれやすい。下げると早く譲る。上げると横並び維持を粘る。 |
+## 起動/入出力
 
-## 横並び維持
+主に `overtake_planner_node.cpp` が読みます。
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `side_by_side_target_gap_m` | `1.10` | 相手から横方向に確保したい距離。上げると離れようとする力が強くなる。壁に近い側では膨らみやすくなる。 |
-| `side_by_side_shift_distance_m` | `5.0` | 目標横位置へ移るために使う前方距離。上げると横移動が緩やか。下げると横移動が速い。 |
-| `side_by_side_speed_cap_mps` | `4.5` | 横並び維持中の速度上限。下げると曲がりやすくなり、安全寄り。上げると速いが横Gや壁リスクが増える。 |
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `enabled` | `true` | `true` | `false` ならplannerは介入せず、MPCの元参照を使う。 |
+| `reference_package` | `multi_purpose_mpc_ros` | `multi_purpose_mpc_ros` | Frenet参照CSVを探すROS package。 |
+| `reference_csv` | `env/final_ver3/traj_mincurv_manual.csv` | 同左 | Frenetの基準線。変えると `s/d`、壁余裕、左右offsetの意味が変わる。 |
+| `own_vehicle_id` | `auto` | `auto` | `auto` は `ROS_DOMAIN_ID=N` から `dN` を推定する。 |
+| `control_rate_hz` | `20.0` | `20.0` | planner更新周期。上げると反応は細かいが負荷が増える。 |
+| `ego_stale_time_sec` | `0.50` | `0.50` | 自車odometryが古いとplannerを無効化する。 |
+| `ignore_near_ego_m` | YAML未記載 | `1.0` | 自車近傍のV2X点を無視する。自車誤認識対策。 |
+| `position_jump_threshold_m` | YAML未記載 | `5.0` | V2X位置が急に飛んだとき速度推定をリセットする。 |
 
-## コーナー横並び・譲り
+## Horizon
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `corner_side_yield_curvature_m_inv` | `0.06` | これ以上の曲率を「横並びで危ないコーナー」と見る。下げると譲り判定が増える。上げると譲り判定が減る。 |
-| `corner_side_yield_lookahead_m` | `8.0` | 何m先まで曲率を見るか。上げると早めにコーナーを検知して譲りやすい。下げると直前まで粘る。 |
-| `corner_side_yield_wall_clearance_m` | `0.25` | コーナー横並びで、壁余裕がこの値以下なら譲りやすくなる。上げると壁から遠くても譲る。下げると壁際まで粘る。 |
-| `corner_yield_target_d_m` | `0.0` | コーナーで譲るときの横目標d。`0.0` は中心線。外側で膨らむなら中心寄りに戻す効果がある。 |
-| `corner_yield_rejoin_gap_m` | `5.5` | コーナー横並びで譲った後、通常状態へ戻るために必要な前方ギャップ。上げると譲り状態を長く保持する。 |
-| `yield_rejoin_wall_clearance_m` | `0.15` | `YIELD_BEHIND` や `ABORT_RECOVERY` から戻るために必要な壁余裕。上げると壁から離れるまで復帰しない。下げると早く復帰する。 |
-| `corner_follow_speed_margin_mps` | `0.20` | コーナー横並びで譲るとき、相手速度からどれだけ落とすか。上げると相手の後ろに入りやすい。下げると速度を残しやすい。 |
-| `corner_yield_v_max_mps` | `3.0` | コーナー横並びで譲るときの速度上限。下げると安全寄り。上げるとタイムロスは減るが曲がりきれないリスクが増える。 |
+`horizon_points` と `horizon_dt_sec` は、MPCへ出すoverride列の長さと時間刻みです。
+未来横並びリスクの先読み時間は別の `future_side_prediction_*` が担当します。
 
-## 横ずれ時の減速
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `horizon_points` | `20` | `20` | overrideの点数。baseline MPCでは20、delay-awareではlaunchから50へ上書き。 |
+| `horizon_dt_sec` | `0.025` | `0.025` | override各点の時間刻み。 |
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `large_lateral_error_threshold_m` | `0.60` | 現在dと目標dの差がこの値を超えたら、横移動中として速度を抑える。下げると小さい横移動でも減速する。 |
-| `large_lateral_error_v_max_mps` | `2.5` | 横ずれが大きい時の速度上限。下げると横移動中にかなり慎重になる。上げると速度を残す。 |
+## BlockedRiskAnalyzer
 
-## 追い越し可否・左右オフセット
+`BlockedRiskAnalyzer` は、前方閉塞、横並び、parallel side candidate、左右pass gapを判定します。
+状態遷移や候補生成は担当しません。
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `min_pass_gap_m` | `1.45` | 左右に必要な追い越し空間の最小値。上げると追い越し候補が出にくくなる。下げると狭い隙間でも追い越しやすい。 |
-| `pass_gap_hysteresis_m` | `0.15` | 既に追い越し中の方向に対して必要gapを少し緩める量。上げると今の追い越し方向を維持しやすい。 |
-| `left_offset_m` | `0.80` | 左追い越し時の目標d。大きくするとより左へ寄る。壁余裕とセットで見る。 |
-| `right_offset_m` | `-0.80` | 右追い越し時の目標d。小さくするとより右へ寄る。壁余裕とセットで見る。 |
-| `prepare_distance_m` | `8.0` | 左右追い越しオフセットへ移る距離。上げると滑らか。下げると素早く寄るが急操作になる。 |
-| `merge_distance_m` | `12.0` | 中心線へ戻る距離。上げるとゆっくり戻る。下げると早く戻るが挙動が急になる。 |
-| `merge_front_gap_m` | `6.0` | 追い越し後、前方ギャップがこの値を超えたら戻り始める。上げると戻るのが遅い。下げると早く戻る。 |
-| `pass_safe_required_cycles` | `5.0` | PASS候補が連続して安全と判定される必要回数。上げると追い越し開始が慎重になる。下げるとすぐ追い越しへ入りやすい。 |
+### 前方閉塞
 
-## 速度上限
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `lookahead_s_m` | `10.0` | `10.0` | 前方何mまで他車を見るか。 |
+| `follow_trigger_s_m` | `12.0` | `12.0` | 前方車がこの距離より近いと `blocked=true` になりやすい。 |
+| `same_corridor_width_m` | `0.90` | `0.90` | 自車と他車の横方向差がこの範囲なら同一コリドー。 |
+| `dv_block_threshold_mps` | `0.20` | `0.20` | 自車が相手よりこの速度差以上速いと、遠めでも閉塞扱いしやすい。 |
+| `opponent_stale_time_sec` | `0.50` | `0.50` | V2X他車情報が古いと無視する。 |
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `follow_speed_margin_mps` | `0.20` | 前走車追従時に相手速度よりどれだけ遅くするか。上げると車間が開きやすい。下げると詰めやすい。 |
-| `yield_speed_margin_mps` | `0.60` | 横並びや譲りで、相手速度よりどれだけ遅くするか。上げると後ろに入りやすい。下げると横並びが長引きやすい。 |
-| `yield_rejoin_gap_m` | `3.0` | 譲った後、前方ギャップがこの値以上なら通常の追従へ戻る。上げると譲りを長く保持する。下げると早く戻る。 |
-| `recovery_v_max_mps` | `5.0` | `RECOVERY` 中の速度上限。下げると復帰時に安全寄り。上げると戻りながら速く走る。 |
-| `wall_margin_recovery_v_max_mps` | `2.5` | 壁余裕が不足している復帰中の速度上限。下げると壁際でかなり慎重になる。 |
-| `v_passthrough_mps` | `50.0` | plannerが速度を制限しない時の実質上限。通常は十分大きい値にしてMPC本体の速度計画を通す。 |
+### 同方向フィルタ
 
-## 壁・安全楕円
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `same_direction_filter_enabled` | `true` | `true` | 十分な速度があり逆方向に見える相手を対象から外す。 |
+| `same_direction_min_speed_mps` | `0.30` | `0.30` | 進行方向を信頼する最低速度。これ未満は方向不明として残す。 |
+| `same_direction_min_s_dot_mps` | `0.05` | `0.05` | 参照線方向速度 `s_dot` がこの値以上なら同方向。 |
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `d_min_m` | `-1.35` | 走行可能な右側境界。より大きくすると右側の使用幅が狭くなる。 |
-| `d_max_m` | `1.35` | 走行可能な左側境界。より小さくすると左側の使用幅が狭くなる。 |
-| `min_wall_margin_m` | `0.25` | 壁から必ず残す横余裕。上げると壁際候補をrejectしやすい。下げると壁近くまで使えるが接触リスクが増える。 |
-| `safety_ellipse_a_m` | `3.0` | 他車との前後方向安全楕円の長さ。上げると前後距離を広く取り、追い越しや接近が慎重になる。 |
-| `safety_ellipse_b_m` | `1.2` | 他車との横方向安全楕円の幅。上げると横方向の接近に厳しくなる。 |
-| `min_ellipse_h` | `0.20` | 安全楕円の余裕しきい値。上げると他車接近候補をrejectしやすい。下げると接近を許しやすい。 |
+### 横並び/parallel side
 
-安全コリドーは次で決まります。
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `side_by_side_s_m` | `4.0` | `4.0` | 狭義の横並び前後範囲。 |
+| `side_margin_m` | `1.20` | `1.20` | 狭義の横並び横幅。 |
+| `parallel_side_detection_enabled` | `true` | `true` | 広めの並走候補を未来リスクへ渡す。 |
+| `parallel_side_s_m` | `12.0` | `12.0` | parallel sideの前後範囲。 |
+| `parallel_side_margin_m` | `4.0` | `4.0` | parallel sideの横幅。 |
+| `side_yield_s_m` | `0.30` | `0.30` | 横並び相手がこの前後差より前なら、後ろへ譲りやすい。 |
+
+### Pass gap
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `min_pass_gap_m` | `1.8` | `1.80` | 左右に必要な追い越し空間。上げるとPASS候補が減る。 |
+| `pass_gap_hysteresis_m` | `0.15` | `0.15` | 既に追い越し中の方向だけ、必要gapを少し緩める。 |
+| `safety_ellipse_b_m` | `1.8` | `1.8` | pass gap必要量にも効く横方向安全幅。 |
+| `min_ellipse_h` | `0.20` | `0.20` | pass gap必要量と他車安全評価に効く余裕。 |
+
+`pass_gap_reason` は `ok`, `left_gap_narrow`, `right_gap_narrow`, `both_gap_narrow`, `no_target`, `large_lateral_error` を見ます。
+
+## FutureSideBySideRiskAnalyzer
+
+`FutureSideBySideRiskAnalyzer` は、現在の `side_by_side` または `parallel_side_candidate` が短時間後のコーナーで壁余裕を失うかを先読みします。
+危険なら `future_yield_required=true` とし、`YIELD_BEHIND` を優先しやすくします。
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `future_side_prediction_enabled` | `true` | `true` | 未来横並び予測を使う。 |
+| `future_side_prediction_horizon_sec` | `1.2` | `1.2` | 何秒先まで見るか。上げると早めに譲るが保守的。 |
+| `future_side_prediction_dt_sec` | `0.3` | `0.3` | 予測の時間刻み。下げると細かいが少し重い。 |
+| `future_side_yield_wall_clearance_m` | `0.35` | `0.35` | 未来の横並び維持目標がこの壁余裕を下回ると譲る。 |
+
+## Core側ゲート
+
+`OvertakePlannerCore` が、risk判定後に追い越し開始ゲートや大きい横ずれ時の凍結を加えます。
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `straight_only_overtake_enabled` | `true` | `true` | 直線ゲートが開いている時だけ新規PASS開始を許可する。 |
+| `straight_overtake_max_curvature_m_inv` | `0.025` | `0.025` | 追い越し開始を許可する最大曲率。 |
+| `straight_overtake_lookahead_m` | `12.0` | `12.0` | 開始ゲートが曲率を見る前方距離。 |
+| `straight_overtake_release_hysteresis_m_inv` | `0.005` | `0.005` | 閉じた開始ゲートを開き直すヒステリシス。 |
+| `corner_side_yield_curvature_m_inv` | `0.05` | `0.05` | 横並び中に譲りを強めるコーナー曲率。下げるほど緩いカーブでも譲る。 |
+| `corner_side_yield_lookahead_m` | `10.0` | `10.0` | 横並びコーナー判定で曲率を見る前方距離。 |
+| `large_lateral_error_threshold_m` | `0.60` | `0.60` | 横ずれがこの値を超え、危険文脈があるとPASSを凍結して復帰寄りにする。 |
+| `large_lateral_error_v_max_mps` | `2.5` | `2.5` | 大きい横ずれ時の速度上限。 |
+
+## CandidateBuilder
+
+`CandidateBuilder` は、候補ごとの横オフセット列と速度上限列を作ります。
+ここでは候補を作るだけで、安全かどうかは `SafetyEvaluator` が評価します。
+
+### 横目標/軌道形状
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `left_offset_m` | `0.80` | `0.80` | 左追い越し時の目標d。 |
+| `right_offset_m` | `-0.80` | `-0.80` | 右追い越し時の目標d。 |
+| `prepare_distance_m` | `8.0` | `8.0` | PASS目標dへ移る距離。上げると横移動が穏やか。 |
+| `merge_distance_m` | `12.0` | `12.0` | 中心線へ戻る距離。 |
+| `side_by_side_target_gap_m` | `0.75` | `0.75` | 横並び時に相手から確保したい横距離。 |
+| `side_by_side_shift_distance_m` | `7.0` | `7.0` | 横並び維持目標へ移る距離。 |
+| `corner_yield_target_d_m` | `0.0` | `0.0` | コーナー譲り時の横目標。通常は中心線。 |
+
+### 候補速度
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `v_passthrough_mps` | `50.0` | `50.0` | plannerが速度を制限しない時の実質上限。 |
+| `follow_speed_margin_mps` | `0.20` | `0.20` | FOLLOW時に前走車よりどれだけ遅くするか。 |
+| `yield_speed_margin_mps` | `0.60` | `0.60` | YIELD/SIDE_BY_SIDEで相手よりどれだけ遅くするか。 |
+| `corner_follow_speed_margin_mps` | `0.20` | `0.20` | コーナー譲り時に相手よりどれだけ遅くするか。 |
+| `side_by_side_speed_cap_mps` | `7.5` | `7.5` | SIDE_BY_SIDE_KEEPの通常速度上限。 |
+| `corner_yield_v_max_mps` | `3.0` | `3.0` | コーナー譲り時の最大速度。 |
+| `recovery_v_max_mps` | `8.5` | `8.5` | RECOVERY中の速度上限。 |
+| `wall_margin_recovery_v_max_mps` | `8.5` | `8.5` | 安全コリドー外から復帰する時の速度上限。 |
+| `safe_stop_v_mps` | `0.20` | `0.20` | SAFE_STOP候補の速度上限。0ではなく小さい正値を使う。 |
+
+## SafetyEvaluator
+
+`SafetyEvaluator` は、候補のd列と他車予測を見て `feasible` / `reject_reason` を決めます。
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `d_min_m` | `-1.35` | `-1.35` | 右側境界。 |
+| `d_max_m` | `1.35` | `1.35` | 左側境界。 |
+| `min_wall_margin_m` | `0.50` | `0.50` | 壁から残す余裕。 |
+| `safety_ellipse_a_m` | `3.0` | `3.0` | 他車との前後方向安全楕円。 |
+| `safety_ellipse_b_m` | `1.8` | `1.8` | 他車との横方向安全楕円。 |
+| `min_ellipse_h` | `0.20` | `0.20` | 安全楕円の余裕しきい値。 |
+
+安全コリドー:
 
 ```text
 lower_d = d_min_m + min_wall_margin_m
 upper_d = d_max_m - min_wall_margin_m
 ```
 
-現在値では `-1.10 <= d <= 1.10` が候補生成・安全評価で使える横範囲です。
+現在YAMLでは `-1.10 <= d <= 1.10`、fallbackでは `-0.85 <= d <= 0.85` です。
 
-## 安全停止 SAFE_STOP
+## BehaviorStateMachine
+
+`BehaviorStateMachine` は、候補選択結果をそのままモードにせず、切替を安定化します。
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `pass_safe_required_cycles` | `5.0` | `5.0` | PASS候補が連続して安全と判定される必要回数。 |
+| `merge_front_gap_m` | `6.0` | `6.0` | 追い越し後、前方ギャップがこの値を超えると戻り始める。 |
+| `yield_rejoin_gap_m` | `3.0` | `3.0` | YIELD後に通常状態へ戻るための前方ギャップ。 |
+| `corner_yield_rejoin_gap_m` | `5.5` | `5.5` | コーナー譲り後に戻るための前方ギャップ。 |
+| `yield_rejoin_wall_clearance_m` | `0.25` | `0.25` | YIELD/RECOVERY解除に必要な壁余裕。 |
+| `recovery_release_lateral_error_m` | `0.60` | `0.60` | ABORT_RECOVERYを抜けるために必要な中心線からの横ずれ上限。負値で無効。 |
+| `yield_release_lateral_error_m` | `0.60` | `0.60` | YIELD_BEHIND/future_yield_holdを抜けるために必要な中心線からの横ずれ上限。負値で無効。 |
+| `abort_timeout_sec` | `5.0` | `5.0` | 追い越し状態が長引いた時に復帰へ倒す時間。 |
+| `min_mode_hold_time_sec` | `0.60` | `0.60` | モード切替直後の保持時間。 |
+| `keep_mode_bonus` | `25.0` | `25.0` | 現在モードに沿う候補をスコア上優遇する強さ。 |
+| `lateral_target_max_step_m` | `0.25` | `0.25` | MPCへpublishする横オフセット列の1周期あたり最大変化量。`0` 以下で無効。 |
+
+## PlannerOutputBuilder / 速度ガード
+
+`PlannerOutputBuilder` は、選ばれた候補を `PlannerOutput` に詰めます。
+また、unsafe候補や壁リスク、MPC health悪化時に、横方向候補を復活させず速度だけを落とす `SPEED_GUARD` を作ります。
+`SPEED_GUARD` が速度だけを目的とする場合、横オフセットは中心線へ0埋めせず、現在の横位置を保持します。
+複数の速度capが同時に成立した場合は、最も低いcapとその理由を採用します。
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `speed_only_fallback_enabled` | `true` | `true` | unsafeな横方向候補やSAFE_STOP infeasible時に速度only fallbackを出す。 |
+| `speed_only_fallback_v_max_mps` | `3.0` | `3.0` | 速度only fallbackの上限。 |
+| `wall_risk_speed_guard_enabled` | `true` | `true` | 壁余裕不足時に速度だけ落とす。 |
+| `wall_soft_margin_m` | `0.25` | `0.25` | 壁リスク速度ガードを始めるソフト余裕。 |
+| `wall_risk_v_max_mps` | `5.0` | `5.0` | 壁リスク時の速度上限。 |
+| `mpc_health_speed_guard_enabled` | `true` | `true` | MPC health debugを見て速度を落とす。 |
+| `mpc_health_infeasible_count_threshold` | `1` | `1` | infeasible countがこの値以上なら速度ガード。 |
+| `mpc_health_solve_time_warn_ms` | `80.0` | `80.0` | solve timeがこの値以上なら速度ガード。 |
+| `mpc_health_v_max_mps` | `3.0` | `3.0` | MPC health悪化時の速度上限。 |
+| `mpc_health_stale_time_sec` | `0.60` | `0.60` | MPC health debugが古い場合のstale判定。 |
+
+## Section safety profile
+
+区間安全プロファイルは、MPCのref velocity YAMLのように区間ごとに壁余裕や速度capの厳しさを変えるplanner側ポリシーです。
+YAMLには空配列を常設せず、必要なときだけ同じ長さの配列を追加してください。
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `section_safety_profile_enabled` | `true` | `true` | 区間安全プロファイルを有効化する。 |
+| `section_safety_names` | YAML未記載 | `[]` | 区間名。 |
+| `section_safety_profiles` | YAML未記載 | `[]` | `wall_risk_moderate` / `side_by_side_corner_strict` など。 |
+| `section_safety_role_policies` | YAML未記載 | `[]` | `outer_yields` など。 |
+| `section_safety_start_s_m` | YAML未記載 | `[]` | s座標で区間開始を指定。 |
+| `section_safety_end_s_m` | YAML未記載 | `[]` | s座標で区間終了を指定。 |
+| `section_safety_start_wp` | YAML未記載 | `[]` | waypoint indexで区間開始を指定。 |
+| `section_safety_end_wp` | YAML未記載 | `[]` | waypoint indexで区間終了を指定。 |
+
+例:
+
+```yaml
+section_safety_names: ["first_corner"]
+section_safety_profiles: ["side_by_side_corner_strict"]
+section_safety_role_policies: ["outer_yields"]
+section_safety_start_wp: [120]
+section_safety_end_wp: [180]
+```
+
+| profile / role | 効果 |
+|---|---|
+| `wall_risk_moderate` | `wall_soft_margin_m` を1.15倍、速度capを0.85倍にする。 |
+| `side_by_side_corner_strict` | `wall_soft_margin_m` を1.35倍、速度capを0.65倍にし、外側譲りを強める。 |
+| `outer_yields` | 外側車両が壁リスクを持つサイドバイサイドでは `YIELD_BEHIND` を優先する。 |
+
+## SAFE_STOP
 
 `SAFE_STOP` は、追い越し、追従、譲り、復帰の通常候補が安全に成立しないときだけ使う最後のplanner内fallbackです。
-MPC側では `0.0 m/s` の速度capが無効扱いになるため、停止意図は小さい正の速度上限で表現します。
+MPC側で `0.0 m/s` が無効扱いにならないよう、停止意図は小さい正の速度上限で表現します。
 
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `safe_stop_enabled` | `true` | `false` にすると安全停止候補を使わない。通常のFOLLOW/YIELD/RECOVERYだけで判断する。 |
-| `safe_stop_v_mps` | `0.20` | SAFE_STOP中に出す速度上限。`0.0` は使わない。上げると停止意図が弱く、下げるとより停止寄りになる。 |
-| `safe_stop_trigger_cycles` | `3` | 通常fallbackがunsafeな状態が何周期続いたらSAFE_STOPへ入るか。上げると誤停止しにくいが反応が遅い。 |
-| `safe_stop_release_cycles` | `5` | 解除条件が何周期続いたらSAFE_STOPを抜けるか。上げると安定するが再発進が遅い。 |
-| `safe_stop_release_front_gap_m` | `5.0` | 再発進に必要な前方ギャップ。上げると前走車から離れるまで待つ。 |
-| `safe_stop_release_wall_clearance_m` | `0.20` | 再発進に必要な壁余裕。上げると壁から離れるまで待つ。 |
-| `safe_stop_lateral_error_threshold_m` | `0.40` | SAFE_STOP目標dからの許容横ずれ。上げると解除しやすく、下げると保持しやすい。 |
-| `safe_stop_release_speed_mps` | `0.50` | 再発進判定に入る自車速度上限。上げると動きながら解除しやすくなる。 |
-
-## 状態遷移・チャタリング抑制
-
-| パラメータ | 現在値 | 変更すると何が変わるか |
-|---|---:|---|
-| `abort_timeout_sec` | `5.0` | 追い越し状態がこの秒数を超えて進展しない場合、復帰へ倒れやすくなる。下げると早めに諦める。上げると粘る。 |
-| `min_mode_hold_time_sec` | `0.60` | モード切替後、この秒数は次の切替を抑える。上げると安定するが反応が遅れる。下げると反応は速いがチャタリングしやすい。 |
-| `keep_mode_bonus` | `25.0` | 現在モードに沿った候補を優遇する強さ。上げると今の判断を維持しやすい。下げると状況変化に合わせて切り替わりやすい。 |
-
-## YAMLに未記載だが追加できる内部デフォルト
-
-コード上は以下のパラメータも宣言されています。必要ならYAMLに追加して調整できます。
-
-| パラメータ | デフォルト | 変更すると何が変わるか |
-|---|---:|---|
-| `ignore_near_ego_m` | `1.0` | 自車からこの距離未満のV2X点を無視する。上げると自車付近の誤検出を除外しやすいが、近接車を見落とす可能性がある。 |
-| `position_jump_threshold_m` | `5.0` | V2X位置が1サンプルでこれ以上飛んだ場合、速度推定をリセットする。下げると異常値に強くなるが、急な位置変化で速度0扱いになりやすい。 |
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `safe_stop_enabled` | `true` | `true` | SAFE_STOP候補を使う。 |
+| `safe_stop_v_mps` | `0.20` | `0.20` | SAFE_STOP中に出す速度上限。 |
+| `safe_stop_trigger_cycles` | `1` | `1` | 通常fallbackがunsafeな状態が何周期続いたらSAFE_STOPへ入るか。 |
+| `safe_stop_release_cycles` | `5` | `5` | 解除条件が何周期続いたらSAFE_STOPを抜けるか。 |
+| `safe_stop_release_front_gap_m` | `5.0` | `5.0` | 再発進に必要な前方ギャップ。 |
+| `safe_stop_release_wall_clearance_m` | `0.20` | `0.20` | 再発進に必要な壁余裕。 |
+| `safe_stop_lateral_error_threshold_m` | `0.40` | `0.40` | SAFE_STOP目標dからの許容横ずれ。 |
+| `safe_stop_release_speed_mps` | `0.50` | `0.50` | 再発進判定に入る自車速度上限。 |
 
 ## 症状別の調整例
 
 ### 横並びコーナーで外側へ膨らむ
 
-まずは速度と横移動を穏やかにします。
+まずは速度と壁余裕の判定を保守的にします。
 
 ```yaml
-side_by_side_speed_cap_mps: 4.0
-side_by_side_shift_distance_m: 7.0
-side_yield_s_m: 0.10
-corner_yield_v_max_mps: 2.5
+future_side_yield_wall_clearance_m: 0.35
+corner_side_yield_wall_clearance_m: 0.55
+corner_yield_v_max_mps: 3.0
+wall_risk_v_max_mps: 5.0
+mpc_health_v_max_mps: 3.0
+recovery_release_lateral_error_m: 0.60
+yield_release_lateral_error_m: 0.60
 ```
 
 それでも壁側へ逃げる場合は、相手から離れる横距離を少し弱めます。
 
 ```yaml
-side_by_side_target_gap_m: 0.95
+side_by_side_target_gap_m: 0.65
 ```
 
 ### 横並びなのに譲らず並び続ける
 
 ```yaml
-side_yield_s_m: 0.10
+side_yield_s_m: 0.20
 yield_speed_margin_mps: 0.80
 corner_side_yield_curvature_m_inv: 0.04
 ```
@@ -211,7 +340,8 @@ pass_safe_required_cycles: 3.0
 follow_trigger_s_m: 14.0
 ```
 
-追い越し判断が早く、緩くなります。ただし接近リスクも増えるので、`/debug/overtake/metrics` の `reason` と `pass_gap_reason` を確認してください。
+追い越し判断が早く、緩くなります。
+ただし接近リスクも増えるので、`/debug/overtake/metrics` の `reason` と `pass_gap_reason` を確認してください。
 
 ### 判断が左右・追従で揺れる
 
@@ -219,32 +349,47 @@ follow_trigger_s_m: 14.0
 min_mode_hold_time_sec: 0.80
 keep_mode_bonus: 35.0
 pass_gap_hysteresis_m: 0.25
+lateral_target_max_step_m: 0.20
 ```
 
-現在モードを維持しやすくなり、細かい切替が減ります。反応は少し遅くなります。
+現在モードを維持しやすくなり、細かい切替が減ります。
+反応は少し遅くなります。
 
 ## 調整時に見るdebug
 
-調整結果は以下を見ると判断しやすいです。
+`/debug/overtake/metrics` では、まず以下を見ます。
 
-- `/debug/overtake/mode`
-  - `FREE_RUN`, `FOLLOW_BLOCKED`, `SIDE_BY_SIDE_KEEP`, `YIELD_BEHIND` など現在モード
-- `/debug/overtake/metrics`
-  - `blocked`
-  - `side_by_side`
-  - `corner_side_by_side`
-  - `active_override`
-  - `pass_gap_reason`
-  - `safe_stop_triggered`
-  - `safe_stop_reason`
-  - `safe_stop_trigger_count`
-  - `safe_stop_release_count`
-  - `reason`
-  - `target_lateral_offset_m`
-  - `left_pass_gap_m`
-  - `right_pass_gap_m`
-  - `min_cbf_h`
-  - `cbf_slack`
+- `blocked`
+- `side_by_side`
+- `parallel_side_candidate`
+- `corner_side_by_side`
+- `future_side_by_side`
+- `future_corner_side_by_side`
+- `future_yield_required`
+- `future_outer_wall_risk`
+- `future_wall_clearance_m`
+- `yield_reason`
+- `straight_overtake_start_allowed`
+- `overtake_start_abs_curvature`
+- `overtake_start_gate_reason`
+- `pass_gap_reason`
+- `left_pass_gap_m`
+- `right_pass_gap_m`
+- `ego_wall_clearance_m`
+- `active_override`
+- `selected`
+- `reason`
+- `speed_only_fallback_active`
+- `wall_risk_speed_guard_active`
+- `mpc_health_speed_guard_active`
+- `speed_cap_reason`
+- `applied_speed_cap_mps`
+- `safe_stop_triggered`
+- `safe_stop_reason`
+- `safe_stop_trigger_count`
+- `safe_stop_release_count`
+- `min_cbf_h`
+- `cbf_slack`
 
-パラメータを変えたら、まず「期待したmodeに入っているか」を見てください。
-modeが変わっていない場合、速度や横オフセットの値を変えても期待した挙動にはなりにくいです。
+パラメータを変えたら、まず期待したmodeとreasonに入っているかを見てください。
+modeが変わっていない場合、速度や横オフセットの値だけを変えても期待した挙動にはなりにくいです。

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .utils.fs_utils import copytree_replace, ensure_dir
+from .utils import rosbag_utils
 
 
 @dataclass
@@ -56,6 +57,7 @@ def collect_output(source: Path, run_dir: Path, domains: list[int]) -> Collectio
     if resolved.is_dir() and resolved.name.startswith("d") and resolved.name[1:].isdigit():
         dst = raw_dir / resolved.name
         copytree_replace(resolved, dst)
+        result.warnings.extend(_reindex_rosbags_missing_metadata(dst))
         result.domains.append(resolved.name)
         return result
 
@@ -67,9 +69,23 @@ def collect_output(source: Path, run_dir: Path, domains: list[int]) -> Collectio
         if not src.is_dir():
             result.warnings.append(f"domain output is not a directory: {src}")
             continue
-        copytree_replace(src, raw_dir / name)
+        dst = raw_dir / name
+        copytree_replace(src, dst)
+        result.warnings.extend(_reindex_rosbags_missing_metadata(dst))
         result.domains.append(name)
 
     if not result.domains:
         result.warnings.append(f"no d1-d4 directories found under {resolved}")
     return result
+
+
+def _reindex_rosbags_missing_metadata(domain_dir: Path) -> list[str]:
+    warnings: list[str] = []
+    for bag_dir_name in ("rosbag2_autoware",):
+        bag_dir = domain_dir / bag_dir_name
+        if not rosbag_utils.rosbag_storage_files_exist(bag_dir) or (bag_dir / "metadata.yaml").exists():
+            continue
+        ready, reason = rosbag_utils.ensure_rosbag_metadata(bag_dir)
+        if not ready:
+            warnings.append(f"{domain_dir.name}: {bag_dir_name} {reason}")
+    return warnings

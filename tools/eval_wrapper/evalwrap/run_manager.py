@@ -21,6 +21,7 @@ from .store import save_run
 from .utils.fs_utils import ensure_dir, slugify
 from .utils.git_utils import collect_git_info
 from .utils.hash_utils import sha256_file
+from .utils import rosbag_utils
 
 
 @dataclass
@@ -328,9 +329,12 @@ def _output_run_ready(output_run: Path, domains: list[int]) -> tuple[bool, str]:
 def _rosbag_storage_ready(domain_dir: Path) -> tuple[bool, str]:
     for bag_dir_name in ("rosbag2_autoware",):
         bag_dir = domain_dir / bag_dir_name
-        if bag_dir.is_dir():
-            has_storage = any(path.suffix in {".mcap", ".db3"} for path in bag_dir.iterdir())
-            if has_storage and not (bag_dir / "metadata.yaml").exists():
-                return False, f"{bag_dir_name} metadata.yaml not ready"
+        if not bag_dir.is_dir():
+            continue
+        if (bag_dir / "metadata.yaml").exists():
+            continue
+        if rosbag_utils.rosbag_storage_files_exist(bag_dir):
+            continue
+        return False, f"{bag_dir_name} storage file not ready"
 
     return True, ""

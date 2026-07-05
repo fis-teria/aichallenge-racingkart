@@ -53,6 +53,7 @@
     <include file="$(find-pkg-share overtake_planner)/launch/overtake_planner.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
       <arg name="input_odom" value="/delay_aware_mpc/localization/kinematic_state"/>
+      <arg name="horizon_points" value="50"/>
     </include>
   </group>
 </launch>

@@ -7,6 +7,7 @@
 #include "overtake_planner/safety_evaluator.hpp"
 #include "overtake_planner/types.hpp"
 
+#include <limits>
 #include <vector>
 
 namespace overtake_planner {
@@ -46,6 +47,9 @@ private:
   // 横並びで相手が縦方向に前へ出ている場合は、無理に並走せず後ろへ譲る。
   bool shouldYieldBehindSideBySide(const EgoState &ego,
                                    const BlockedInfo &blocked_info) const;
+  void applyLateralTargetRateLimit(double now_sec, PlannerOutput &output);
+  void rememberPublishedLateralTarget(double now_sec,
+                                      const PlannerOutput &output);
 
   FrenetFrame frame_;
   PlannerConfig config_;
@@ -57,6 +61,9 @@ private:
   double overtake_start_sec_{0.0};
   int safe_stop_trigger_count_{0};
   bool straight_overtake_start_allowed_{true};
+  std::vector<double> last_published_lateral_offsets_;
+  double last_published_lateral_target_sec_{
+      std::numeric_limits<double>::quiet_NaN()};
 };
 
 } // namespace overtake_planner

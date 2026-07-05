@@ -18,6 +18,7 @@
     <include file="$(find-pkg-share overtake_planner)/launch/overtake_planner.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
       <arg name="input_odom" value="/localization/kinematic_state"/>
+      <arg name="horizon_points" value="20"/>
     </include>
   </group>
 </launch>

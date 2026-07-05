@@ -108,6 +108,7 @@ overtake_planner::PlannerConfig makeConfig() {
   config.safety_ellipse_a_m = 1.0;
   config.safety_ellipse_b_m = 0.25;
   config.min_ellipse_h = 0.1;
+  config.lateral_target_max_step_m = 100.0;
   return config;
 }
 
@@ -697,11 +698,34 @@ TEST(OvertakePlannerCore, WallRiskInsideCorridorPublishesSpeedGuard) {
   EXPECT_EQ(output.reason, "wall_risk_speed_guard");
   EXPECT_EQ(output.speed_cap_reason, "wall_risk_speed_guard");
   ASSERT_FALSE(output.lateral_offsets.empty());
-  EXPECT_TRUE(std::all_of(output.lateral_offsets.begin(),
-                          output.lateral_offsets.end(),
-                          [](double d) { return std::abs(d) < 1.0e-9; }));
+  EXPECT_TRUE(std::all_of(
+      output.lateral_offsets.begin(), output.lateral_offsets.end(),
+      [ego](double d) { return std::abs(d - ego.frenet.d) < 1.0e-9; }));
   ASSERT_FALSE(output.speed_caps.empty());
   EXPECT_NEAR(output.speed_caps.back(), config.wall_risk_v_max_mps, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, LateralTargetRateLimitClampsPublishedOverrideStep) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.lateral_target_max_step_m = 0.20;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent_on_left = makeOpponent(frame, 5.0, 0.6);
+  const auto first = core.update(0.1, ego, {opponent_on_left});
+  ASSERT_TRUE(first.active_override);
+  ASSERT_FALSE(first.lateral_offsets.empty());
+  ASSERT_LT(first.target_lateral_offset_m, -0.3);
+
+  const auto opponent_on_right = makeOpponent(frame, 5.0, -0.6);
+  const auto second = core.update(0.2, ego, {opponent_on_right});
+
+  ASSERT_TRUE(second.active_override);
+  ASSERT_FALSE(second.lateral_offsets.empty());
+  EXPECT_LE(second.target_lateral_offset_m - first.target_lateral_offset_m,
+            config.lateral_target_max_step_m + 1.0e-9);
+  EXPECT_GT(second.target_lateral_offset_m, first.target_lateral_offset_m);
 }
 
 TEST(OvertakePlannerCore, MultipleSpeedGuardsUseLowestCapReason) {
@@ -1169,24 +1193,21 @@ TEST(OvertakePlannerCore, StraightOnlyGateReopensAfterHysteresisClears) {
   config.keep_mode_bonus = 0.0;
   overtake_planner::OvertakePlannerCore core(frame, config);
 
-  const auto first =
-      core.update(0.1, makeEgo(frame, 5.0, 0.0),
-                  {makeOpponent(frame, 13.0, -0.6)});
+  const auto first = core.update(0.1, makeEgo(frame, 5.0, 0.0),
+                                 {makeOpponent(frame, 13.0, -0.6)});
   ASSERT_FALSE(first.blocked_info.straight_overtake_start_allowed);
   ASSERT_EQ(first.mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
 
-  const auto still_closed =
-      core.update(0.2, makeEgo(frame, 12.0, 0.0),
-                  {makeOpponent(frame, 20.0, -0.6)});
+  const auto still_closed = core.update(0.2, makeEgo(frame, 12.0, 0.0),
+                                        {makeOpponent(frame, 20.0, -0.6)});
   EXPECT_FALSE(still_closed.blocked_info.straight_overtake_start_allowed);
   EXPECT_GT(still_closed.blocked_info.overtake_start_abs_curvature,
             config.straight_overtake_max_curvature_m_inv -
                 config.straight_overtake_release_hysteresis_m_inv);
   EXPECT_EQ(still_closed.mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
 
-  const auto reopened =
-      core.update(0.3, makeEgo(frame, 22.0, 0.0),
-                  {makeOpponent(frame, 30.0, -0.6)});
+  const auto reopened = core.update(0.3, makeEgo(frame, 22.0, 0.0),
+                                    {makeOpponent(frame, 30.0, -0.6)});
   EXPECT_TRUE(reopened.blocked_info.straight_overtake_start_allowed);
   EXPECT_TRUE(reopened.blocked_info.overtake_start_gate_reason.empty());
   EXPECT_EQ(reopened.mode,

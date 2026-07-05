@@ -147,6 +147,7 @@ struct BlockedInfo {
   double predicted_opponent_d{std::numeric_limits<double>::quiet_NaN()};
   double future_prediction_time_sec{0.0};
   std::string yield_reason{};
+  double ego_lateral_offset_m{0.0};
   double ego_wall_clearance_m{std::numeric_limits<double>::infinity()};
   double left_pass_gap_m{std::numeric_limits<double>::infinity()};
   double right_pass_gap_m{std::numeric_limits<double>::infinity()};
@@ -229,6 +230,8 @@ struct PlannerConfig {
   double corner_yield_target_d_m{0.0};
   double corner_yield_rejoin_gap_m{5.5};
   double yield_rejoin_wall_clearance_m{0.25};
+  double recovery_release_lateral_error_m{0.60};
+  double yield_release_lateral_error_m{0.60};
   double corner_follow_speed_margin_mps{0.20};
   double corner_yield_v_max_mps{3.0};
   bool straight_only_overtake_enabled{true};
@@ -261,6 +264,7 @@ struct PlannerConfig {
   double abort_timeout_sec{5.0};
   double min_mode_hold_time_sec{0.60};
   double keep_mode_bonus{25.0};
+  double lateral_target_max_step_m{0.25};
   bool speed_only_fallback_enabled{true};
   double speed_only_fallback_v_max_mps{3.0};
   bool wall_risk_speed_guard_enabled{true};

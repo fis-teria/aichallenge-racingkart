@@ -71,12 +71,13 @@ bool hasFeasibleReleaseCandidate(
                      });
 }
 
+constexpr double kPublishedLateralTargetMemorySec = 0.5;
+
 } // namespace
 
 OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame,
                                          PlannerConfig config)
-    : frame_(std::move(frame)), config_(config),
-      blocked_risk_(frame_, config_),
+    : frame_(std::move(frame)), config_(config), blocked_risk_(frame_, config_),
       future_side_risk_(frame_, config_, blocked_risk_), safety_(config),
       state_machine_(config) {}
 
@@ -93,6 +94,9 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     // 自車状態や参照線が無いとFrenet判断ができないので、何も介入しない。
     mode_ = BehaviorMode::FREE_RUN;
     safe_stop_trigger_count_ = 0;
+    last_published_lateral_offsets_.clear();
+    last_published_lateral_target_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
     output.mode = mode_;
     output.reason = "disabled_or_invalid";
     return output;
@@ -102,8 +106,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   const double wall_soft_margin = effectiveWallSoftMargin(active_section);
   BlockedInfo blocked = blocked_risk_.detectBlocked(ego, opponents, now_sec);
   const auto predictions = predictOpponents(opponents, now_sec);
-  blocked = blocked_risk_.evaluatePassGap(blocked, opponents, predictions,
-                                          mode_);
+  blocked =
+      blocked_risk_.evaluatePassGap(blocked, opponents, predictions, mode_);
   blocked.corner_abs_curvature =
       maxAbsCurvatureAhead(ego.frenet.s, config_.corner_side_yield_lookahead_m);
   blocked.corner_side_by_side =
@@ -117,9 +121,9 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     const double close_threshold =
         std::max(0.0, config_.straight_overtake_max_curvature_m_inv);
     const double open_threshold = std::max(
-        0.0, close_threshold -
-                 std::max(0.0,
-                          config_.straight_overtake_release_hysteresis_m_inv));
+        0.0,
+        close_threshold -
+            std::max(0.0, config_.straight_overtake_release_hysteresis_m_inv));
     if (straight_overtake_start_allowed_) {
       straight_overtake_start_allowed_ =
           blocked.overtake_start_abs_curvature <= close_threshold;
@@ -127,14 +131,14 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       straight_overtake_start_allowed_ =
           blocked.overtake_start_abs_curvature <= open_threshold;
     }
-    blocked.straight_overtake_start_allowed =
-        straight_overtake_start_allowed_;
+    blocked.straight_overtake_start_allowed = straight_overtake_start_allowed_;
     if (!blocked.straight_overtake_start_allowed) {
       blocked.overtake_start_gate_reason = "curve";
     }
   } else {
     straight_overtake_start_allowed_ = true;
   }
+  blocked.ego_lateral_offset_m = ego.frenet.d;
   blocked.ego_wall_clearance_m = blocked_risk_.wallClearance(ego.frenet.d);
   blocked = future_side_risk_.evaluate(ego, blocked, opponents);
   if (active_section.force_outer_yield &&
@@ -301,6 +305,9 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   // 候補選択だけで急にモードを切り替えず、状態機械で保持時間や継続条件をかける。
   mode_ = state_machine_.update(now_sec, mode_, selected.type, blocked,
                                 selected.feasible, safe_stop_context);
+  const bool yield_lateral_hold =
+      config_.yield_release_lateral_error_m >= 0.0 &&
+      std::abs(ego.frenet.d) > config_.yield_release_lateral_error_m;
   if (mode_ == BehaviorMode::YIELD_BEHIND &&
       state_machine_.futureYieldHoldActive()) {
     const bool corner_still_relevant =
@@ -314,6 +321,9 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     if (blocked.yield_reason.empty()) {
       blocked.yield_reason = "future_yield_hold";
     }
+  } else if (mode_ == BehaviorMode::YIELD_BEHIND && yield_lateral_hold &&
+             blocked.yield_reason.empty()) {
+    blocked.yield_reason = "yield_lateral_error_hold";
   }
   if (mode_ == BehaviorMode::SAFE_STOP) {
     selected = makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
@@ -348,21 +358,18 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     safety_.evaluate(selected, predictions);
   }
 
-  // ROSノードがMPC overrideとdebug JSONを作れるよう、選択結果を平坦な出力に詰める。
-  return PlannerOutputBuilder(config_).build(PlannerOutputBuildInput{
-      mode_,
-      ego,
-      selected,
-      blocked,
-      safe_stop_context,
-      safe_stop_candidate,
-      safe_stop_candidate_infeasible,
-      safe_stop_trigger_count_,
-      state_machine_.safeStopHoldCount(),
-      state_machine_.safeStopReleaseCount(),
-      wall_soft_margin,
-      active_section,
-      mpc_health});
+  // ROSノードがMPC overrideとdebug
+  // JSONを作れるよう、選択結果を平坦な出力に詰める。
+  auto output_built =
+      PlannerOutputBuilder(config_).build(PlannerOutputBuildInput{
+          mode_, ego, selected, blocked, safe_stop_context, safe_stop_candidate,
+          safe_stop_candidate_infeasible, safe_stop_trigger_count_,
+          state_machine_.safeStopHoldCount(),
+          state_machine_.safeStopReleaseCount(), wall_soft_margin,
+          active_section, mpc_health});
+  applyLateralTargetRateLimit(now_sec, output_built);
+  rememberPublishedLateralTarget(now_sec, output_built);
+  return output_built;
 }
 
 std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
@@ -560,10 +567,51 @@ bool OvertakePlannerCore::shouldYieldBehindSideBySide(
   }
   const bool opponent_not_clearly_behind =
       blocked_info.side_delta_s > -config_.side_yield_s_m;
-  const bool close_to_wall =
-      blocked_risk_.wallClearance(ego.frenet.d) <=
-      config_.corner_side_yield_wall_clearance_m;
+  const bool close_to_wall = blocked_risk_.wallClearance(ego.frenet.d) <=
+                             config_.corner_side_yield_wall_clearance_m;
   return opponent_not_clearly_behind || close_to_wall;
+}
+
+void OvertakePlannerCore::applyLateralTargetRateLimit(double now_sec,
+                                                      PlannerOutput &output) {
+  if (!output.active_override || output.lateral_offsets.empty() ||
+      config_.lateral_target_max_step_m <= 0.0 ||
+      output.mode == BehaviorMode::SAFE_STOP ||
+      last_published_lateral_offsets_.empty() ||
+      !std::isfinite(last_published_lateral_target_sec_) ||
+      now_sec - last_published_lateral_target_sec_ >
+          kPublishedLateralTargetMemorySec) {
+    return;
+  }
+
+  const double max_step = config_.lateral_target_max_step_m;
+  for (std::size_t i = 0; i < output.lateral_offsets.size(); ++i) {
+    const std::size_t prev_i =
+        std::min(i, last_published_lateral_offsets_.size() - 1);
+    const double prev = last_published_lateral_offsets_[prev_i];
+    double &current = output.lateral_offsets[i];
+    if (!std::isfinite(prev) || !std::isfinite(current)) {
+      continue;
+    }
+    current = prev + std::clamp(current - prev, -max_step, max_step);
+  }
+  output.target_lateral_offset_m = output.lateral_offsets.back();
+}
+
+void OvertakePlannerCore::rememberPublishedLateralTarget(
+    double now_sec, const PlannerOutput &output) {
+  if (output.active_override && !output.lateral_offsets.empty()) {
+    last_published_lateral_offsets_ = output.lateral_offsets;
+    last_published_lateral_target_sec_ = now_sec;
+    return;
+  }
+  if (std::isfinite(last_published_lateral_target_sec_) &&
+      now_sec - last_published_lateral_target_sec_ >
+          kPublishedLateralTargetMemorySec) {
+    last_published_lateral_offsets_.clear();
+    last_published_lateral_target_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
+  }
 }
 
 CandidateTrajectory OvertakePlannerCore::selectCandidate(

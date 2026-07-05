@@ -23,7 +23,10 @@ private:
   // モードが短時間で振動しないよう、最低保持時間を満たしたかを見る。
   bool canSwitch(double now_sec) const;
   void markIfChanged(double now_sec, BehaviorMode before, BehaviorMode after);
-  bool shouldHoldFutureYield(const BlockedInfo &blocked_info) const;
+  bool shouldHoldFutureYield(double now_sec,
+                             const BlockedInfo &blocked_info) const;
+  bool lateralReleaseReady(const BlockedInfo &blocked_info,
+                           double threshold_m) const;
 
   PlannerConfig config_;
   double mode_enter_time_sec_{0.0};

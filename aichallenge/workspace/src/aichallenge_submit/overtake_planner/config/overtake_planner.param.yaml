@@ -7,29 +7,45 @@ overtake_planner_node:
     own_vehicle_id: "auto"
     ego_stale_time_sec: 0.50
     control_rate_hz: 20.0
-    horizon_points: 30
+    horizon_points: 20
     horizon_dt_sec: 0.025
     lookahead_s_m: 10.0
     follow_trigger_s_m: 12.0
     same_corridor_width_m: 0.90
+    same_direction_filter_enabled: true
+    same_direction_min_speed_mps: 0.30
+    same_direction_min_s_dot_mps: 0.05
+    future_side_prediction_enabled: true
+    future_side_prediction_horizon_sec: 1.2
+    future_side_prediction_dt_sec: 0.3
+    future_side_yield_wall_clearance_m: 0.35
     dv_block_threshold_mps: 0.20
     opponent_stale_time_sec: 0.50
     side_by_side_s_m: 4.0
     side_margin_m: 1.20
+    parallel_side_detection_enabled: true
+    parallel_side_s_m: 12.0
+    parallel_side_margin_m: 4.0
     side_yield_s_m: 0.30
-    side_by_side_target_gap_m: 1.10
-    side_by_side_shift_distance_m: 5.0
-    side_by_side_speed_cap_mps: 4.5
-    corner_side_yield_curvature_m_inv: 0.06
-    corner_side_yield_lookahead_m: 8.0
-    corner_side_yield_wall_clearance_m: 0.25
+    side_by_side_target_gap_m: 0.75
+    side_by_side_shift_distance_m: 7.0
+    side_by_side_speed_cap_mps: 7.5
+    corner_side_yield_curvature_m_inv: 0.05
+    corner_side_yield_lookahead_m: 10.0
+    corner_side_yield_wall_clearance_m: 0.55
     corner_yield_target_d_m: 0.0
     corner_yield_rejoin_gap_m: 5.5
-    yield_rejoin_wall_clearance_m: 0.15
+    yield_rejoin_wall_clearance_m: 0.25
+    recovery_release_lateral_error_m: 0.60
+    yield_release_lateral_error_m: 0.60
     corner_follow_speed_margin_mps: 0.20
-    corner_yield_v_max_mps: 3.0
+    corner_yield_v_max_mps: 8.0
+    straight_only_overtake_enabled: true
+    straight_overtake_max_curvature_m_inv: 0.025
+    straight_overtake_lookahead_m: 12.0
+    straight_overtake_release_hysteresis_m_inv: 0.005
     large_lateral_error_threshold_m: 0.60
-    large_lateral_error_v_max_mps: 2.5
+    large_lateral_error_v_max_mps: 8.5
     min_pass_gap_m: 1.8
     pass_gap_hysteresis_m: 0.15
     yield_speed_margin_mps: 0.60
@@ -39,12 +55,12 @@ overtake_planner_node:
     prepare_distance_m: 8.0
     merge_distance_m: 12.0
     follow_speed_margin_mps: 0.20
-    recovery_v_max_mps: 5.0
-    wall_margin_recovery_v_max_mps: 2.5
+    recovery_v_max_mps: 8.5
+    wall_margin_recovery_v_max_mps: 8.5
     v_passthrough_mps: 50.0
     d_min_m: -1.35
     d_max_m: 1.35
-    min_wall_margin_m: 0.5
+    min_wall_margin_m: 0.50
     safety_ellipse_a_m: 3.0
     safety_ellipse_b_m: 1.8
     min_ellipse_h: 0.20
@@ -53,8 +69,21 @@ overtake_planner_node:
     abort_timeout_sec: 5.0
     min_mode_hold_time_sec: 0.60
     keep_mode_bonus: 25.0
+    lateral_target_max_step_m: 0.25
+    speed_only_fallback_enabled: true
+    speed_only_fallback_v_max_mps: 8.0
+    wall_risk_speed_guard_enabled: true
+    wall_soft_margin_m: 0.25
+    wall_risk_v_max_mps: 8.0
+    mpc_health_speed_guard_enabled: true
+    mpc_health_infeasible_count_threshold: 1
+    mpc_health_solve_time_warn_ms: 80.0
+    mpc_health_v_max_mps: 8.0
+    mpc_health_stale_time_sec: 0.60
+    section_safety_profile_enabled: true
+    # Add same-length arrays to enable section presets, e.g. names/profiles/start_wp/end_wp.
     safe_stop_enabled: true
-    safe_stop_v_mps: 0.0
+    safe_stop_v_mps: 0.20
     safe_stop_trigger_cycles: 1
     safe_stop_release_cycles: 5
     safe_stop_release_front_gap_m: 5.0

@@ -184,14 +184,18 @@ public:
         declare_parameter<double>("corner_yield_rejoin_gap_m", 5.5);
     config.yield_rejoin_wall_clearance_m =
         declare_parameter<double>("yield_rejoin_wall_clearance_m", 0.25);
+    config.recovery_release_lateral_error_m =
+        declare_parameter<double>("recovery_release_lateral_error_m", 0.60);
+    config.yield_release_lateral_error_m =
+        declare_parameter<double>("yield_release_lateral_error_m", 0.60);
     config.corner_follow_speed_margin_mps =
         declare_parameter<double>("corner_follow_speed_margin_mps", 0.20);
     config.corner_yield_v_max_mps =
         declare_parameter<double>("corner_yield_v_max_mps", 3.0);
     config.straight_only_overtake_enabled =
         declare_parameter<bool>("straight_only_overtake_enabled", true);
-    config.straight_overtake_max_curvature_m_inv =
-        declare_parameter<double>("straight_overtake_max_curvature_m_inv", 0.025);
+    config.straight_overtake_max_curvature_m_inv = declare_parameter<double>(
+        "straight_overtake_max_curvature_m_inv", 0.025);
     config.straight_overtake_lookahead_m =
         declare_parameter<double>("straight_overtake_lookahead_m", 12.0);
     config.straight_overtake_release_hysteresis_m_inv =
@@ -240,6 +244,8 @@ public:
     config.min_mode_hold_time_sec =
         declare_parameter<double>("min_mode_hold_time_sec", 0.60);
     config.keep_mode_bonus = declare_parameter<double>("keep_mode_bonus", 25.0);
+    config.lateral_target_max_step_m =
+        declare_parameter<double>("lateral_target_max_step_m", 0.25);
     config.speed_only_fallback_enabled =
         declare_parameter<bool>("speed_only_fallback_enabled", true);
     config.speed_only_fallback_v_max_mps =
@@ -627,7 +633,7 @@ private:
         << jsonNumber(output.blocked_info.corner_abs_curvature) << ","
         << "\"straight_overtake_start_allowed\":"
         << (output.blocked_info.straight_overtake_start_allowed ? "true"
-                                                                 : "false")
+                                                                : "false")
         << ","
         << "\"overtake_start_abs_curvature\":"
         << jsonNumber(output.blocked_info.overtake_start_abs_curvature) << ","

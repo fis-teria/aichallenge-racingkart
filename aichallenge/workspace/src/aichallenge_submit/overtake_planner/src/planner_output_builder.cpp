@@ -44,13 +44,23 @@ std::vector<double> uniformVector(std::size_t count, double value) {
   return std::vector<double>(std::max<std::size_t>(1, count), value);
 }
 
+double clampedCurrentLateralOffset(const PlannerConfig &config,
+                                   const EgoState &ego) {
+  const double lower_d = config.d_min_m + config.min_wall_margin_m;
+  const double upper_d = config.d_max_m - config.min_wall_margin_m;
+  if (!std::isfinite(ego.frenet.d)) {
+    return 0.0;
+  }
+  return std::clamp(ego.frenet.d, lower_d, upper_d);
+}
+
 } // namespace
 
 PlannerOutputBuilder::PlannerOutputBuilder(const PlannerConfig &config)
     : config_(config) {}
 
-PlannerOutput PlannerOutputBuilder::build(
-    const PlannerOutputBuildInput &input) const {
+PlannerOutput
+PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   const auto &selected = input.selected;
   const auto &blocked = input.blocked_info;
   const auto &safe_stop_context = input.safe_stop_context;
@@ -173,11 +183,10 @@ PlannerOutput PlannerOutputBuilder::build(
       mpc_health.valid &&
       (mpc_health_infeasible_guard || mpc_health_solve_time_guard ||
        mpc_health_stale_guard)) {
-    const std::string reason = mpc_health_infeasible_guard
-                                   ? "mpc_health_infeasible_guard"
-                               : mpc_health_solve_time_guard
-                                   ? "mpc_health_solve_time_guard"
-                                   : "mpc_health_stale_guard";
+    const std::string reason =
+        mpc_health_infeasible_guard   ? "mpc_health_infeasible_guard"
+        : mpc_health_solve_time_guard ? "mpc_health_solve_time_guard"
+                                      : "mpc_health_stale_guard";
     requestSpeedCap(config_.mpc_health_v_max_mps, reason);
     mpc_health_guard = true;
   }
@@ -198,10 +207,11 @@ PlannerOutput PlannerOutputBuilder::build(
       applyUniformSpeedCap(output.speed_caps, requested_speed_cap);
     } else {
       output.active_override = true;
-      output.lateral_offsets = uniformVector(config_.horizon_points, 0.0);
+      const double hold_d = clampedCurrentLateralOffset(config_, input.ego);
+      output.lateral_offsets = uniformVector(config_.horizon_points, hold_d);
       output.speed_caps =
           uniformVector(config_.horizon_points, requested_speed_cap);
-      output.target_lateral_offset_m = 0.0;
+      output.target_lateral_offset_m = hold_d;
       if (output.mode == BehaviorMode::FREE_RUN) {
         output.mode = BehaviorMode::SPEED_GUARD;
       }
@@ -221,8 +231,9 @@ PlannerOutput PlannerOutputBuilder::build(
   return output;
 }
 
-double PlannerOutputBuilder::scaledSpeedCap(
-    double speed_cap_mps, const ActiveSectionSafety &section) const {
+double
+PlannerOutputBuilder::scaledSpeedCap(double speed_cap_mps,
+                                     const ActiveSectionSafety &section) const {
   const double scale =
       section.active ? std::clamp(section.speed_cap_scale, 0.05, 1.0) : 1.0;
   return finitePositiveOr(speed_cap_mps * scale, speed_cap_mps);

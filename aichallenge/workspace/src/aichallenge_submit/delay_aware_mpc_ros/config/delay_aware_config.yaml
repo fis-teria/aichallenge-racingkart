@@ -62,11 +62,11 @@ bicycle_model:
   width: 1.4   # +safety margin
 
 mpc:
-  N: 30
+  N: 50
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [1000000.0, 0.0]
+  R: [1000000.0, 10.0]
   a_min: 0 # m/s^2
   a_max: 3.0 # m/s^2
   delta_max_deg: 32.0 # degrees
@@ -103,8 +103,8 @@ mpc:
 
   v_max: 35.0   # km/h
   ay_max: 30  # m/s^2, maximum lateral acceleration in curves
-  Q: [300000.0, 100000000.0, 100000.0]
-  QN: [1000000.0, 1000000.0, 10000.0]
+  Q: [300000.0, 100000000.0, 600000.0]
+  QN: [1000000.0, 1000000.0, 60000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##
   ## Lap1: 55s, Lap2: 49s

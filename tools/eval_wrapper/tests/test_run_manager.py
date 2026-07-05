@@ -11,13 +11,12 @@ def test_make_run_id_slugifies_label() -> None:
     assert run_id == "20260612_000001_curve_speed_v1"
 
 
-def test_wait_for_single_eval_output_rejects_unfinalized_rosbag(tmp_path: Path) -> None:
+def test_wait_for_single_eval_output_rejects_empty_rosbag_dir(tmp_path: Path) -> None:
     domain = tmp_path / "output" / "20260618-232702" / "d1"
     bag_dir = domain / "rosbag2_autoware"
     bag_dir.mkdir(parents=True)
     (domain / "result-summary.json").write_text("{}", encoding="utf-8")
     (domain / "d1-result-details.json").write_text("{}", encoding="utf-8")
-    (bag_dir / "rosbag2_autoware_0.mcap").write_bytes(b"not-finalized")
 
     source, warnings = _wait_for_single_eval_output(
         tmp_path,
@@ -28,7 +27,28 @@ def test_wait_for_single_eval_output_rejects_unfinalized_rosbag(tmp_path: Path) 
     )
 
     assert source == tmp_path / "output" / "20260618-232702"
-    assert warnings == ["timed out waiting for eval output to finish: d1: rosbag2_autoware metadata.yaml not ready"]
+    assert warnings == ["timed out waiting for eval output to finish: d1: rosbag2_autoware storage file not ready"]
+
+
+def test_wait_for_single_eval_output_accepts_missing_metadata_rosbag_without_reindex(tmp_path: Path) -> None:
+    domain = tmp_path / "output" / "20260618-232702" / "d1"
+    bag_dir = domain / "rosbag2_autoware"
+    bag_dir.mkdir(parents=True)
+    (domain / "result-summary.json").write_text("{}", encoding="utf-8")
+    (domain / "d1-result-details.json").write_text("{}", encoding="utf-8")
+    (bag_dir / "rosbag2_autoware_0.mcap").write_bytes(b"finalized")
+
+    source, warnings = _wait_for_single_eval_output(
+        tmp_path,
+        [1],
+        datetime(1970, 1, 1, tzinfo=timezone.utc),
+        timeout_sec=0,
+        poll_sec=0,
+    )
+
+    assert source == tmp_path / "output" / "20260618-232702"
+    assert warnings == []
+    assert not (bag_dir / "metadata.yaml").exists()
 
 
 def test_wait_for_single_eval_output_accepts_finalized_rosbag(tmp_path: Path) -> None:

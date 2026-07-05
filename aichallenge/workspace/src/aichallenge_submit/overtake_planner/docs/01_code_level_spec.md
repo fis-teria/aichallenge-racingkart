@@ -177,6 +177,7 @@ MPCへ渡す候補軌道です。
 11. モードに合わせて候補を再生成
 12. 危険候補を復活させない速度ガードを適用
 13. `PlannerOutputBuilder` で `PlannerOutput` に詰める
+14. `OvertakePlannerCore` でpublish直前の横オフセット列にレート制限をかける
 
 ポイントは、候補選択と状態遷移が分かれていることです。
 候補は「今周期の良さそうな選択肢」、状態機械は「急に切り替えないための運転モード」です。
@@ -249,6 +250,8 @@ MPCへ渡す候補軌道です。
 選ばれた候補、`BlockedInfo`、safe stop文脈、section profile、MPC healthを `PlannerOutput` へ詰めます。
 速度ガードやMPC override契約はここで集約します。
 そのため、risk判定側は `SPEED_GUARD` の出力形式を知らなくてよい構造です。
+速度だけを落とす `SPEED_GUARD` では、横オフセットを中心線 `d=0` へ0埋めせず、現在の横位置を保持します。
+その後、`OvertakePlannerCore` が前回publishした横オフセット列との差分を `lateral_target_max_step_m` で制限します。
 
 `BlockedRiskAnalyzer` と `FutureSideBySideRiskAnalyzer` への責務分割そのものでは、新しいYAMLパラメータは追加していません。
 この文書では、分割前から入っているfuture side prediction、parallel side、straight-only gate、speed guard、MPC health guard系のパラメータもあわせて説明しています。
@@ -281,7 +284,7 @@ MPCへ渡す候補軌道です。
 - `SAFE_STOP`
   - 回避、追従、譲り、復帰が安全に成立しないとき、正の低速capで停止意図を出す
 - `SPEED_GUARD`
-  - 横方向候補は出さず、中心線 `d=0` と速度capだけをMPCへ渡す。MPCがoverrideを消さないよう `mode_id != 0` にするための出力用モード
+  - 横方向候補は出さず、現在横位置を保持するd列と速度capだけをMPCへ渡す。MPCがoverrideを消さないよう `mode_id != 0` にするための出力用モード
 
 ## CandidateType
 
@@ -315,15 +318,16 @@ MPCへ渡す候補軌道です。
 - PASS候補は `pass_safe_required_cycles` だけ連続安全になってから準備へ移る
 - 横並びで `SIDE_BY_SIDE_KEEP` が選ばれたら横距離維持
 - 相手が少し前へ出たら `YIELD_BEHIND`
-- `YIELD_BEHIND` は前方ギャップと壁余裕が戻るまで解除しない
-- `ABORT_RECOVERY` も壁余裕が戻るまで解除しない
+- `YIELD_BEHIND` は前方ギャップ、壁余裕、横ずれが戻るまで解除しない
+- `ABORT_RECOVERY` も壁余裕と横ずれが戻るまで解除しない
 - `SAFE_STOP` は通常fallback候補が全てunsafeな周期が `safe_stop_trigger_cycles` 続いたときだけ入る
 - `SAFE_STOP` 中は停止候補がfeasibleな間だけoverrideを出し、解除条件が `safe_stop_release_cycles` 続くまで保持する
 - `SAFE_STOP` 候補が途中でunsafeになった場合は、`SAFE_STOP` に居座らず通常fallback側へ戻す
 
 最後のルールが重要です。
 壁外または壁際で `RECOVERY -> FREE_RUN -> FASTEST wall_margin -> RECOVERY` と揺れると、速度指令やステアがチャタります。
-そのため `ego_wall_clearance_m < yield_rejoin_wall_clearance_m` の間は `ABORT_RECOVERY` を保持します。
+そのため `ego_wall_clearance_m < yield_rejoin_wall_clearance_m`、または `abs(ego_lateral_offset_m) > recovery_release_lateral_error_m` の間は `ABORT_RECOVERY` を保持します。
+`YIELD_BEHIND` と `future_yield_hold` は `yield_release_lateral_error_m` も解除条件に含め、横回復が終わる前に `FREE_RUN` へ戻りにくくします。
 
 ## 横並びとコーナーの扱い
 
@@ -416,7 +420,7 @@ h = (x_body / safety_ellipse_a_m)^2
 発動条件:
 
 - `speed_only_fallback_enabled`
-  - `SIDE_BY_SIDE_KEEP` や `YIELD_BEHIND` が `opponent_collision` などでrejectされた場合、または `SAFE_STOP` 候補がunsafeな場合、`d=0`、低い `v_ref` を出す
+  - `SIDE_BY_SIDE_KEEP` や `YIELD_BEHIND` が `opponent_collision` などでrejectされた場合、または `SAFE_STOP` 候補がunsafeな場合、現在横位置を保持するd列と低い `v_ref` を出す
 - `wall_risk_speed_guard_enabled`
   - 自車の壁余裕が `wall_soft_margin_m` 未満なら `wall_risk_v_max_mps` へ絞る
 - `mpc_health_speed_guard_enabled`
@@ -426,7 +430,7 @@ h = (x_body / safety_ellipse_a_m)^2
 
 複数の速度ガードが同時に成立した場合は、最も低い速度capを使います。
 すでにfeasibleな横方向overrideがある場合は、その `v_ref` だけをさらに低くします。
-overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_GUARD` として `d=0` の速度only overrideを出します。
+overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_GUARD` として現在横位置を保持する速度only overrideを出します。
 
 ## 主要パラメータ
 

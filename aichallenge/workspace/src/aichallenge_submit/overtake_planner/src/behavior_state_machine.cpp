@@ -1,6 +1,7 @@
 #include "overtake_planner/behavior_state_machine.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace overtake_planner {
 
@@ -19,14 +20,25 @@ void BehaviorStateMachine::markIfChanged(double now_sec, BehaviorMode before,
   }
 }
 
+bool BehaviorStateMachine::lateralReleaseReady(
+    const BlockedInfo &blocked_info, double threshold_m) const {
+  if (!std::isfinite(threshold_m) || threshold_m < 0.0) {
+    return true;
+  }
+  return std::abs(blocked_info.ego_lateral_offset_m) <= threshold_m;
+}
+
 bool BehaviorStateMachine::shouldHoldFutureYield(
-    const BlockedInfo &blocked_info) const {
+    double now_sec, const BlockedInfo &blocked_info) const {
   if (!future_yield_hold_active_) {
     return false;
   }
 
   const bool lateral_ready = blocked_info.ego_wall_clearance_m >=
-                             config_.yield_rejoin_wall_clearance_m;
+                                 config_.yield_rejoin_wall_clearance_m &&
+                             lateralReleaseReady(
+                                 blocked_info,
+                                 config_.yield_release_lateral_error_m);
   const bool corner_still_relevant =
       blocked_info.corner_side_by_side ||
       blocked_info.future_corner_side_by_side ||
@@ -37,8 +49,10 @@ bool BehaviorStateMachine::shouldHoldFutureYield(
       std::max(config_.yield_rejoin_gap_m, config_.corner_yield_rejoin_gap_m);
   const bool front_gap_ready = blocked_info.nearest_index < 0 ||
                                blocked_info.front_delta_s >= rejoin_gap;
+  const bool minimum_hold_done = canSwitch(now_sec);
 
-  return !lateral_ready || corner_still_relevant || !front_gap_ready;
+  return !minimum_hold_done || !lateral_ready || corner_still_relevant ||
+         !front_gap_ready;
 }
 
 BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
@@ -252,7 +266,9 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
   case BehaviorMode::ABORT_RECOVERY:
     // 中止復帰も中心線へ戻す処理なので、復帰後の状態はMERGE_BACKと同じ判定にする。
     if (blocked_info.ego_wall_clearance_m <
-        config_.yield_rejoin_wall_clearance_m) {
+            config_.yield_rejoin_wall_clearance_m ||
+        !lateralReleaseReady(blocked_info,
+                             config_.recovery_release_lateral_error_m)) {
       next = BehaviorMode::ABORT_RECOVERY;
     } else if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;
@@ -280,9 +296,13 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
   case BehaviorMode::YIELD_BEHIND:
     // 相手の後ろに入れる距離が戻ったら、通常の追従状態へ戻す。
     {
-      const bool hold_future_yield = shouldHoldFutureYield(blocked_info);
+      const bool hold_future_yield =
+          shouldHoldFutureYield(now_sec, blocked_info);
       const bool lateral_ready = blocked_info.ego_wall_clearance_m >=
-                                 config_.yield_rejoin_wall_clearance_m;
+                                     config_.yield_rejoin_wall_clearance_m &&
+                                 lateralReleaseReady(
+                                     blocked_info,
+                                     config_.yield_release_lateral_error_m);
       const double rejoin_gap =
           blocked_info.corner_side_by_side
               ? std::max(config_.yield_rejoin_gap_m,
