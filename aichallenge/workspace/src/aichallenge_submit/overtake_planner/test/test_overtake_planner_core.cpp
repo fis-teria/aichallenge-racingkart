@@ -436,6 +436,30 @@ TEST(OvertakePlannerCore, SideBySideAndFrontBlockedCoexistForSameOpponent) {
   EXPECT_NEAR(output.blocked_info.side_delta_s, 2.0, 1.0e-9);
 }
 
+TEST(OvertakePlannerCore, SideBySideAndSeparateFrontBlockedTargetsCoexist) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.safe_stop_enabled = false;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto side = makeOpponent(frame, 5.2, 0.6);
+  side.id = "side";
+  auto front = makeOpponent(frame, 10.0, 0.0);
+  front.id = "front";
+
+  const auto output = core.update(0.1, ego, {side, front});
+
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_TRUE(output.blocked_info.side_by_side);
+  EXPECT_EQ(output.blocked_info.nearest_id, "front");
+  EXPECT_EQ(output.blocked_info.side_id, "side");
+  EXPECT_NE(output.blocked_info.nearest_id, output.blocked_info.side_id);
+  EXPECT_EQ(output.blocked_info.pass_gap_reason, "both_gap_narrow");
+  EXPECT_FALSE(output.blocked_info.can_pass_left);
+  EXPECT_FALSE(output.blocked_info.can_pass_right);
+}
+
 TEST(OvertakePlannerCore, ClosingFrontVehicleOutsideFollowTriggerStillBlocked) {
   const auto frame = makeStraightFrame();
   auto config = makeConfig();
@@ -678,6 +702,36 @@ TEST(OvertakePlannerCore, WallRiskInsideCorridorPublishesSpeedGuard) {
                           [](double d) { return std::abs(d) < 1.0e-9; }));
   ASSERT_FALSE(output.speed_caps.empty());
   EXPECT_NEAR(output.speed_caps.back(), config.wall_risk_v_max_mps, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, MultipleSpeedGuardsUseLowestCapReason) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.wall_soft_margin_m = 0.25;
+  config.wall_risk_v_max_mps = 4.2;
+  config.mpc_health_v_max_mps = 2.7;
+  config.mpc_health_infeasible_count_threshold = 1;
+  config.large_lateral_error_threshold_m = 2.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const double upper_d = config.d_max_m - config.min_wall_margin_m;
+  const auto ego = makeEgo(frame, 5.0, upper_d - 0.05);
+  overtake_planner::MpcHealthStatus health;
+  health.valid = true;
+  health.infeasible_count = 1;
+  health.solve_time_ms = 5.0;
+  health.age_sec = 0.1;
+
+  const auto output = core.update(0.1, ego, {}, health);
+
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::SPEED_GUARD);
+  EXPECT_TRUE(output.active_override);
+  EXPECT_TRUE(output.wall_risk_speed_guard_active);
+  EXPECT_TRUE(output.mpc_health_speed_guard_active);
+  EXPECT_EQ(output.reason, "mpc_health_infeasible_guard");
+  EXPECT_EQ(output.speed_cap_reason, "mpc_health_infeasible_guard");
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_NEAR(output.speed_caps.back(), config.mpc_health_v_max_mps, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, MpcHealthInfeasiblePublishesSpeedGuard) {
@@ -1074,6 +1128,7 @@ TEST(OvertakePlannerCore, OpponentOnRightOnlyAllowsLeftPass) {
   EXPECT_EQ(output.selected, overtake_planner::CandidateType::PASS_LEFT);
   EXPECT_TRUE(output.blocked_info.can_pass_left);
   EXPECT_FALSE(output.blocked_info.can_pass_right);
+  EXPECT_EQ(output.blocked_info.pass_gap_reason, "right_gap_narrow");
   EXPECT_TRUE(output.blocked_info.straight_overtake_start_allowed);
   EXPECT_TRUE(output.blocked_info.overtake_start_gate_reason.empty());
   EXPECT_GT(output.target_lateral_offset_m, 0.0);
@@ -1154,7 +1209,26 @@ TEST(OvertakePlannerCore, OpponentOnLeftOnlyAllowsRightPass) {
   EXPECT_EQ(output.selected, overtake_planner::CandidateType::PASS_RIGHT);
   EXPECT_FALSE(output.blocked_info.can_pass_left);
   EXPECT_TRUE(output.blocked_info.can_pass_right);
+  EXPECT_EQ(output.blocked_info.pass_gap_reason, "left_gap_narrow");
   EXPECT_LT(output.target_lateral_offset_m, 0.0);
+}
+
+TEST(OvertakePlannerCore, WidePassGapsReasonIsOk) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.min_pass_gap_m = 0.2;
+  config.safety_ellipse_b_m = 0.1;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent = makeOpponent(frame, 13.0, 0.0);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_TRUE(output.blocked_info.can_pass_left);
+  EXPECT_TRUE(output.blocked_info.can_pass_right);
+  EXPECT_EQ(output.blocked_info.pass_gap_reason, "ok");
 }
 
 TEST(OvertakePlannerCore, FutureNarrowGapPreventsTransientLeftPass) {

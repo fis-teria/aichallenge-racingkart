@@ -16,13 +16,19 @@ aichallenge/workspace/src/aichallenge_submit/overtake_planner/
 1. `include/overtake_planner/types.hpp`
 2. `src/overtake_planner_node.cpp`
 3. `src/overtake_planner_core.cpp`
-4. `src/behavior_state_machine.cpp`
-5. `src/safety_evaluator.cpp`
-6. `src/frenet_frame.cpp`
+4. `src/blocked_risk_analyzer.cpp`
+5. `src/future_side_by_side_risk_analyzer.cpp`
+6. `src/candidate_builder.cpp`
+7. `src/planner_output_builder.cpp`
+8. `src/behavior_state_machine.cpp`
+9. `src/safety_evaluator.cpp`
+10. `src/frenet_frame.cpp`
 
 ## 実行時の入出力
 
 ROSノードは `overtake_planner_node` です。
+`horizon_points` はMPC horizonと揃える必要があります。
+基本YAMLとbaseline `mpc.launch.xml` は20点、`delay_aware_mpc.launch.xml` はdelay-aware MPCの `N: 50` に合わせてlaunch引数で50点へ上書きします。
 
 購読:
 
@@ -32,6 +38,9 @@ ROSノードは `overtake_planner_node` です。
 - `/v2x/vehicle_positions`
   - `v2x_msgs/msg/V2XVehiclePositionArray`
   - 他車位置を読む
+- `/mpc/speed_profile_debug`
+  - `std_msgs/msg/String`
+  - MPCのinfeasible回数とsolve timeを読む。古い値は `mpc_health_stale_time_sec` でstale guardとして扱い、速度を落とす
 
 配信:
 
@@ -95,6 +104,8 @@ V2Xから得た他車状態です。
   - 縦方向差が小さく、横方向も近い
 - `corner_side_by_side`
   - 横並びかつ前方短距離の曲率が大きい
+- `parallel_side_candidate`
+  - 通常の横並びより広い範囲で、未来コーナー予測に渡す並走相手がいる
 - `front_delta_s`
   - 前走車とのFrenet縦方向距離
 - `side_delta_s`
@@ -103,6 +114,12 @@ V2Xから得た他車状態です。
   - 自車の横位置が安全コリドーからどれだけ余裕を持つか
 - `can_pass_left`, `can_pass_right`
   - 左右に追い越し可能な幅があるか
+- `straight_overtake_start_allowed`
+  - 直線限定追い越し開始ゲートが開いているか
+- `overtake_start_abs_curvature`
+  - 追い越し開始ゲートが見ている前方曲率の最大値
+- `overtake_start_gate_reason`
+  - `curve` なら、gapはあっても曲率により追い越し開始を止めている
 - `pass_gap_reason`
   - `ok`, `left_gap_narrow`, `right_gap_narrow`, `both_gap_narrow`, `no_target`
 
@@ -130,28 +147,112 @@ MPCへ渡す候補軌道です。
    - `enabled=false`
    - `ego.valid=false`
    - 参照線なし
-2. `detectBlocked()`
+2. `BlockedRiskAnalyzer::detectBlocked()`
    - 前走車と横並び車両をFrenet座標で検出
 3. `predictOpponents()`
    - 他車を短いhorizonで等速予測
-4. `evaluatePassGap()`
+4. `BlockedRiskAnalyzer::evaluatePassGap()`
    - 左右の追い越し可能幅を評価
-5. 曲率と壁余裕を追加
+5. 曲率、壁余裕、未来横並びリスクを追加
    - `corner_abs_curvature`
    - `corner_side_by_side`
+   - `straight_overtake_start_allowed`
+   - `overtake_start_abs_curvature`
    - `ego_wall_clearance_m`
-6. 候補軌道を生成
+   - `FutureSideBySideRiskAnalyzer::evaluate()`
+   - `future_side_by_side`
+   - `future_outer_wall_risk`
+   - `future_yield_required`
+6. 大きい横ずれ中の危険文脈では追い越し判断を凍結
+   - `can_pass_left/right=false`
+   - `RECOVERY` 候補を優先
+7. 候補軌道を生成
    - `FASTEST`
    - 必要に応じて `FOLLOW`, `PASS_LEFT`, `PASS_RIGHT`, `SIDE_BY_SIDE_KEEP`, `YIELD_BEHIND`, `RECOVERY`
    - 通常fallbackが成立しないときだけ `SAFE_STOP`
-7. 各候補を安全評価
-8. 候補スコアで1つ選ぶ
-9. `BehaviorStateMachine` でモードを安定化
-10. モードに合わせて候補を再生成
-11. `PlannerOutput` に詰める
+8. 各候補を安全評価
+9. 候補スコアで1つ選ぶ
+10. `BehaviorStateMachine` でモードを安定化
+   - `straight_overtake_start_allowed=false` のときは、PASS候補が安全でも `PREPARE_OVERTAKE_LEFT/RIGHT` へ入らず `FOLLOW_BLOCKED` を維持する
+11. モードに合わせて候補を再生成
+12. 危険候補を復活させない速度ガードを適用
+13. `PlannerOutputBuilder` で `PlannerOutput` に詰める
 
 ポイントは、候補選択と状態遷移が分かれていることです。
 候補は「今周期の良さそうな選択肢」、状態機械は「急に切り替えないための運転モード」です。
+
+## 責務分割
+
+`OvertakePlannerCore` は処理順を制御するオーケストレータです。
+前走車判定、未来予測、候補生成、状態遷移、出力整形を直接抱え込まず、次の小さなクラスへ分けています。
+
+### BlockedRiskAnalyzer
+
+`src/blocked_risk_analyzer.cpp` にあります。
+
+入力:
+
+- `EgoState`
+- `std::vector<OpponentState>`
+- `std::vector<PredictedOpponent>`
+- `BehaviorMode`
+- `PlannerConfig`
+- `FrenetFrame`
+
+出力:
+
+- 更新済みの `BlockedInfo`
+
+担当すること:
+
+- staleな相手を除外する
+- 逆走方向の相手を必要に応じて無視する
+- 前方車、横並び、parallel side candidateを検出する
+- `blocked` を前方距離と相対速度から決める
+- 左右pass gap、`can_pass_left/right`、`pass_gap_reason` を決める
+- `wallClearance()` を提供する
+
+担当しないこと:
+
+- 状態遷移
+- 候補軌道生成
+- section safety profile
+- MPC overrideの出力整形
+
+### FutureSideBySideRiskAnalyzer
+
+`src/future_side_by_side_risk_analyzer.cpp` にあります。
+`BlockedRiskAnalyzer` で見つけた `side_by_side` または `parallel_side_candidate` を入力にして、短い時間先のコーナー横並びリスクを評価します。
+
+維持する契約:
+
+- `future_side_by_side`
+- `future_corner_side_by_side`
+- `future_outer_wall_risk`
+- `future_yield_required`
+- `future_delta_s/d`
+- `future_wall_clearance_m`
+- `yield_reason`
+
+`yield_reason` は既存互換のため、外壁余裕が閾値未満なら主に `future_outer_wall_risk` を入れます。
+この判定は `BlockedInfo` を壊さずに追記する層で、状態機械を直接動かしません。
+
+### CandidateBuilder
+
+`src/candidate_builder.cpp` にあります。
+`FASTEST`, `FOLLOW`, `PASS_LEFT/RIGHT`, `RECOVERY`, `SIDE_BY_SIDE_KEEP`, `YIELD_BEHIND`, `SAFE_STOP` のd列と速度上限列を作ります。
+候補が安全かどうかはここでは確定せず、後段の `SafetyEvaluator` が判定します。
+
+### PlannerOutputBuilder
+
+`src/planner_output_builder.cpp` にあります。
+選ばれた候補、`BlockedInfo`、safe stop文脈、section profile、MPC healthを `PlannerOutput` へ詰めます。
+速度ガードやMPC override契約はここで集約します。
+そのため、risk判定側は `SPEED_GUARD` の出力形式を知らなくてよい構造です。
+
+`BlockedRiskAnalyzer` と `FutureSideBySideRiskAnalyzer` への責務分割そのものでは、新しいYAMLパラメータは追加していません。
+この文書では、分割前から入っているfuture side prediction、parallel side、straight-only gate、speed guard、MPC health guard系のパラメータもあわせて説明しています。
+既存の `BlockedInfo` フィールドとYAMLパラメータの意味を保ったまま、今回の分割では責務だけを分けています。
 
 ## BehaviorMode
 
@@ -162,9 +263,9 @@ MPCへ渡す候補軌道です。
 - `FOLLOW_BLOCKED`
   - 前走車へ追従する。速度上限を下げる
 - `PREPARE_OVERTAKE_LEFT`
-  - 左追い越しへ入る準備
+  - 左追い越しへ入る準備。直線限定ゲートが閉じていると入らない
 - `PREPARE_OVERTAKE_RIGHT`
-  - 右追い越しへ入る準備
+  - 右追い越しへ入る準備。直線限定ゲートが閉じていると入らない
 - `OVERTAKE_LEFT`
   - 左オフセットを維持
 - `OVERTAKE_RIGHT`
@@ -179,6 +280,8 @@ MPCへ渡す候補軌道です。
   - 相手の後ろへ入るために減速する
 - `SAFE_STOP`
   - 回避、追従、譲り、復帰が安全に成立しないとき、正の低速capで停止意図を出す
+- `SPEED_GUARD`
+  - 横方向候補は出さず、中心線 `d=0` と速度capだけをMPCへ渡す。MPCがoverrideを消さないよう `mode_id != 0` にするための出力用モード
 
 ## CandidateType
 
@@ -238,6 +341,11 @@ corner_side_by_side =
 `corner_side_by_side=true` のときは、横並び維持より `YIELD_BEHIND` を優先します。
 このとき `YIELD_BEHIND` の横目標は相手のdではなく、`corner_yield_target_d_m`、デフォルト中心線 `0.0` です。
 
+スタートから第1コーナーまでのように、見た目は並走でも `side_margin_m` より横に離れている場面は
+`parallel_side_candidate` として記録します。
+この候補は通常の `SIDE_BY_SIDE_KEEP` には使わず、未来コーナー予測と `YIELD_BEHIND` の対象選択にだけ使います。
+そのため、狭義の `side_by_side` を過剰に広げずに、d2視点で相手が斜め後方にいるケースも先読みできます。
+
 ## 壁余裕
 
 安全コリドーは次で決まります。
@@ -294,9 +402,31 @@ h = (x_body / safety_ellipse_a_m)^2
 - `YIELD_BEHIND`
   - 通常は `opponent.v - yield_speed_margin_mps`
   - コーナー横並び中は `opponent.v - corner_follow_speed_margin_mps`
+  - 未来横並びの外壁リスクがある場合も、中心寄りの `corner_yield_target_d_m` を使う
 - `RECOVERY`
   - 通常は `recovery_v_max_mps`
   - 壁外なら `wall_margin_recovery_v_max_mps`
+  - 大きい横ずれ中に壁リスク、閉塞、横並び、未来横並びがある場合は、追い越し/横並び候補より優先する
+
+## 速度ガード層
+
+速度ガードは候補生成の後段で動きます。
+目的は、`SafetyEvaluator` がrejectした横方向候補を復活させず、MPCへ「横へ逃げる参照」ではなく「速度だけ落とす参照」を渡すことです。
+
+発動条件:
+
+- `speed_only_fallback_enabled`
+  - `SIDE_BY_SIDE_KEEP` や `YIELD_BEHIND` が `opponent_collision` などでrejectされた場合、または `SAFE_STOP` 候補がunsafeな場合、`d=0`、低い `v_ref` を出す
+- `wall_risk_speed_guard_enabled`
+  - 自車の壁余裕が `wall_soft_margin_m` 未満なら `wall_risk_v_max_mps` へ絞る
+- `mpc_health_speed_guard_enabled`
+  - `/mpc/speed_profile_debug` の `mpc_infeasible_count`、`mpc_solve_time_ms`、またはstale状態で `mpc_health_v_max_mps` へ絞る
+- section safety profile
+  - `side_by_side_corner_strict` などの区間プロファイルが有効なら、壁余裕や速度capをさらに厳しくする
+
+複数の速度ガードが同時に成立した場合は、最も低い速度capを使います。
+すでにfeasibleな横方向overrideがある場合は、その `v_ref` だけをさらに低くします。
+overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_GUARD` として `d=0` の速度only overrideを出します。
 
 ## 主要パラメータ
 
@@ -306,6 +436,9 @@ h = (x_body / safety_ellipse_a_m)^2
 
 - `side_by_side_s_m`
 - `side_margin_m`
+- `parallel_side_detection_enabled`
+- `parallel_side_s_m`
+- `parallel_side_margin_m`
 - `side_yield_s_m`
 - `side_by_side_target_gap_m`
 - `side_by_side_shift_distance_m`
@@ -319,6 +452,30 @@ h = (x_body / safety_ellipse_a_m)^2
 - `corner_yield_target_d_m`
 - `corner_yield_rejoin_gap_m`
 - `corner_follow_speed_margin_mps`
+
+速度ガード:
+
+- `speed_only_fallback_enabled`
+- `speed_only_fallback_v_max_mps`
+- `wall_risk_speed_guard_enabled`
+- `wall_soft_margin_m`
+- `wall_risk_v_max_mps`
+- `mpc_health_speed_guard_enabled`
+- `mpc_health_infeasible_count_threshold`
+- `mpc_health_solve_time_warn_ms`
+- `mpc_health_v_max_mps`
+- `mpc_health_stale_time_sec`
+
+区間安全プロファイル:
+
+- `section_safety_profile_enabled`
+- `section_safety_names`
+- `section_safety_profiles`
+- `section_safety_role_policies`
+- `section_safety_start_s_m`
+- `section_safety_end_s_m`
+- `section_safety_start_wp`
+- `section_safety_end_wp`
 
 壁と復帰:
 
@@ -352,15 +509,26 @@ h = (x_body / safety_ellipse_a_m)^2
 - `blocked`
 - `side_by_side`
 - `corner_side_by_side`
+- `parallel_side_candidate`
 - `front_distance_m`
 - `side_delta_s`
+- `parallel_side_delta_s`
+- `parallel_side_delta_d`
 - `ego_lateral_offset`
 - `target_lateral_offset_m`
 - `active_override`
 - `reason`
+- `speed_only_fallback_active`
+- `wall_risk_speed_guard_active`
+- `mpc_health_speed_guard_active`
+- `speed_cap_reason`
+- `applied_speed_cap_mps`
+- `active_section_name`
+- `active_section_profile`
+- `mpc_infeasible_count`
+- `mpc_solve_time_ms`
 - `min_cbf_h`
 - `cbf_slack`
-- `mpc_infeasible_count`
 
 `autoware.log` では次を探します。
 
@@ -382,6 +550,10 @@ overtake decision:
   - 候補d列が安全コリドー外
 - `cbf_slack > 0`
   - 他車との楕円安全制約を割っている
+- `mode=SPEED_GUARD`
+  - 横方向回避ではなく速度only fallbackが出ている
+- `speed_cap_reason=mpc_health_infeasible_guard`
+  - MPC側のinfeasible増加を受けてplanner側が速度を絞っている
 
 ## テスト
 
@@ -395,6 +567,18 @@ overtake decision:
   - 状態遷移
 - `test/test_overtake_planner_core.cpp`
   - 候補生成から出力までの統合的な挙動
+
+今回の分割で守っている契約:
+
+- 前方車と横並びが同じ相手でも `blocked` と `side_by_side` を同時に立てる
+- 前方車と横並びが別の相手でも、前方閉塞対象と横並び対象を取り違えない
+- `SIDE_BY_SIDE_KEEP` 中に横並びが消えても前方閉塞が残るなら `FOLLOW_BLOCKED` へ戻す
+- `follow_trigger_s_m` より遠くても、相対速度で詰まる前方車は `blocked` にする
+- 左右どちらのpass gapが失われても、追い越し方向を即反転せず `YIELD_BEHIND` を選ぶ
+- 直線限定ゲートが閉じている区間では、gapがあっても追い越し開始へ入らない
+- 大きい横ずれ中は、parallel side candidateや壁リスクがあれば `RECOVERY` を優先する
+- `pass_gap_reason` は `no_target`, `ok`, `left_gap_narrow`, `right_gap_narrow`, `both_gap_narrow`, `large_lateral_error` の意味を崩さない
+- 複数の速度ガードが同時に成立した場合は、最も低い速度capとその理由を出力する
 
 実行例:
 
