@@ -95,16 +95,12 @@ int sideRiskIndex(const BlockedInfo &info) {
   return info.side_index >= 0 ? info.side_index : info.parallel_side_index;
 }
 
-int yieldTargetIndex(const BlockedInfo &info) {
-  return info.nearest_index >= 0 ? info.nearest_index : sideRiskIndex(info);
-}
-
 } // namespace
 
 OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame,
                                          PlannerConfig config)
-    : frame_(std::move(frame)), config_(config), safety_(config),
-      state_machine_(config) {}
+    : frame_(std::move(frame)), config_(config),
+      blocked_risk_(frame_, config_), safety_(config), state_machine_(config) {}
 
 PlannerOutput
 OvertakePlannerCore::update(double now_sec, const EgoState &ego,
@@ -126,9 +122,10 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
 
   const ActiveSectionSafety active_section = activeSectionSafety(ego.frenet.s);
   const double wall_soft_margin = effectiveWallSoftMargin(active_section);
-  BlockedInfo blocked = detectBlocked(ego, opponents, now_sec);
+  BlockedInfo blocked = blocked_risk_.detectBlocked(ego, opponents, now_sec);
   const auto predictions = predictOpponents(opponents, now_sec);
-  blocked = evaluatePassGap(blocked, opponents, predictions);
+  blocked = blocked_risk_.evaluatePassGap(blocked, opponents, predictions,
+                                          mode_);
   blocked.corner_abs_curvature =
       maxAbsCurvatureAhead(ego.frenet.s, config_.corner_side_yield_lookahead_m);
   blocked.corner_side_by_side =
@@ -160,7 +157,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   } else {
     straight_overtake_start_allowed_ = true;
   }
-  blocked.ego_wall_clearance_m = wallClearance(ego.frenet.d);
+  blocked.ego_wall_clearance_m = blocked_risk_.wallClearance(ego.frenet.d);
   blocked = evaluateFutureSideBySideRisk(ego, blocked, opponents);
   if (active_section.force_outer_yield &&
       (blocked.side_by_side || blocked.parallel_side_candidate ||
@@ -390,157 +387,6 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       mpc_health});
 }
 
-BlockedInfo
-OvertakePlannerCore::detectBlocked(const EgoState &ego,
-                                   const std::vector<OpponentState> &opponents,
-                                   double now_sec) const {
-  // 同一コリドー内の最も近い前方車両を探し、速度差/距離から閉塞を判断する。
-  BlockedInfo info;
-  for (std::size_t i = 0; i < opponents.size(); ++i) {
-    const auto &opp = opponents[i];
-    if (!opp.valid ||
-        now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
-      continue;
-    }
-    const double delta_s = frame_.deltaS(ego.frenet.s, opp.frenet.s);
-    const double signed_delta_s =
-        signedDeltaS(ego.frenet.s, opp.frenet.s, frame_.length());
-    const double s_dot = opponentSDot(opp);
-    const bool direction_known = opp.v >= config_.same_direction_min_speed_mps;
-    const bool same_direction =
-        !direction_known || s_dot >= config_.same_direction_min_s_dot_mps;
-    if (config_.same_direction_filter_enabled && direction_known &&
-        !same_direction) {
-      ++info.ignored_opposite_direction_count;
-      continue;
-    }
-    const double delta_d = opp.frenet.d - ego.frenet.d;
-    const bool front = delta_s > 0.0 && delta_s < config_.lookahead_s_m;
-    const bool same_corridor =
-        std::abs(delta_d) < config_.same_corridor_width_m;
-    const bool side_by_side =
-        std::abs(signed_delta_s) < config_.side_by_side_s_m &&
-        std::abs(delta_d) < config_.side_margin_m;
-    const bool parallel_side_candidate =
-        config_.parallel_side_detection_enabled && !side_by_side &&
-        config_.parallel_side_s_m > 0.0 &&
-        config_.parallel_side_margin_m > 0.0 &&
-        std::abs(signed_delta_s) < config_.parallel_side_s_m &&
-        std::abs(delta_d) < config_.parallel_side_margin_m;
-    if (side_by_side) {
-      // 横並び中は不用意なmerge backを避けるため、状態機械へ明示的に伝える。
-      info.side_by_side = true;
-      if (info.side_index < 0 ||
-          std::abs(signed_delta_s) < std::abs(info.side_delta_s)) {
-        info.side_index = static_cast<int>(i);
-        info.side_id = opp.id;
-        info.side_delta_s = signed_delta_s;
-        info.side_delta_d = delta_d;
-        info.side_rel_v = ego.v - opp.v;
-        info.side_s_dot_mps = s_dot;
-        info.side_direction_known = direction_known;
-        info.side_same_direction = same_direction;
-      }
-    }
-    if (parallel_side_candidate) {
-      // スタート直後の別ライン並走など、通常の横並び幅より広いがコーナーで収束し得る相手。
-      info.parallel_side_candidate = true;
-      if (info.parallel_side_index < 0 ||
-          std::abs(signed_delta_s) < std::abs(info.parallel_side_delta_s)) {
-        info.parallel_side_index = static_cast<int>(i);
-        info.parallel_side_id = opp.id;
-        info.parallel_side_delta_s = signed_delta_s;
-        info.parallel_side_delta_d = delta_d;
-        info.parallel_side_rel_v = ego.v - opp.v;
-        info.parallel_side_s_dot_mps = s_dot;
-        info.parallel_side_direction_known = direction_known;
-        info.parallel_side_same_direction = same_direction;
-      }
-    }
-    if (!front || !same_corridor) {
-      continue;
-    }
-    if (delta_s < info.front_delta_s) {
-      info.nearest_index = static_cast<int>(i);
-      info.nearest_id = opp.id;
-      info.front_delta_s = delta_s;
-      info.front_delta_d = delta_d;
-      info.front_rel_v = ego.v - opp.v;
-      info.front_s_dot_mps = s_dot;
-      info.front_direction_known = direction_known;
-      info.front_same_direction = same_direction;
-    }
-  }
-
-  if (info.nearest_index >= 0) {
-    // 近い、または相対速度で詰まりつつある前走車を「blocked」と扱う。
-    const bool closing = info.front_rel_v > config_.dv_block_threshold_mps;
-    const bool slow_gap = info.front_delta_s < config_.follow_trigger_s_m;
-    info.blocked = closing || slow_gap;
-  }
-  return info;
-}
-
-BlockedInfo OvertakePlannerCore::evaluatePassGap(
-    const BlockedInfo &blocked_info,
-    const std::vector<OpponentState> &opponents,
-    const std::vector<PredictedOpponent> &predictions) const {
-  BlockedInfo out = blocked_info;
-  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
-  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
-  const double ellipse_gap =
-      config_.safety_ellipse_b_m * std::sqrt(1.0 + config_.min_ellipse_h);
-  out.pass_gap_required_m = std::max(config_.min_pass_gap_m, ellipse_gap);
-
-  const int target_index = yieldTargetIndex(out);
-  if (target_index < 0 ||
-      static_cast<std::size_t>(target_index) >= opponents.size()) {
-    out.left_pass_gap_m = 0.0;
-    out.right_pass_gap_m = 0.0;
-    out.can_pass_left = false;
-    out.can_pass_right = false;
-    out.pass_gap_reason = "no_target";
-    return out;
-  }
-
-  const auto &target = opponents[static_cast<std::size_t>(target_index)];
-  double min_left_gap = upper_d - target.frenet.d;
-  double min_right_gap = target.frenet.d - lower_d;
-
-  for (const auto &pred : predictions) {
-    if (pred.id != target.id) {
-      continue;
-    }
-    for (double d : pred.d) {
-      min_left_gap = std::min(min_left_gap, upper_d - d);
-      min_right_gap = std::min(min_right_gap, d - lower_d);
-    }
-    break;
-  }
-
-  out.left_pass_gap_m = min_left_gap;
-  out.right_pass_gap_m = min_right_gap;
-  const double left_threshold =
-      out.pass_gap_required_m -
-      (isLeftPassMode(mode_) ? config_.pass_gap_hysteresis_m : 0.0);
-  const double right_threshold =
-      out.pass_gap_required_m -
-      (isRightPassMode(mode_) ? config_.pass_gap_hysteresis_m : 0.0);
-  out.can_pass_left = min_left_gap >= left_threshold;
-  out.can_pass_right = min_right_gap >= right_threshold;
-
-  if (out.can_pass_left && out.can_pass_right) {
-    out.pass_gap_reason = "ok";
-  } else if (out.can_pass_left) {
-    out.pass_gap_reason = "right_gap_narrow";
-  } else if (out.can_pass_right) {
-    out.pass_gap_reason = "left_gap_narrow";
-  } else {
-    out.pass_gap_reason = "both_gap_narrow";
-  }
-  return out;
-}
-
 std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
     const std::vector<OpponentState> &opponents, double now_sec) const {
   // V2X位置から推定した速度を使い、短いhorizonでは等速直線運動として予測する。
@@ -648,8 +494,9 @@ BlockedInfo OvertakePlannerCore::evaluateFutureSideBySideRisk(
     const bool future_corner =
         future_side && config_.corner_side_yield_curvature_m_inv > 0.0 &&
         future_curvature >= config_.corner_side_yield_curvature_m_inv;
-    const double clearance = wallClearance(ego_d);
-    const double target_clearance = wallClearance(side_keep_target_d);
+    const double clearance = blocked_risk_.wallClearance(ego_d);
+    const double target_clearance =
+        blocked_risk_.wallClearance(side_keep_target_d);
     const double effective_clearance = std::min(clearance, target_clearance);
     const bool outer_wall_risk =
         future_side &&
@@ -816,17 +663,6 @@ double OvertakePlannerCore::maxAbsCurvatureAhead(double s,
   return max_abs_kappa;
 }
 
-double OvertakePlannerCore::wallClearance(double d) const {
-  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
-  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
-  return std::min(d - lower_d, upper_d - d);
-}
-
-double OvertakePlannerCore::opponentSDot(const OpponentState &opponent) const {
-  const auto ref = frame_.interpolate(opponent.frenet.s);
-  return opponent.vx * std::cos(ref.yaw) + opponent.vy * std::sin(ref.yaw);
-}
-
 ActiveSectionSafety OvertakePlannerCore::activeSectionSafety(double s) const {
   ActiveSectionSafety active;
   if (!config_.section_safety_profile_enabled) {
@@ -894,7 +730,8 @@ bool OvertakePlannerCore::shouldYieldBehindSideBySide(
   const bool opponent_not_clearly_behind =
       blocked_info.side_delta_s > -config_.side_yield_s_m;
   const bool close_to_wall =
-      wallClearance(ego.frenet.d) <= config_.corner_side_yield_wall_clearance_m;
+      blocked_risk_.wallClearance(ego.frenet.d) <=
+      config_.corner_side_yield_wall_clearance_m;
   return opponent_not_clearly_behind || close_to_wall;
 }
 

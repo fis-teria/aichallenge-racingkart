@@ -15,6 +15,7 @@ ament_auto_find_build_dependencies()
 
 ament_auto_add_library(${PROJECT_NAME}_core SHARED
   src/behavior_state_machine.cpp
+  src/blocked_risk_analyzer.cpp
   src/candidate_builder.cpp
   src/frenet_frame.cpp
   src/overtake_planner_core.cpp

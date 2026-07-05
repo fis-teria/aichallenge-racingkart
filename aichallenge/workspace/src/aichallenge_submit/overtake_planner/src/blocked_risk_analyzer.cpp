@@ -1,0 +1,206 @@
+#include "overtake_planner/blocked_risk_analyzer.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace overtake_planner {
+
+namespace {
+
+bool isLeftPassMode(BehaviorMode mode) {
+  return mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
+         mode == BehaviorMode::OVERTAKE_LEFT;
+}
+
+bool isRightPassMode(BehaviorMode mode) {
+  return mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
+         mode == BehaviorMode::OVERTAKE_RIGHT;
+}
+
+double signedDeltaS(double ego_s, double other_s, double track_length) {
+  double signed_delta_s = other_s - ego_s;
+  if (track_length > 0.0) {
+    signed_delta_s = std::fmod(signed_delta_s, track_length);
+    if (signed_delta_s > track_length * 0.5) {
+      signed_delta_s -= track_length;
+    } else if (signed_delta_s < -track_length * 0.5) {
+      signed_delta_s += track_length;
+    }
+  }
+  return signed_delta_s;
+}
+
+} // namespace
+
+BlockedRiskAnalyzer::BlockedRiskAnalyzer(const FrenetFrame &frame,
+                                         const PlannerConfig &config)
+    : frame_(frame), config_(config) {}
+
+BlockedInfo BlockedRiskAnalyzer::detectBlocked(
+    const EgoState &ego, const std::vector<OpponentState> &opponents,
+    double now_sec) const {
+  BlockedInfo info;
+  for (std::size_t i = 0; i < opponents.size(); ++i) {
+    const auto &opp = opponents[i];
+    if (!opp.valid ||
+        now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
+      continue;
+    }
+    const double delta_s = frame_.deltaS(ego.frenet.s, opp.frenet.s);
+    const double signed_delta_s =
+        signedDeltaS(ego.frenet.s, opp.frenet.s, frame_.length());
+    const double s_dot = opponentSDot(opp);
+    const bool direction_known = opp.v >= config_.same_direction_min_speed_mps;
+    const bool same_direction =
+        !direction_known || s_dot >= config_.same_direction_min_s_dot_mps;
+    if (config_.same_direction_filter_enabled && direction_known &&
+        !same_direction) {
+      ++info.ignored_opposite_direction_count;
+      continue;
+    }
+    const double delta_d = opp.frenet.d - ego.frenet.d;
+    const bool front = delta_s > 0.0 && delta_s < config_.lookahead_s_m;
+    const bool same_corridor =
+        std::abs(delta_d) < config_.same_corridor_width_m;
+    const bool side_by_side =
+        std::abs(signed_delta_s) < config_.side_by_side_s_m &&
+        std::abs(delta_d) < config_.side_margin_m;
+    const bool parallel_side_candidate =
+        config_.parallel_side_detection_enabled && !side_by_side &&
+        config_.parallel_side_s_m > 0.0 &&
+        config_.parallel_side_margin_m > 0.0 &&
+        std::abs(signed_delta_s) < config_.parallel_side_s_m &&
+        std::abs(delta_d) < config_.parallel_side_margin_m;
+    if (side_by_side) {
+      info.side_by_side = true;
+      if (info.side_index < 0 ||
+          std::abs(signed_delta_s) < std::abs(info.side_delta_s)) {
+        info.side_index = static_cast<int>(i);
+        info.side_id = opp.id;
+        info.side_delta_s = signed_delta_s;
+        info.side_delta_d = delta_d;
+        info.side_rel_v = ego.v - opp.v;
+        info.side_s_dot_mps = s_dot;
+        info.side_direction_known = direction_known;
+        info.side_same_direction = same_direction;
+      }
+    }
+    if (parallel_side_candidate) {
+      info.parallel_side_candidate = true;
+      if (info.parallel_side_index < 0 ||
+          std::abs(signed_delta_s) < std::abs(info.parallel_side_delta_s)) {
+        info.parallel_side_index = static_cast<int>(i);
+        info.parallel_side_id = opp.id;
+        info.parallel_side_delta_s = signed_delta_s;
+        info.parallel_side_delta_d = delta_d;
+        info.parallel_side_rel_v = ego.v - opp.v;
+        info.parallel_side_s_dot_mps = s_dot;
+        info.parallel_side_direction_known = direction_known;
+        info.parallel_side_same_direction = same_direction;
+      }
+    }
+    if (!front || !same_corridor) {
+      continue;
+    }
+    if (delta_s < info.front_delta_s) {
+      info.nearest_index = static_cast<int>(i);
+      info.nearest_id = opp.id;
+      info.front_delta_s = delta_s;
+      info.front_delta_d = delta_d;
+      info.front_rel_v = ego.v - opp.v;
+      info.front_s_dot_mps = s_dot;
+      info.front_direction_known = direction_known;
+      info.front_same_direction = same_direction;
+    }
+  }
+
+  if (info.nearest_index >= 0) {
+    const bool closing = info.front_rel_v > config_.dv_block_threshold_mps;
+    const bool slow_gap = info.front_delta_s < config_.follow_trigger_s_m;
+    info.blocked = closing || slow_gap;
+  }
+  return info;
+}
+
+BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
+    const BlockedInfo &blocked_info,
+    const std::vector<OpponentState> &opponents,
+    const std::vector<PredictedOpponent> &predictions,
+    BehaviorMode mode) const {
+  BlockedInfo out = blocked_info;
+  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
+  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
+  const double ellipse_gap =
+      config_.safety_ellipse_b_m * std::sqrt(1.0 + config_.min_ellipse_h);
+  out.pass_gap_required_m = std::max(config_.min_pass_gap_m, ellipse_gap);
+
+  const int target_index = yieldTargetIndex(out);
+  if (target_index < 0 ||
+      static_cast<std::size_t>(target_index) >= opponents.size()) {
+    out.left_pass_gap_m = 0.0;
+    out.right_pass_gap_m = 0.0;
+    out.can_pass_left = false;
+    out.can_pass_right = false;
+    out.pass_gap_reason = "no_target";
+    return out;
+  }
+
+  const auto &target = opponents[static_cast<std::size_t>(target_index)];
+  double min_left_gap = upper_d - target.frenet.d;
+  double min_right_gap = target.frenet.d - lower_d;
+
+  for (const auto &pred : predictions) {
+    if (pred.id != target.id) {
+      continue;
+    }
+    for (double d : pred.d) {
+      min_left_gap = std::min(min_left_gap, upper_d - d);
+      min_right_gap = std::min(min_right_gap, d - lower_d);
+    }
+    break;
+  }
+
+  out.left_pass_gap_m = min_left_gap;
+  out.right_pass_gap_m = min_right_gap;
+  const double left_threshold =
+      out.pass_gap_required_m -
+      (isLeftPassMode(mode) ? config_.pass_gap_hysteresis_m : 0.0);
+  const double right_threshold =
+      out.pass_gap_required_m -
+      (isRightPassMode(mode) ? config_.pass_gap_hysteresis_m : 0.0);
+  out.can_pass_left = min_left_gap >= left_threshold;
+  out.can_pass_right = min_right_gap >= right_threshold;
+
+  if (out.can_pass_left && out.can_pass_right) {
+    out.pass_gap_reason = "ok";
+  } else if (out.can_pass_left) {
+    out.pass_gap_reason = "right_gap_narrow";
+  } else if (out.can_pass_right) {
+    out.pass_gap_reason = "left_gap_narrow";
+  } else {
+    out.pass_gap_reason = "both_gap_narrow";
+  }
+  return out;
+}
+
+double BlockedRiskAnalyzer::wallClearance(double d) const {
+  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
+  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
+  return std::min(d - lower_d, upper_d - d);
+}
+
+double
+BlockedRiskAnalyzer::opponentSDot(const OpponentState &opponent) const {
+  const auto ref = frame_.interpolate(opponent.frenet.s);
+  return opponent.vx * std::cos(ref.yaw) + opponent.vy * std::sin(ref.yaw);
+}
+
+int BlockedRiskAnalyzer::sideRiskIndex(const BlockedInfo &info) const {
+  return info.side_index >= 0 ? info.side_index : info.parallel_side_index;
+}
+
+int BlockedRiskAnalyzer::yieldTargetIndex(const BlockedInfo &info) const {
+  return info.nearest_index >= 0 ? info.nearest_index : sideRiskIndex(info);
+}
+
+} // namespace overtake_planner

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "overtake_planner/behavior_state_machine.hpp"
+#include "overtake_planner/blocked_risk_analyzer.hpp"
 #include "overtake_planner/frenet_frame.hpp"
 #include "overtake_planner/safety_evaluator.hpp"
 #include "overtake_planner/types.hpp"
@@ -21,15 +22,6 @@ public:
   BehaviorMode mode() const { return mode_; }
 
 private:
-  // 自車前方の同一走行コリドーに遅い車がいるか、横並び中かを判定する。
-  BlockedInfo detectBlocked(const EgoState &ego,
-                            const std::vector<OpponentState> &opponents,
-                            double now_sec) const;
-  // 前走/横並び対象と壁の間に、追い抜き可能な幅が継続してあるかを判定する。
-  BlockedInfo
-  evaluatePassGap(const BlockedInfo &blocked_info,
-                  const std::vector<OpponentState> &opponents,
-                  const std::vector<PredictedOpponent> &predictions) const;
   // V2Xで受けた他車位置を短いhorizonだけ等速予測する。
   std::vector<PredictedOpponent>
   predictOpponents(const std::vector<OpponentState> &opponents,
@@ -51,8 +43,6 @@ private:
                         const BlockedInfo &blocked_info) const;
   // 横並び中に近い先の曲率を見て、カーブで横へ押し出す判断を抑える。
   double maxAbsCurvatureAhead(double s, double lookahead_m) const;
-  double wallClearance(double d) const;
-  double opponentSDot(const OpponentState &opponent) const;
   ActiveSectionSafety activeSectionSafety(double s) const;
   bool sectionContainsS(const SectionSafetyRule &rule, double s) const;
   double effectiveWallSoftMargin(const ActiveSectionSafety &section) const;
@@ -62,6 +52,7 @@ private:
 
   FrenetFrame frame_;
   PlannerConfig config_;
+  BlockedRiskAnalyzer blocked_risk_;
   SafetyEvaluator safety_;
   BehaviorStateMachine state_machine_;
   BehaviorMode mode_{BehaviorMode::FREE_RUN};
