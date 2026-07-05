@@ -18,6 +18,7 @@ ament_auto_add_library(${PROJECT_NAME}_core SHARED
   src/blocked_risk_analyzer.cpp
   src/candidate_builder.cpp
   src/frenet_frame.cpp
+  src/future_side_by_side_risk_analyzer.cpp
   src/overtake_planner_core.cpp
   src/planner_output_builder.cpp
   src/safety_evaluator.cpp

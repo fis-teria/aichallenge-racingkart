@@ -3,6 +3,7 @@
 #include "overtake_planner/behavior_state_machine.hpp"
 #include "overtake_planner/blocked_risk_analyzer.hpp"
 #include "overtake_planner/frenet_frame.hpp"
+#include "overtake_planner/future_side_by_side_risk_analyzer.hpp"
 #include "overtake_planner/safety_evaluator.hpp"
 #include "overtake_planner/types.hpp"
 
@@ -26,10 +27,6 @@ private:
   std::vector<PredictedOpponent>
   predictOpponents(const std::vector<OpponentState> &opponents,
                    double now_sec) const;
-  // 横並びが近い未来のコーナーで壁余裕を失うかをFrenet予測で先読みする。
-  BlockedInfo evaluateFutureSideBySideRisk(
-      const EgoState &ego, const BlockedInfo &blocked_info,
-      const std::vector<OpponentState> &opponents) const;
   // FASTEST/FOLLOW/PASS/RECOVERYそれぞれの横オフセット列と速度上限を作る。
   CandidateTrajectory
   makeCandidate(CandidateType type, const EgoState &ego,
@@ -53,6 +50,7 @@ private:
   FrenetFrame frame_;
   PlannerConfig config_;
   BlockedRiskAnalyzer blocked_risk_;
+  FutureSideBySideRiskAnalyzer future_side_risk_;
   SafetyEvaluator safety_;
   BehaviorStateMachine state_machine_;
   BehaviorMode mode_{BehaviorMode::FREE_RUN};
