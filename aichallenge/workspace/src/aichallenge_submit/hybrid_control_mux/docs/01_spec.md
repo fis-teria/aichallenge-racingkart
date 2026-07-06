@@ -13,13 +13,14 @@
 - MPC が正常なときは MPC の `AckermannControlCommand` をそのまま最終出力へ流す
 - MPC が連続して infeasible になったときは Pure Pursuit の制御指令へ切り替える
 - MPC の制御指令が途切れたときも、設定により Pure Pursuit へ切り替える
+- hybrid 起動時の Pure Pursuit は `/overtake/reference_override` を読み、追い越し・追従用の横オフセットと速度 cap を反映した trajectory を追う
 - Pure Pursuit の指令も使えないときは停止指令を出す
 - 切り替え状態を `/hybrid_control_mux/debug` に JSON 形式で出す
 
 一方で、次の処理は行いません。
 
 - MPC の最適化問題そのものを軽くする、または解きやすくする
-- Pure Pursuit に障害物回避や追い越し判断を追加する
+- Pure Pursuit 内で独自に障害物回避や追い越し判断を行う
 - 相手車両の未来位置を予測する
 - 走行経路や速度プロファイルを生成する
 - 複数の最終制御コマンドを同時に `/control/command/control_cmd` へ出す
@@ -49,6 +50,7 @@ MPC と Pure Pursuit は最終制御トピックへ直接出力せず、いっ�
 | `/hybrid_control/mpc/control_cmd` | `autoware_auto_control_msgs/msg/AckermannControlCommand` | delay aware MPC の制御指令 |
 | `/hybrid_control/pure_pursuit/control_cmd` | `autoware_auto_control_msgs/msg/AckermannControlCommand` | Pure Pursuit の制御指令 |
 | `/mpc/speed_profile_debug` | `std_msgs/msg/String` | MPC の状態監視用 JSON |
+| `/overtake/reference_override` | `std_msgs/msg/Float32MultiArray` | MPC と Pure Pursuit が読む追い越し・追従用の横オフセットと速度 cap |
 
 ノード内部では、それぞれ次の名前へ remap されます。
 
@@ -102,6 +104,8 @@ Pure Pursuit の制御指令が新しければ、その指令を最終出力に�
 - speed は `0.0` から `fallback_speed_mps` の範囲に制限
 - acceleration は `fallback_decel_min_mps2` から `fallback_accel_max_mps2` の範囲に制限
 
+hybrid 起動時の Pure Pursuit は `use_overtake_reference_override=true` で起動します。`/overtake/reference_override` が新しければ、Pure Pursuit は現在位置から先の trajectory 点を overtake planner の横オフセット分だけずらし、速度 cap も目標速度の上限として使います。これにより、MPC から Pure Pursuit に落ちている間も、追い越し・追従・譲りの速度抑制が制御指令へ反映されます。
+
 Pure Pursuit の制御指令も新しくない場合は、停止指令を出します。
 
 ### MPC への復帰
@@ -150,6 +154,6 @@ Pure Pursuit の制御指令も新しくない場合は、停止指令を出し�
 
 ## 注意点
 
-Pure Pursuit は低速のコース追従用フォールバックです。相手車両や壁との干渉を直接避ける機能はありません。
+Pure Pursuit は低速のコース追従用フォールバックです。hybrid 起動では overtake planner の横オフセットと速度 cap を反映しますが、MPC のような最適化や制約解決は行いません。
 
-そのため、フォールバック速度を高くしすぎると、MPC が苦しい場面で速度だけ維持してしまい、かえって危険になる可能性があります。特にサイドバイサイドでコーナーに入る場面では、Pure Pursuit への切り替えは「安全な回避」ではなく「最低限コースを追うための退避動作」として扱ってください。
+そのため、フォールバック速度を高くしすぎると、MPC が苦しい場面で速度だけ維持してしまい、かえって危険になる可能性があります。特にサイドバイサイドでコーナーに入る場面では、Pure Pursuit への切り替えは「制約を解いた安全回避」ではなく「overtake planner の判断を使いながら低速でコースを追う退避動作」として扱ってください。

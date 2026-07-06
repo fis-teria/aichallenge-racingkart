@@ -22,6 +22,8 @@
     <arg name="output_raw_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd_raw"/>
     <arg name="use_external_target_vel" value="true"/>
     <arg name="external_target_vel" value="$(var fallback_speed_mps)"/>
+    <arg name="use_overtake_reference_override" value="$(var use_overtake_planner)"/>
+    <arg name="input_overtake_reference_override" value="/overtake/reference_override"/>
     <arg name="lookahead_gain" value="0.5"/>
     <arg name="lookahead_min_distance" value="3.5"/>
     <arg name="speed_proportional_gain" value="0.8"/>

@@ -116,6 +116,25 @@ fallback_decel_min_mps2 <= acceleration <= fallback_accel_max_mps2
 
 `fallback_speed_mps` は `hybrid_control_mux` 側の速度上限であると同時に、`hybrid_delay_aware_mpc.launch.xml` から Pure Pursuit の `external_target_vel` にも渡されます。つまり、Pure Pursuit 自体の目標速度と mux 側の上限が同じ値になる構成です。
 
+## Pure Pursuit と overtake planner
+
+`hybrid_delay_aware_mpc.launch.xml` では、Pure Pursuit に `use_overtake_reference_override=true` を渡します。これにより、Pure Pursuit は `/overtake/reference_override` を購読します。
+
+`/overtake/reference_override` は MPC と同じ形式です。
+
+```text
+[valid, mode_id, n, lateral_offsets[0..n), speed_caps[0..n)]
+```
+
+Pure Pursuit は現在位置に最も近い trajectory index を基準にして、先の `n` 点へ以下を適用します。
+
+- `lateral_offsets[i]` が有限値なら、trajectory 点を yaw の法線方向に横移動する
+- `speed_caps[i]` が正の有限値なら、その点の速度を cap 以下にする
+- `external_target_vel` を使う場合でも、現在点の `speed_caps[0]` を目標速度の上限として使う
+- override が `overtake_override_timeout_sec` より古くなったら無効化する
+
+これにより、Pure Pursuit fallback 中でも overtake planner の FOLLOW、YIELD、PASS 系の横オフセットと速度抑制が制御に乗ります。ただし、Pure Pursuit 自体が相手車両との制約を解くわけではありません。
+
 ## 停止指令の生成
 
 停止指令は以下の値で生成します。
@@ -142,7 +161,7 @@ hybrid control source=<source> reason=<reason> mpc_status=<status> mpc_infeasibl
 
 ### `source=pure_pursuit`
 
-MPC が infeasible または timeout しており、Pure Pursuit 指令は届いています。期待通りのフォールバック状態です。
+MPC が infeasible または timeout しており、Pure Pursuit 指令は届いています。期待通りのフォールバック状態です。追い越し・追従が反映されているかは `/pure_pursuit/debug` の `overtake_override_applied` と `/debug/overtake/mode` を確認します。
 
 ### `source=stop`
 

@@ -10,42 +10,60 @@
 #include <iterator>
 #include <sstream>
 
-namespace simple_pure_pursuit
-{
+namespace simple_pure_pursuit {
 
 using motion_utils::findNearestIndex;
 using tier4_autoware_utils::calcLateralDeviation;
 using tier4_autoware_utils::calcYawDeviation;
 
 SimplePurePursuit::SimplePurePursuit()
-: Node("simple_pure_pursuit"),
-  // initialize parameters
-  wheel_base_(declare_parameter<float>("wheel_base", 2.14)),
-  lookahead_gain_(declare_parameter<float>("lookahead_gain", 1.0)),
-  lookahead_min_distance_(declare_parameter<float>("lookahead_min_distance", 1.0)),
-  speed_proportional_gain_(declare_parameter<float>("speed_proportional_gain", 1.0)),
-  use_external_target_vel_(declare_parameter<bool>("use_external_target_vel", false)),
-  external_target_vel_(declare_parameter<float>("external_target_vel", 0.0)),
-  steering_tire_angle_gain_(declare_parameter<float>("steering_tire_angle_gain", 1.0)),
-  debug_publish_period_sec_(declare_parameter<float>("debug_publish_period_sec", 0.25))
-{
+    : Node("simple_pure_pursuit"),
+      // initialize parameters
+      wheel_base_(declare_parameter<float>("wheel_base", 2.14)),
+      lookahead_gain_(declare_parameter<float>("lookahead_gain", 1.0)),
+      lookahead_min_distance_(
+          declare_parameter<float>("lookahead_min_distance", 1.0)),
+      speed_proportional_gain_(
+          declare_parameter<float>("speed_proportional_gain", 1.0)),
+      use_external_target_vel_(
+          declare_parameter<bool>("use_external_target_vel", false)),
+      external_target_vel_(
+          declare_parameter<float>("external_target_vel", 0.0)),
+      steering_tire_angle_gain_(
+          declare_parameter<float>("steering_tire_angle_gain", 1.0)),
+      debug_publish_period_sec_(
+          declare_parameter<float>("debug_publish_period_sec", 0.25)),
+      use_overtake_reference_override_(
+          declare_parameter<bool>("use_overtake_reference_override", false)),
+      overtake_override_timeout_sec_(
+          declare_parameter<float>("overtake_override_timeout_sec", 0.50)) {
   pub_cmd_ = create_publisher<AckermannControlCommand>("output/control_cmd", 1);
-  pub_raw_cmd_ = create_publisher<AckermannControlCommand>("output/raw_control_cmd", 1);
-  pub_lookahead_point_ = create_publisher<PointStamped>("/control/debug/lookahead_point", 1);
+  pub_raw_cmd_ =
+      create_publisher<AckermannControlCommand>("output/raw_control_cmd", 1);
+  pub_lookahead_point_ =
+      create_publisher<PointStamped>("/control/debug/lookahead_point", 1);
   pub_debug_ = create_publisher<String>("/pure_pursuit/debug", 1);
 
-  const auto bv_qos = rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile().best_effort();
+  const auto bv_qos =
+      rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile().best_effort();
   sub_kinematics_ = create_subscription<Odometry>(
-    "input/kinematics", bv_qos, [this](const Odometry::SharedPtr msg) { odometry_ = msg; });
+      "input/kinematics", bv_qos,
+      [this](const Odometry::SharedPtr msg) { odometry_ = msg; });
   sub_trajectory_ = create_subscription<Trajectory>(
-    "input/trajectory", bv_qos, [this](const Trajectory::SharedPtr msg) { trajectory_ = msg; });
+      "input/trajectory", bv_qos,
+      [this](const Trajectory::SharedPtr msg) { trajectory_ = msg; });
+  sub_overtake_override_ = create_subscription<Float32MultiArray>(
+      "input/overtake_reference_override", rclcpp::QoS(1),
+      [this](const Float32MultiArray::SharedPtr msg) {
+        onOvertakeOverride(msg);
+      });
 
   using namespace std::literals::chrono_literals;
-  timer_ = create_wall_timer(10ms, std::bind(&SimplePurePursuit::onTimer, this));
+  timer_ =
+      create_wall_timer(10ms, std::bind(&SimplePurePursuit::onTimer, this));
 }
 
-AckermannControlCommand zeroAckermannControlCommand(rclcpp::Time stamp)
-{
+AckermannControlCommand zeroAckermannControlCommand(rclcpp::Time stamp) {
   AckermannControlCommand cmd;
   cmd.stamp = stamp;
   cmd.longitudinal.stamp = stamp;
@@ -56,35 +74,58 @@ AckermannControlCommand zeroAckermannControlCommand(rclcpp::Time stamp)
   return cmd;
 }
 
-void SimplePurePursuit::onTimer()
-{
+void SimplePurePursuit::onTimer() {
   // check data
   if (!subscribeMessageAvailable()) {
     return;
   }
+  const auto stamp = get_clock()->now();
+  const double now_sec = stamp.seconds();
 
   size_t closet_traj_point_idx =
-    findNearestIndex(trajectory_->points, odometry_->pose.pose.position);
+      findNearestIndex(trajectory_->points, odometry_->pose.pose.position);
+  const Trajectory *control_trajectory = trajectory_.get();
+  Trajectory adjusted_trajectory;
+  bool overtake_override_applied = false;
+  if (overtakeOverrideFresh(now_sec)) {
+    adjusted_trajectory = *trajectory_;
+    overtake_override_applied = applyOvertakeOverride(
+        adjusted_trajectory, closet_traj_point_idx, now_sec);
+    if (overtake_override_applied) {
+      control_trajectory = &adjusted_trajectory;
+    }
+  } else if (overtake_override_active_) {
+    clearOvertakeOverride();
+  }
 
   // publish zero command
-  AckermannControlCommand cmd = zeroAckermannControlCommand(get_clock()->now());
+  AckermannControlCommand cmd = zeroAckermannControlCommand(stamp);
 
   // get closest trajectory point from current position
-  TrajectoryPoint closet_traj_point = trajectory_->points.at(closet_traj_point_idx);
+  TrajectoryPoint closet_traj_point =
+      control_trajectory->points.at(closet_traj_point_idx);
 
   // calc longitudinal speed and acceleration
   double target_longitudinal_vel =
-    use_external_target_vel_ ? external_target_vel_ : closet_traj_point.longitudinal_velocity_mps;
+      use_external_target_vel_ ? external_target_vel_
+                               : closet_traj_point.longitudinal_velocity_mps;
+  const auto overtake_speed_cap = overtakeSpeedCap(0, now_sec);
+  if (overtake_speed_cap.has_value()) {
+    target_longitudinal_vel =
+        std::min(target_longitudinal_vel, overtake_speed_cap.value());
+  }
   double current_longitudinal_vel = odometry_->twist.twist.linear.x;
   const double current_yaw = tf2::getYaw(odometry_->pose.pose.orientation);
 
   cmd.longitudinal.speed = target_longitudinal_vel;
   cmd.longitudinal.acceleration =
-    speed_proportional_gain_ * (target_longitudinal_vel - current_longitudinal_vel);
+      speed_proportional_gain_ *
+      (target_longitudinal_vel - current_longitudinal_vel);
 
   // calc lateral control
   //// calc lookahead distance
-  double lookahead_distance = lookahead_gain_ * target_longitudinal_vel + lookahead_min_distance_;
+  double lookahead_distance =
+      lookahead_gain_ * target_longitudinal_vel + lookahead_min_distance_;
   //// calc center coordinate of rear wheel
   double rear_x = odometry_->pose.pose.position.x -
                   wheel_base_ / 2.0 * std::cos(current_yaw);
@@ -92,13 +133,13 @@ void SimplePurePursuit::onTimer()
                   wheel_base_ / 2.0 * std::sin(current_yaw);
   //// search lookahead point
   auto lookahead_point_itr = std::find_if(
-    trajectory_->points.begin() + closet_traj_point_idx, trajectory_->points.end(),
-    [&](const TrajectoryPoint & point) {
-      return std::hypot(point.pose.position.x - rear_x, point.pose.position.y - rear_y) >=
-             lookahead_distance;
-    });
-  if (lookahead_point_itr == trajectory_->points.end()) {
-    lookahead_point_itr = std::prev(trajectory_->points.end());
+      control_trajectory->points.begin() + closet_traj_point_idx,
+      control_trajectory->points.end(), [&](const TrajectoryPoint &point) {
+        return std::hypot(point.pose.position.x - rear_x,
+                          point.pose.position.y - rear_y) >= lookahead_distance;
+      });
+  if (lookahead_point_itr == control_trajectory->points.end()) {
+    lookahead_point_itr = std::prev(control_trajectory->points.end());
   }
   double lookahead_point_x = lookahead_point_itr->pose.position.x;
   double lookahead_point_y = lookahead_point_itr->pose.position.y;
@@ -112,45 +153,172 @@ void SimplePurePursuit::onTimer()
   pub_lookahead_point_->publish(lookahead_point_msg);
 
   // calc steering angle for lateral control
-  double alpha = std::atan2(lookahead_point_y - rear_y, lookahead_point_x - rear_x) -
-                 current_yaw;
+  double alpha =
+      std::atan2(lookahead_point_y - rear_y, lookahead_point_x - rear_x) -
+      current_yaw;
   const double raw_steering_tire_angle =
-    std::atan2(2.0 * wheel_base_ * std::sin(alpha), lookahead_distance);
-  cmd.lateral.steering_tire_angle = steering_tire_angle_gain_ * raw_steering_tire_angle;
+      std::atan2(2.0 * wheel_base_ * std::sin(alpha), lookahead_distance);
+  cmd.lateral.steering_tire_angle =
+      steering_tire_angle_gain_ * raw_steering_tire_angle;
 
-  publishDebug(
-    cmd.stamp, closet_traj_point_idx, target_longitudinal_vel, current_longitudinal_vel,
-    cmd.longitudinal.acceleration, lookahead_distance, lookahead_point_x, lookahead_point_y, rear_x,
-    rear_y, alpha, raw_steering_tire_angle, cmd.lateral.steering_tire_angle);
+  publishDebug(cmd.stamp, *control_trajectory, closet_traj_point_idx,
+               target_longitudinal_vel, current_longitudinal_vel,
+               cmd.longitudinal.acceleration, lookahead_distance,
+               lookahead_point_x, lookahead_point_y, rear_x, rear_y, alpha,
+               raw_steering_tire_angle, cmd.lateral.steering_tire_angle,
+               overtake_override_applied, overtakeLateralOffset(0),
+               overtake_speed_cap.value_or(0.0));
 
   pub_cmd_->publish(cmd);
   cmd.lateral.steering_tire_angle = raw_steering_tire_angle;
   pub_raw_cmd_->publish(cmd);
 }
 
-bool SimplePurePursuit::subscribeMessageAvailable()
-{
+bool SimplePurePursuit::subscribeMessageAvailable() {
   if (!odometry_) {
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/, "odometry is not available");
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
+                         "odometry is not available");
     return false;
   }
   if (!trajectory_) {
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/, "trajectory is not available");
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
+                         "trajectory is not available");
     return false;
   }
   if (trajectory_->points.empty()) {
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,  "trajectory points is empty");
-      return false;
-    }
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
+                         "trajectory points is empty");
+    return false;
+  }
   return true;
 }
 
+void SimplePurePursuit::onOvertakeOverride(
+    const Float32MultiArray::SharedPtr msg) {
+  if (!use_overtake_reference_override_) {
+    return;
+  }
+
+  const double now_sec = get_clock()->now().seconds();
+  const auto &data = msg->data;
+  if (data.size() < 3 || static_cast<int>(data[0]) != 1) {
+    clearOvertakeOverride();
+    return;
+  }
+
+  const int mode_id = static_cast<int>(data[1]);
+  const int n = static_cast<int>(data[2]);
+  if (n <= 0 || mode_id == 0) {
+    clearOvertakeOverride();
+    last_overtake_override_sec_ = now_sec;
+    return;
+  }
+
+  const std::size_t count = static_cast<std::size_t>(n);
+  const std::size_t expected = 3 + 2 * count;
+  if (data.size() < expected) {
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "Malformed overtake reference override: len=%zu expected=%zu",
+        data.size(), expected);
+    clearOvertakeOverride();
+    return;
+  }
+
+  overtake_lateral_offsets_.clear();
+  overtake_speed_caps_.clear();
+  overtake_lateral_offsets_.reserve(count);
+  overtake_speed_caps_.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    overtake_lateral_offsets_.push_back(static_cast<double>(data[3 + i]));
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    overtake_speed_caps_.push_back(static_cast<double>(data[3 + count + i]));
+  }
+  overtake_mode_id_ = mode_id;
+  overtake_override_active_ = true;
+  last_overtake_override_sec_ = now_sec;
+}
+
+void SimplePurePursuit::clearOvertakeOverride() {
+  overtake_override_active_ = false;
+  overtake_mode_id_ = 0;
+  overtake_lateral_offsets_.clear();
+  overtake_speed_caps_.clear();
+  last_overtake_override_sec_ = -1.0e9;
+}
+
+bool SimplePurePursuit::overtakeOverrideFresh(double now_sec) const {
+  return use_overtake_reference_override_ && overtake_override_active_ &&
+         !overtake_lateral_offsets_.empty() &&
+         now_sec - last_overtake_override_sec_ <=
+             overtake_override_timeout_sec_;
+}
+
+bool SimplePurePursuit::applyOvertakeOverride(
+    Trajectory &trajectory, std::size_t nearest_traj_point_idx,
+    double now_sec) {
+  if (!overtakeOverrideFresh(now_sec) ||
+      nearest_traj_point_idx >= trajectory.points.size()) {
+    return false;
+  }
+
+  const std::size_t count =
+      std::min(overtake_lateral_offsets_.size(),
+               trajectory.points.size() - nearest_traj_point_idx);
+  for (std::size_t i = 0; i < count; ++i) {
+    const double offset_m = overtake_lateral_offsets_[i];
+    if (!std::isfinite(offset_m)) {
+      continue;
+    }
+
+    auto &point = trajectory.points[nearest_traj_point_idx + i];
+    const double yaw = tf2::getYaw(point.pose.orientation);
+    point.pose.position.x = point.pose.position.x - offset_m * std::sin(yaw);
+    point.pose.position.y = point.pose.position.y + offset_m * std::cos(yaw);
+
+    const auto speed_cap = overtakeSpeedCap(i, now_sec);
+    if (speed_cap.has_value()) {
+      point.longitudinal_velocity_mps =
+          std::min(point.longitudinal_velocity_mps, speed_cap.value());
+    }
+  }
+  return count > 0;
+}
+
+std::optional<double>
+SimplePurePursuit::overtakeSpeedCap(std::size_t horizon_index,
+                                    double now_sec) const {
+  if (!overtakeOverrideFresh(now_sec) ||
+      horizon_index >= overtake_speed_caps_.size()) {
+    return std::nullopt;
+  }
+  const double speed_cap_mps = overtake_speed_caps_[horizon_index];
+  if (!std::isfinite(speed_cap_mps) || speed_cap_mps <= 0.0) {
+    return std::nullopt;
+  }
+  return speed_cap_mps;
+}
+
+double
+SimplePurePursuit::overtakeLateralOffset(std::size_t horizon_index) const {
+  if (!overtake_override_active_ ||
+      horizon_index >= overtake_lateral_offsets_.size()) {
+    return 0.0;
+  }
+  const double offset_m = overtake_lateral_offsets_[horizon_index];
+  return std::isfinite(offset_m) ? offset_m : 0.0;
+}
+
 void SimplePurePursuit::publishDebug(
-  const rclcpp::Time & stamp, std::size_t nearest_traj_point_idx, double target_longitudinal_vel,
-  double current_longitudinal_vel, double command_accel, double lookahead_distance,
-  double lookahead_point_x, double lookahead_point_y, double rear_x, double rear_y, double alpha,
-  double raw_steering_tire_angle, double steering_tire_angle)
-{
+    const rclcpp::Time &stamp, const Trajectory &control_trajectory,
+    std::size_t nearest_traj_point_idx, double target_longitudinal_vel,
+    double current_longitudinal_vel, double command_accel,
+    double lookahead_distance, double lookahead_point_x,
+    double lookahead_point_y, double rear_x, double rear_y, double alpha,
+    double raw_steering_tire_angle, double steering_tire_angle,
+    bool overtake_override_applied, double overtake_lateral_offset_m,
+    double overtake_speed_cap_mps) {
   if (debug_publish_period_sec_ <= 0.0 || !pub_debug_) {
     return;
   }
@@ -161,7 +329,7 @@ void SimplePurePursuit::publishDebug(
   }
   last_debug_publish_sec_ = now_sec;
 
-  const auto & nearest = trajectory_->points.at(nearest_traj_point_idx);
+  const auto &nearest = control_trajectory.points.at(nearest_traj_point_idx);
   const double ego_x = odometry_->pose.pose.position.x;
   const double ego_y = odometry_->pose.pose.position.y;
   const double ref_x = nearest.pose.position.x;
@@ -170,8 +338,10 @@ void SimplePurePursuit::publishDebug(
   const double ego_yaw = tf2::getYaw(odometry_->pose.pose.orientation);
   const double dx = ego_x - ref_x;
   const double dy = ego_y - ref_y;
-  const double lateral_error_m = -std::sin(ref_yaw) * dx + std::cos(ref_yaw) * dy;
-  const double yaw_error_rad = std::atan2(std::sin(ego_yaw - ref_yaw), std::cos(ego_yaw - ref_yaw));
+  const double lateral_error_m =
+      -std::sin(ref_yaw) * dx + std::cos(ref_yaw) * dy;
+  const double yaw_error_rad =
+      std::atan2(std::sin(ego_yaw - ref_yaw), std::cos(ego_yaw - ref_yaw));
 
   std::ostringstream json;
   json << "{"
@@ -190,16 +360,21 @@ void SimplePurePursuit::publishDebug(
        << "\"steering_tire_angle_rad\":" << steering_tire_angle << ","
        << "\"lateral_error_m\":" << lateral_error_m << ","
        << "\"yaw_error_rad\":" << yaw_error_rad << ","
-       << "\"use_external_target_vel\":" << (use_external_target_vel_ ? "true" : "false") << "}";
+       << "\"use_external_target_vel\":"
+       << (use_external_target_vel_ ? "true" : "false") << ","
+       << "\"overtake_override_applied\":"
+       << (overtake_override_applied ? "true" : "false") << ","
+       << "\"overtake_mode_id\":" << overtake_mode_id_ << ","
+       << "\"overtake_lateral_offset_m\":" << overtake_lateral_offset_m << ","
+       << "\"overtake_speed_cap_mps\":" << overtake_speed_cap_mps << "}";
 
   String msg;
   msg.data = json.str();
   pub_debug_->publish(msg);
 }
-}  // namespace simple_pure_pursuit
+} // namespace simple_pure_pursuit
 
-int main(int argc, char const * argv[])
-{
+int main(int argc, char const *argv[]) {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<simple_pure_pursuit::SimplePurePursuit>());
   rclcpp::shutdown();

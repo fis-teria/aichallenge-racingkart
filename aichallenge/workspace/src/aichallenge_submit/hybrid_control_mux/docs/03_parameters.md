@@ -10,6 +10,12 @@ aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/hybrid_co
 
 `control_method:=hybrid_delay_aware_mpc` で起動した場合、この設定は `hybrid_control_mux.launch.xml` から読み込まれます。
 
+Pure Pursuit fallback 側の launch パラメータは以下にあります。
+
+```text
+aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/control/pure_pursuit.launch.xml
+```
+
 ## パラメータ一覧
 
 | パラメータ | デフォルト | 内容 |
@@ -94,6 +100,22 @@ Pure Pursuit フォールバック中の速度上限です。
 - `hybrid_delay_aware_mpc.launch.xml` が Pure Pursuit の `external_target_vel` に同じ値を渡す
 
 値を上げるとフォールバック中も速く走れますが、Pure Pursuit は障害物回避をしないため、サイドバイサイドやコーナーでは危険になりやすいです。
+
+hybrid 起動では Pure Pursuit も `/overtake/reference_override` の速度 cap を読みます。実際の fallback 目標速度は、基本的に `fallback_speed_mps` と overtake planner の速度 cap の低い方になります。
+
+## Pure Pursuit fallback と overtake planner に関係するパラメータ
+
+以下は `pure_pursuit.launch.xml` 側の launch パラメータです。`hybrid_delay_aware_mpc.launch.xml` では、`use_overtake_reference_override` に `use_overtake_planner` と同じ値を渡します。
+
+| パラメータ | デフォルト | 内容 |
+| --- | --- | --- |
+| `use_overtake_reference_override` | `false` | Pure Pursuit が `/overtake/reference_override` を読み、横オフセットと速度 cap を反映するか |
+| `input_overtake_reference_override` | `/overtake/reference_override` | Pure Pursuit が読む overtake planner の override topic |
+| `overtake_override_timeout_sec` | `0.50` | override を fresh とみなす最大時間 |
+
+hybrid 起動時は、MPC fallback 用 Pure Pursuit に対して `use_overtake_reference_override=true` が渡されます。override が fresh な間、Pure Pursuit は現在位置から先の trajectory 点を横オフセット分だけずらし、速度 cap を目標速度の上限として使います。
+
+これにより、MPC が infeasible で Pure Pursuit に落ちている間も、overtake planner の FOLLOW、YIELD、PASS、SAFE_STOP 系の速度抑制と横方向目標が反映されます。ただし、Pure Pursuit はMPCのように制約付き最適化を解くわけではないため、fallback速度は安全側に抑える前提です。
 
 ### `fallback_accel_max_mps2`
 
