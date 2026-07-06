@@ -16,6 +16,8 @@
   <arg name="use_command_history_fallback" default="true"/>
   <arg name="min_velocity_for_yaw_prediction" default="0.20"/>
   <arg name="debug_publish_period_sec" default="0.25"/>
+  <arg name="output_control_cmd" default="/control/command/control_cmd"/>
+  <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
 
   <!-- localization odomを遅れ補償して、既存MPCが読む代替odomトピックを作る。 -->
   <node pkg="delay_aware_mpc_ros" exec="delay_compensated_odometry_node"
@@ -46,6 +48,8 @@
     <param name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
     <param name="use_stats" value="false"/>
     <remap from="/localization/kinematic_state" to="/delay_aware_mpc/localization/kinematic_state"/>
+    <remap from="/control/command/control_cmd" to="$(var output_control_cmd)"/>
+    <remap from="/control/command/control_cmd_raw" to="$(var output_raw_control_cmd)"/>
   </node>
 
   <group if="$(var use_overtake_planner)">

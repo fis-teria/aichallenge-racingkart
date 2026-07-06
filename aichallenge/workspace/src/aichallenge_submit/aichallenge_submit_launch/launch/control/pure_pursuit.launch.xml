@@ -2,20 +2,30 @@
 <launch>
   <arg name="simulation" default="true"/>
   <arg name="use_sim_time" default="true"/>
+  <arg name="input_kinematics" default="/localization/kinematic_state"/>
+  <arg name="input_trajectory" default="/planning/scenario_planning/trajectory"/>
+  <arg name="output_control_cmd" default="/control/command/control_cmd"/>
+  <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
+  <arg name="use_external_target_vel" default="false"/>
+  <arg name="external_target_vel" default="10.0"/>
+  <arg name="lookahead_gain" default="0.5"/>
+  <arg name="lookahead_min_distance" default="3.5"/>
+  <arg name="speed_proportional_gain" default="1.0"/>
 
   <let name="steering_tire_angle_gain_var" value="1.50" if="$(var simulation)"/>
   <let name="steering_tire_angle_gain_var" value="1.639" unless="$(var simulation)"/>
 
   <node pkg="simple_pure_pursuit" exec="simple_pure_pursuit" name="simple_pure_pursuit_node" output="screen">
-    <param name="use_external_target_vel" value="false"/>
-    <param name="external_target_vel" value="10.0"/>
-    <param name="lookahead_gain" value="0.5"/>
-    <param name="lookahead_min_distance" value="3.5"/>
-    <param name="speed_proportional_gain" value="1.0"/>
+    <param name="use_external_target_vel" value="$(var use_external_target_vel)"/>
+    <param name="external_target_vel" value="$(var external_target_vel)"/>
+    <param name="lookahead_gain" value="$(var lookahead_gain)"/>
+    <param name="lookahead_min_distance" value="$(var lookahead_min_distance)"/>
+    <param name="speed_proportional_gain" value="$(var speed_proportional_gain)"/>
     <param name="steering_tire_angle_gain" value="$(var steering_tire_angle_gain_var)"/>
 
-    <remap from="input/kinematics" to="/localization/kinematic_state"/>
-    <remap from="input/trajectory" to="/planning/scenario_planning/trajectory"/>
-    <remap from="output/control_cmd" to="/control/command/control_cmd"/>
+    <remap from="input/kinematics" to="$(var input_kinematics)"/>
+    <remap from="input/trajectory" to="$(var input_trajectory)"/>
+    <remap from="output/control_cmd" to="$(var output_control_cmd)"/>
+    <remap from="output/raw_control_cmd" to="$(var output_raw_control_cmd)"/>
   </node>
 </launch>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="simulation" default="true"/>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="use_obstacle_avoidance" default="true"/>
+  <arg name="use_overtake_planner" default="true"/>
+  <arg name="fallback_speed_mps" default="2.0"/>
+
+  <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/delay_aware_mpc.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
+    <arg name="use_overtake_planner" value="$(var use_overtake_planner)"/>
+    <arg name="output_control_cmd" value="/hybrid_control/mpc/control_cmd"/>
+    <arg name="output_raw_control_cmd" value="/hybrid_control/mpc/control_cmd_raw"/>
+  </include>
+
+  <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">
+    <arg name="simulation" value="$(var simulation)"/>
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
+    <arg name="output_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd"/>
+    <arg name="output_raw_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd_raw"/>
+    <arg name="use_external_target_vel" value="true"/>
+    <arg name="external_target_vel" value="$(var fallback_speed_mps)"/>
+    <arg name="lookahead_gain" value="0.5"/>
+    <arg name="lookahead_min_distance" value="3.5"/>
+    <arg name="speed_proportional_gain" value="0.8"/>
+  </include>
+
+  <include file="$(find-pkg-share hybrid_control_mux)/launch/hybrid_control_mux.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="input_mpc_cmd" value="/hybrid_control/mpc/control_cmd"/>
+    <arg name="input_pure_pursuit_cmd" value="/hybrid_control/pure_pursuit/control_cmd"/>
+    <arg name="output_control_cmd" value="/control/command/control_cmd"/>
+  </include>
+</launch>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="param_file" default="$(find-pkg-share hybrid_control_mux)/config/hybrid_control_mux.param.yaml"/>
+  <arg name="input_mpc_cmd" default="/hybrid_control/mpc/control_cmd"/>
+  <arg name="input_pure_pursuit_cmd" default="/hybrid_control/pure_pursuit/control_cmd"/>
+  <arg name="input_mpc_health" default="/mpc/speed_profile_debug"/>
+  <arg name="output_control_cmd" default="/control/command/control_cmd"/>
+  <arg name="output_debug" default="/hybrid_control_mux/debug"/>
+
+  <node pkg="hybrid_control_mux" exec="hybrid_control_mux_node.py"
+        name="hybrid_control_mux_node" output="screen">
+    <param from="$(var param_file)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <remap from="input/mpc_control_cmd" to="$(var input_mpc_cmd)"/>
+    <remap from="input/pure_pursuit_control_cmd" to="$(var input_pure_pursuit_cmd)"/>
+    <remap from="input/mpc_health" to="$(var input_mpc_health)"/>
+    <remap from="output/control_cmd" to="$(var output_control_cmd)"/>
+    <remap from="output/debug" to="$(var output_debug)"/>
+  </node>
+</launch>
