@@ -48,6 +48,7 @@ LAUNCH_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/aichallenge_sub
 SYSTEM_LAUNCH_ROOT = Path("aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch")
 MPC_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros")
 OVERTAKE_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/overtake_planner")
+HYBRID_CONTROL_MUX_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux")
 MPC_CONFIG_PATH = MPC_ROOT / "config/config.yaml"
 DELAY_AWARE_MPC_CONFIG_PATH = Path(
     "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_aware_config.yaml"
@@ -55,6 +56,7 @@ DELAY_AWARE_MPC_CONFIG_PATH = Path(
 REFERENCE_CONFIG_PATHS = {
     "mpc": MPC_CONFIG_PATH,
     "delay_aware_mpc": DELAY_AWARE_MPC_CONFIG_PATH,
+    "hybrid_delay_aware_mpc": DELAY_AWARE_MPC_CONFIG_PATH,
 }
 
 DESCRIPTION_DEFAULTS: dict[str, str] = {
@@ -122,6 +124,21 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "overtake_planner_node.ros__parameters.merge_front_gap_m": "追い抜き後に中心へ戻るための前方ギャップ[m]です。",
     "overtake_planner_node.ros__parameters.abort_timeout_sec": "追い抜き状態を続けすぎた場合に中止復帰へ入る時間[s]です。",
     "overtake_planner_node.ros__parameters.keep_mode_bonus": "現在モードを少し優先してチャタリングを抑えるスコア補正です。",
+    "hybrid_control_mux_node.ros__parameters.enabled": "hybrid control mux全体を有効にするフラグです。falseにするとMPC指令が新鮮な間だけMPCを通し、それ以外は停止します。",
+    "hybrid_control_mux_node.ros__parameters.control_rate_hz": "MPC/Pure Pursuit/停止のどれを出すか判定する周期[Hz]です。",
+    "hybrid_control_mux_node.ros__parameters.mpc_cmd_timeout_sec": "MPC制御指令を新鮮とみなす最大時間[s]です。短いほどMPC遅延に敏感になります。",
+    "hybrid_control_mux_node.ros__parameters.pure_pursuit_cmd_timeout_sec": "Pure Pursuit制御指令を新鮮とみなす最大時間[s]です。古いfallback指令を使い続けないための上限です。",
+    "hybrid_control_mux_node.ros__parameters.mpc_health_timeout_sec": "MPC health debugを新鮮とみなす最大時間[s]です。復帰判定ではhealthが有効である必要があります。",
+    "hybrid_control_mux_node.ros__parameters.fallback_trigger_infeasible_count": "Pure Pursuitへ切り替えるために必要な連続MPC infeasible回数です。小さいほど早くfallbackします。",
+    "hybrid_control_mux_node.ros__parameters.fallback_release_solved_cycles": "Pure PursuitからMPCへ戻るために必要な連続MPC solved回数です。大きいほど復帰が慎重になります。",
+    "hybrid_control_mux_node.ros__parameters.fallback_min_hold_sec": "一度Pure Pursuitへ切り替えた後、最低限その状態を保持する時間[s]です。切り替えの振動を抑えます。",
+    "hybrid_control_mux_node.ros__parameters.fallback_speed_mps": "Pure Pursuit fallback中の速度上限[m/s]です。hybrid launch側のPure Pursuit目標速度とも合わせて使います。",
+    "hybrid_control_mux_node.ros__parameters.fallback_accel_max_mps2": "Pure Pursuit fallback中に許す最大加速度[m/s^2]です。",
+    "hybrid_control_mux_node.ros__parameters.fallback_decel_min_mps2": "Pure Pursuit fallback中に許す最小加速度[m/s^2]です。負の値を小さくすると強い減速を許します。",
+    "hybrid_control_mux_node.ros__parameters.stop_decel_mps2": "MPCもPure Pursuitも使えないときに出す停止指令の加速度[m/s^2]です。",
+    "hybrid_control_mux_node.ros__parameters.use_pure_pursuit_on_mpc_cmd_timeout": "MPC制御指令がtimeoutしたときPure Pursuitへ切り替えるかどうかです。",
+    "hybrid_control_mux_node.ros__parameters.use_pure_pursuit_on_mpc_health_timeout": "MPC healthがtimeoutしたときPure Pursuitへ切り替えるかどうかです。debug topic欠落だけで落としたくない場合はfalseにします。",
+    "hybrid_control_mux_node.ros__parameters.debug_publish_period_sec": "/hybrid_control_mux/debugをpublishする周期[s]です。0以下で停止します。",
 }
 
 DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
@@ -138,6 +155,21 @@ DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
     "use_command_history_fallback": "steering_status/yaw rateが使えない場合に過去の制御指令からステアを推定します。",
     "min_velocity_for_yaw_prediction": "yaw rateからステア推定する最低速度[m/s]です。低速時の発散を避けます。",
     "debug_publish_period_sec": "/delay_aware_mpc/debugと/delayed_poseをpublishする周期[s]です。",
+    "use_obstacle_avoidance": "MPC側の障害物回避連携を有効にするlaunch引数です。",
+    "use_overtake_planner": "overtake_plannerからの経路overrideをMPCへ入れるlaunch引数です。",
+    "fallback_speed_mps": "hybrid fallback中のPure Pursuit目標速度[m/s]です。mux側の速度上限と合わせて調整します。",
+    "input_mpc_cmd": "hybrid control muxが受け取るMPC制御指令topicです。",
+    "input_pure_pursuit_cmd": "hybrid control muxが受け取るPure Pursuit制御指令topicです。",
+    "input_mpc_health": "MPCのsolved/infeasible状態を監視するdebug topicです。",
+    "output_control_cmd": "最終的に車両へ渡す制御指令topicです。",
+    "output_debug": "hybrid control muxの切り替え状態を出すdebug topicです。",
+    "output_raw_control_cmd": "各制御器のraw制御指令を確認するためのtopicです。",
+    "input_kinematics": "制御器へ入力するodometry topicです。hybridではdelay補償後のodometryをPure Pursuitにも渡します。",
+    "use_external_target_vel": "Pure Pursuitの目標速度をlaunch引数から指定するかどうかです。",
+    "external_target_vel": "Pure Pursuitの外部指定目標速度です。hybrid fallback速度と連動します。",
+    "lookahead_gain": "Pure Pursuitの速度比例lookahead係数です。大きいほど先を見て操舵します。",
+    "lookahead_min_distance": "Pure Pursuitの最小lookahead距離[m]です。大きいほど操舵が穏やかになります。",
+    "speed_proportional_gain": "Pure Pursuitの速度追従ゲインです。大きいほど目標速度へ強く合わせます。",
 }
 
 CONTROL_DEFAULT_XMLS = [
@@ -216,6 +248,63 @@ CATALOG: dict[str, list[dict[str, str]]] = {
         {
             "label": "Delay-aware MPC launch params",
             "path": str(LAUNCH_ROOT / "launch/control/delay_aware_mpc.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Overtake planner params",
+            "path": str(OVERTAKE_ROOT / "config/overtake_planner.param.yaml"),
+            "kind": "yaml",
+        },
+        {
+            "label": "Overtake planner launch",
+            "path": str(OVERTAKE_ROOT / "launch/overtake_planner.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Delay-aware MPC base YAML",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_aware_config.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Delay compensator YAML fallback",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_compensator.param.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Delay-aware MPC ref velocity YAML",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/ref_vel.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Delay-aware MPC C++ node",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/src/delay_compensated_odometry_node.cpp",
+            "kind": "text",
+        },
+    ],
+    "hybrid_delay_aware_mpc": [
+        {
+            "label": "Hybrid delay-aware MPC launch params",
+            "path": str(LAUNCH_ROOT / "launch/control/hybrid_delay_aware_mpc.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Hybrid control mux params",
+            "path": str(HYBRID_CONTROL_MUX_ROOT / "config/hybrid_control_mux.param.yaml"),
+            "kind": "yaml",
+        },
+        {
+            "label": "Hybrid control mux launch",
+            "path": str(HYBRID_CONTROL_MUX_ROOT / "launch/hybrid_control_mux.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Delay-aware MPC launch params",
+            "path": str(LAUNCH_ROOT / "launch/control/delay_aware_mpc.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Pure Pursuit launch params",
+            "path": str(LAUNCH_ROOT / "launch/control/pure_pursuit.launch.xml"),
             "kind": "xml",
         },
         {
