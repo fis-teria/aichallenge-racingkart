@@ -13,6 +13,7 @@ install(PROGRAMS
 
 install(DIRECTORY
   config
+  docs
   launch
   DESTINATION share/${PROJECT_NAME}
 )
