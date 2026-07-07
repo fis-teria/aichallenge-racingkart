@@ -133,6 +133,13 @@ tools/scripts/setup.sh --dry-run --profile 2026-full
 tools/scripts/setup.sh --apply --profile 2026-full
 ```
 
+提出パッケージ作成と Docker build/run ログ周りの修正だけを当てる場合:
+
+```bash
+tools/scripts/setup.sh --dry-run --upload-fixes
+tools/scripts/setup.sh --apply --upload-fixes
+```
+
 バックアップから戻す場合:
 
 ```bash
@@ -165,6 +172,10 @@ tools/scripts/apply_headless_overrides.sh --restore --backup-dir tools/scripts/b
   `autostart_orchestrator_node.py` と `autostart_orchestrator.param.yaml` を上書きし、
   initial pose service の timeout、capture 停止 timeout、`result-summary.json`
   の latest リンク作成を有効にします。
+- `--upload-fixes` は `create_submit_file.bash`、`docker-entrypoint.sh`、
+  `docker_build.sh`、`docker_run.sh` だけを上書きします。提出 tarball の
+  stale/不要ファイル混入対策、`ros2 command not found` 対策、`output/latest`
+  の symlink 権限問題を警告に落とす修正だけを既存チェックアウトへ移植したい時に使います。
 
 MPC の参照CSVや controller package 本体などの走行チューニングデータは、
 このヘッドレス連携パッチには含めません。`--profile 2026-full` で入る

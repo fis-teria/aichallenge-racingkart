@@ -1,0 +1,5 @@
+# Repo-root relative files copied by tools/scripts/setup.sh --upload-fixes.
+create_submit_file.bash
+docker-entrypoint.sh
+docker_build.sh
+docker_run.sh

@@ -15,16 +15,17 @@ BACKUP_DIR=""
 usage() {
     cat <<'EOF'
 Usage:
-  tools/scripts/apply_headless_overrides.sh --dry-run [--profile headless|2026-full]
-  tools/scripts/apply_headless_overrides.sh --apply [--profile headless|2026-full] [--yes]
+  tools/scripts/apply_headless_overrides.sh --dry-run [--profile headless|2026-full|submit-upload]
+  tools/scripts/apply_headless_overrides.sh --apply [--profile headless|2026-full|submit-upload] [--yes]
   tools/scripts/apply_headless_overrides.sh --restore --backup-dir PATH [--yes]
 
 Options:
   --dry-run          Show which repo files would be overwritten. This is the default.
-  --apply            Copy headless override files into the AI Challenge repo.
+  --apply            Copy selected override files into the AI Challenge repo.
   --restore          Restore files from a backup made by --apply.
-  --profile NAME     Patch profile to use: headless (default) or 2026-full.
+  --profile NAME     Patch profile to use: headless (default), 2026-full, or submit-upload.
   --full-2026        Alias for --profile 2026-full.
+  --upload-fixes     Alias for --profile submit-upload.
   --backup-dir PATH  Backup directory to use for --restore.
   --repo-root PATH   Override the detected AI Challenge repo root.
   --yes, -y          Skip confirmation prompts.
@@ -53,8 +54,12 @@ set_profile() {
         PROFILE="2026-full"
         MANIFEST="${OVERRIDES_DIR}/manifest.2026-full.txt"
         ;;
+    submit-upload | upload | upload-fixes)
+        PROFILE="submit-upload"
+        MANIFEST="${OVERRIDES_DIR}/manifest.submit-upload.txt"
+        ;;
     *)
-        die "Unknown profile: ${profile}. Expected: headless or 2026-full."
+        die "Unknown profile: ${profile}. Expected: headless, 2026-full, or submit-upload."
         ;;
     esac
 }
@@ -207,6 +212,10 @@ while [ $# -gt 0 ]; do
         ;;
     --full-2026)
         set_profile "2026-full"
+        shift
+        ;;
+    --upload-fixes)
+        set_profile "submit-upload"
         shift
         ;;
     --backup-dir)
