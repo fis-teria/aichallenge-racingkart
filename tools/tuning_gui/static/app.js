@@ -380,7 +380,7 @@ async function openFile(path) {
   $("filePath").textContent = data.path;
   $("fileEditor").value = data.content;
   $("diffOutput").textContent = "";
-  if (state.currentKind === "yaml" || state.currentKind === "xml") {
+  if (structuredTableAvailable()) {
     state.editorMode = "table";
     await loadStructuredRows();
   } else {
@@ -405,6 +405,14 @@ function fileKind(path) {
   return "text";
 }
 
+function isStructuredCsvFile() {
+  return state.currentKind === "csv" && String(state.currentFile || "").endsWith("/overtake_permission.csv");
+}
+
+function structuredTableAvailable() {
+  return state.currentKind === "yaml" || state.currentKind === "xml" || isStructuredCsvFile();
+}
+
 async function loadStructuredRows() {
   const data = await api("/api/structured/parse", {
     method: "POST",
@@ -416,7 +424,7 @@ async function loadStructuredRows() {
 }
 
 function renderEditorMode() {
-  const tableAvailable = state.currentKind === "yaml" || state.currentKind === "xml";
+  const tableAvailable = structuredTableAvailable();
   const pathActive = state.editorMode === "path";
   $("tableMode").disabled = !tableAvailable || pathActive;
   $("applyStructured").disabled = pathActive || !tableAvailable || !state.structuredRows.length;
@@ -435,6 +443,7 @@ function renderEditorMode() {
   $("tableMode").classList.toggle("active", tableAvailable && state.editorMode === "table");
   $("textMode").classList.toggle("active", !pathActive && (!tableAvailable || state.editorMode === "text"));
   $("pathMode").classList.toggle("active", pathActive);
+  $("addCsvRow").hidden = !(tableAvailable && state.editorMode === "table" && isStructuredCsvFile());
   if (pathActive) {
     requestAnimationFrame(() => {
       fitPathView(false);
@@ -446,6 +455,10 @@ function renderEditorMode() {
 function renderStructuredRows() {
   if (state.currentKind === "xml") {
     renderXmlStructuredRows();
+    return;
+  }
+  if (isStructuredCsvFile()) {
+    renderCsvStructuredRows();
     return;
   }
   renderScalarStructuredRows();
@@ -547,6 +560,69 @@ function renderXmlStructuredRows() {
   bindStructuredDescriptionInputs(tbody);
 }
 
+function renderCsvStructuredRows() {
+  const tbody = $("structuredRows");
+  const filter = $("structuredFilter").value.trim().toLowerCase();
+  const columns = csvColumns(state.structuredRows);
+  $("structuredHead").innerHTML = `<tr>
+    <th>line</th>
+    ${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}
+    <th>actions</th>
+  </tr>`;
+  const rows = state.structuredRows.filter((row) => {
+    const fields = row.fields || {};
+    const haystack = `${row.path || ""} ${Object.keys(fields).join(" ")} ${Object.values(fields).join(" ")}`.toLowerCase();
+    return !filter || haystack.includes(filter);
+  });
+  tbody.innerHTML = rows
+    .map((row) => {
+      const fields = row.fields || {};
+      const fieldTypes = row.field_types || {};
+      const cells = columns
+        .map((column) => {
+          const value = valueOr(fields[column], "");
+          if (column === "allow_overtake" || fieldTypes[column] === "bool") {
+            const normalized = String(value).toLowerCase() === "false" ? "false" : "true";
+            return `<td><select class="structured-value csv-field-value" data-row-id="${escapeHtml(row.id)}" data-field="${escapeHtml(column)}" title="${escapeHtml(normalized)}">
+              <option value="true"${normalized === "true" ? " selected" : ""}>true</option>
+              <option value="false"${normalized === "false" ? " selected" : ""}>false</option>
+            </select></td>`;
+          }
+          return `<td><input class="structured-value csv-field-value" data-row-id="${escapeHtml(row.id)}" data-field="${escapeHtml(column)}" value="${escapeHtml(value)}" title="${escapeHtml(value)}" style="${structuredInputStyle(value, 12)}"></td>`;
+        })
+        .join("");
+      return `<tr data-row-id="${escapeHtml(row.id)}">
+        <td>${escapeHtml(valueOr(row.line, ""))}</td>
+        ${cells}
+        <td><button class="csv-delete-row" type="button" data-row-id="${escapeHtml(row.id)}">削除</button></td>
+      </tr>`;
+    })
+    .join("");
+  $("structuredHint").textContent = state.structuredRows.length
+    ? `${rows.length}/${state.structuredRows.length} sections - start_wp/end_wp と allow_overtake を編集できます`
+    : "CSV行がありません。CSV行追加で区間を作れます";
+  for (const input of tbody.querySelectorAll(".csv-field-value")) {
+    const eventName = input.tagName === "SELECT" ? "change" : "input";
+    input.addEventListener(eventName, () => {
+      const row = state.structuredRows.find((item) => item.id === input.dataset.rowId);
+      if (!row) return;
+      row.fields = row.fields || {};
+      row.fields[input.dataset.field] = input.value;
+      state.structuredDirty = true;
+      if (input.tagName !== "SELECT") {
+        refreshStructuredInputWidth(input, 12);
+      }
+    });
+  }
+  for (const button of tbody.querySelectorAll(".csv-delete-row")) {
+    button.addEventListener("click", () => {
+      state.structuredRows = state.structuredRows.filter((row) => row.id !== button.dataset.rowId);
+      state.structuredDirty = true;
+      renderCsvStructuredRows();
+    });
+  }
+}
+
 function bindStructuredDescriptionInputs(tbody) {
   for (const input of tbody.querySelectorAll(".structured-description")) {
     input.addEventListener("input", () => {
@@ -586,8 +662,43 @@ function xmlColumns(rows) {
   return [...priority, ...extras];
 }
 
+function csvColumns(rows) {
+  for (const row of rows) {
+    if (Array.isArray(row.field_order) && row.field_order.length) {
+      return row.field_order;
+    }
+  }
+  const first = rows.find((row) => row.fields && Object.keys(row.fields).length);
+  return first ? Object.keys(first.fields) : ["name", "start_wp", "end_wp", "allow_overtake"];
+}
+
+function addCsvRow() {
+  if (!isStructuredCsvFile()) return;
+  const columns = csvColumns(state.structuredRows);
+  const previous = state.structuredRows[state.structuredRows.length - 1];
+  const fields = {};
+  for (const column of columns) {
+    fields[column] = "";
+  }
+  fields.name = `section_${state.structuredRows.length + 1}`;
+  fields.start_wp = previous && previous.fields ? String(previous.fields.end_wp || "") : "";
+  fields.end_wp = "";
+  fields.allow_overtake = "true";
+  state.structuredRows.push({
+    id: `csv:new:${Date.now()}:${state.structuredRows.length}`,
+    line: "",
+    path: `row[${state.structuredRows.length}]`,
+    fields,
+    field_order: columns,
+    field_types: { name: "str", start_wp: "int", end_wp: "int", allow_overtake: "bool" },
+    editable: true,
+  });
+  state.structuredDirty = true;
+  renderCsvStructuredRows();
+}
+
 async function applyStructuredRows(silent = false) {
-  if (!(state.currentKind === "yaml" || state.currentKind === "xml")) return null;
+  if (!structuredTableAvailable()) return null;
   const data = await api("/api/structured/apply", {
     method: "POST",
     body: JSON.stringify({
@@ -1877,7 +1988,7 @@ function bind() {
     applyTheme($("themeToggle").checked ? "dark" : "light");
   });
   $("tableMode").addEventListener("click", async () => {
-    if (!(state.currentKind === "yaml" || state.currentKind === "xml")) return;
+    if (!structuredTableAvailable()) return;
     state.editorMode = "table";
     await loadStructuredRows();
     renderEditorMode();
@@ -1888,6 +1999,7 @@ function bind() {
   });
   $("pathMode").addEventListener("click", () => openPathEditor().catch((e) => toast(e.message)));
   $("applyStructured").addEventListener("click", () => applyStructuredRows(false).catch((e) => toast(e.message)));
+  $("addCsvRow").addEventListener("click", addCsvRow);
   $("structuredFilter").addEventListener("input", renderStructuredRows);
   $("controlMethod").addEventListener("change", async () => {
     const method = $("controlMethod").value;

@@ -7,7 +7,7 @@ overtake_planner_node:
     own_vehicle_id: "auto"
     ego_stale_time_sec: 0.50
     control_rate_hz: 20.0
-    horizon_points: 20
+    horizon_points: 50
     horizon_dt_sec: 0.025
     lookahead_s_m: 10.0
     follow_trigger_s_m: 12.0
@@ -44,6 +44,15 @@ overtake_planner_node:
     straight_overtake_max_curvature_m_inv: 0.025
     straight_overtake_lookahead_m: 12.0
     straight_overtake_release_hysteresis_m_inv: 0.005
+    overtake_permission_profile_enabled: true
+    overtake_permission_package: "overtake_planner"
+    overtake_permission_csv: "config/overtake_permission.csv"
+    default_overtake_allowed: true
+    overtake_permission_lookahead_m: 8.0
+    slow_front_exception_enabled: true
+    slow_front_exception_speed_mps: 1.0
+    slow_front_exception_distance_m: 8.0
+    slow_front_exception_required_cycles: 3
     large_lateral_error_threshold_m: 0.60
     large_lateral_error_v_max_mps: 8.5
     min_pass_gap_m: 1.8

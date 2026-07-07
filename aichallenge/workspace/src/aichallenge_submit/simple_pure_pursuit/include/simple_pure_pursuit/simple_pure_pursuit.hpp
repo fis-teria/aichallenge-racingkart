@@ -7,6 +7,7 @@
 #include <autoware_auto_control_msgs/msg/ackermann_control_command.hpp>
 #include <autoware_auto_planning_msgs/msg/trajectory.hpp>
 #include <autoware_auto_planning_msgs/msg/trajectory_point.hpp>
+#include <autoware_auto_vehicle_msgs/msg/steering_report.hpp>
 #include <cstddef>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose.hpp>
@@ -14,9 +15,10 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <optional>
 #include <rclcpp/rclcpp.hpp>
-#include <string>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace simple_pure_pursuit {
@@ -24,6 +26,7 @@ namespace simple_pure_pursuit {
 using autoware_auto_control_msgs::msg::AckermannControlCommand;
 using autoware_auto_planning_msgs::msg::Trajectory;
 using autoware_auto_planning_msgs::msg::TrajectoryPoint;
+using autoware_auto_vehicle_msgs::msg::SteeringReport;
 using geometry_msgs::msg::PointStamped;
 using geometry_msgs::msg::Pose;
 using geometry_msgs::msg::Twist;
@@ -40,6 +43,7 @@ public:
   rclcpp::Subscription<Trajectory>::SharedPtr sub_trajectory_;
   rclcpp::Subscription<Trajectory>::SharedPtr sub_mpc_predicted_horizon_;
   rclcpp::Subscription<Float32MultiArray>::SharedPtr sub_overtake_override_;
+  rclcpp::Subscription<SteeringReport>::SharedPtr sub_steering_status_;
 
   // publishers
   rclcpp::Publisher<AckermannControlCommand>::SharedPtr pub_cmd_;
@@ -57,6 +61,8 @@ public:
   std::optional<double> last_odometry_receive_sec_;
   std::optional<double> last_trajectory_receive_sec_;
   std::optional<double> last_mpc_predicted_horizon_receive_sec_;
+  std::optional<double> last_steering_status_receive_sec_;
+  double latest_steering_status_rad_{0.0};
 
   // pure pursuit parameters
   const double wheel_base_;
@@ -86,7 +92,15 @@ public:
   const double curvature_lookahead_max_window_distance_;
   const double curvature_lookahead_min_arc_length_;
   const double curvature_lookahead_smoothing_alpha_;
+  const double pp_control_delay_sec_;
+  const double pp_prediction_dt_sec_;
+  const double steering_time_constant_sec_;
+  const double steering_status_timeout_sec_;
+  const double min_velocity_for_delay_compensation_mps_;
+  const double horizon_curvature_feedforward_gain_;
+  const double horizon_curvature_feedforward_max_rad_;
   double last_debug_publish_sec_{-1.0e9};
+  double last_commanded_steering_tire_angle_{0.0};
   bool has_smoothed_lookahead_distance_{false};
   double smoothed_lookahead_distance_{0.0};
   bool overtake_override_active_{false};
@@ -96,8 +110,23 @@ public:
   std::vector<double> overtake_speed_caps_;
 
 private:
+  struct ControlPosePrediction {
+    geometry_msgs::msg::Point position;
+    double yaw{0.0};
+    double velocity_mps{0.0};
+    double current_steering_rad{0.0};
+    double applied_steering_rad{0.0};
+    double steering_age_sec{-1.0};
+    int prediction_steps{0};
+    bool shifted{false};
+    std::string steering_source{"last_command"};
+  };
+
   void onTimer();
   double steadyNowSec() const;
+  ControlPosePrediction predictControlPose(double now_sec) const;
+  std::pair<double, std::string>
+  estimateCurrentSteering(double now_sec, double *steering_age_sec) const;
   FreshnessResult evaluateInputFreshness(double now_sec) const;
   HorizonFreshnessResult evaluateMpcPredictedHorizon(double now_sec) const;
   void publishStopForStaleInput(const rclcpp::Time &stamp,
@@ -119,17 +148,19 @@ private:
                double target_longitudinal_vel, double current_longitudinal_vel,
                double command_accel, double base_lookahead_distance,
                double desired_lookahead_distance, double lookahead_distance,
-               double path_curvature, double curvature_window_distance,
-               double lookahead_point_x, double lookahead_point_y,
-               double rear_x, double rear_y, double alpha,
+               double path_curvature, double signed_path_curvature,
+               double curvature_window_distance, double lookahead_point_x,
+               double lookahead_point_y, double rear_x, double rear_y,
+               double alpha, double pure_pursuit_steering_tire_angle,
+               double curvature_feedforward_steering_rad,
                double raw_steering_tire_angle, double steering_tire_angle,
                bool overtake_override_applied, double overtake_lateral_offset_m,
                double overtake_speed_cap_mps, double freshness_now_sec,
-               bool mpc_horizon_applied,
-               bool mpc_horizon_velocity_cap_applied,
+               bool mpc_horizon_applied, bool mpc_horizon_velocity_cap_applied,
                double mpc_horizon_velocity_cap_mps,
                const HorizonFreshnessResult &mpc_horizon_freshness,
-               const std::string &trajectory_source);
+               const std::string &trajectory_source,
+               const ControlPosePrediction &control_pose);
 };
 
 } // namespace simple_pure_pursuit

@@ -1,0 +1,11 @@
+name,start_wp,end_wp,allow_overtake
+s1,1,30,true
+s1_1,30,55,true
+s2,55,100,true
+s3,100,155,true
+s4,155,190,false
+s5,190,265,false
+s6,265,290,false
+s7,290,320,false
+s8,320,335,false
+s9,335,1,true

@@ -160,6 +160,10 @@ MPCへ渡す候補軌道です。
    - `corner_side_by_side`
    - `straight_overtake_start_allowed`
    - `overtake_start_abs_curvature`
+   - `overtake_permission_allowed`
+   - `overtake_permission_section_name`
+   - `overtake_permission_reason`
+   - `slow_front_exception_active`
    - `ego_wall_clearance_m`
    - `FutureSideBySideRiskAnalyzer::evaluate()`
    - `future_side_by_side`
@@ -487,6 +491,18 @@ overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_G
 - `section_safety_start_wp`
 - `section_safety_end_wp`
 
+追い越し許可区間:
+
+- `overtake_permission_profile_enabled`
+- `overtake_permission_package`
+- `overtake_permission_csv`
+- `default_overtake_allowed`
+- `overtake_permission_lookahead_m`
+- `slow_front_exception_enabled`
+- `slow_front_exception_speed_mps`
+- `slow_front_exception_distance_m`
+- `slow_front_exception_required_cycles`
+
 壁と復帰:
 
 - `d_min_m`
@@ -589,6 +605,9 @@ overtake decision:
 - `follow_trigger_s_m` より遠くても、相対速度で詰まる前方車は `blocked` にする
 - 左右どちらのpass gapが失われても、追い越し方向を即反転せず `YIELD_BEHIND` を選ぶ
 - 直線限定ゲートが閉じている区間では、gapがあっても追い越し開始へ入らない
+- 追い越し許可CSVで `allow_overtake=false` の区間では、gapがあっても追い越し開始へ入らず `FOLLOW_BLOCKED` を維持する
+- `allow_overtake=false` でも、前方車が停止/低速条件を連続で満たす場合だけ `slow_front_exception_active=true` としてPASS開始を許可する
+- `overtake_permission_lookahead_m` 内に不可区間がある場合は、現在位置が許可区間でも追い越し開始を抑制する
 - 大きい横ずれ中は、parallel side candidateや壁リスクがあれば `RECOVERY` を優先する
 - `pass_gap_reason` は `no_target`, `ok`, `left_gap_narrow`, `right_gap_narrow`, `both_gap_narrow`, `large_lateral_error` の意味を崩さない
 - 複数の速度ガードが同時に成立した場合は、最も低い速度capとその理由を出力する

@@ -159,6 +159,13 @@ struct BlockedInfo {
   bool straight_overtake_start_allowed{true};
   double overtake_start_abs_curvature{0.0};
   std::string overtake_start_gate_reason{};
+  bool overtake_permission_allowed{true};
+  std::string overtake_permission_section_name{};
+  std::string overtake_permission_reason{"default_allowed"};
+  bool front_vehicle_low_speed{false};
+  bool slow_front_exception_active{false};
+  int slow_front_exception_count{0};
+  double front_vehicle_speed_mps{std::numeric_limits<double>::quiet_NaN()};
   std::string pass_gap_reason{};
 };
 
@@ -196,6 +203,19 @@ struct ActiveSectionSafety {
   double wall_margin_scale{1.0};
   double speed_cap_scale{1.0};
   bool force_outer_yield{false};
+};
+
+struct OvertakePermissionRule {
+  std::string name{};
+  double s_start_m{0.0};
+  double s_end_m{0.0};
+  bool allow_overtake{true};
+};
+
+struct ActiveOvertakePermission {
+  bool active{false};
+  std::string name{};
+  bool allow_overtake{true};
 };
 
 struct PlannerConfig {
@@ -239,6 +259,13 @@ struct PlannerConfig {
   double straight_overtake_max_curvature_m_inv{0.025};
   double straight_overtake_lookahead_m{12.0};
   double straight_overtake_release_hysteresis_m_inv{0.005};
+  bool overtake_permission_profile_enabled{true};
+  bool default_overtake_allowed{true};
+  double overtake_permission_lookahead_m{8.0};
+  bool slow_front_exception_enabled{true};
+  double slow_front_exception_speed_mps{1.0};
+  double slow_front_exception_distance_m{8.0};
+  int slow_front_exception_required_cycles{3};
   double large_lateral_error_threshold_m{0.60};
   double large_lateral_error_v_max_mps{2.5};
   double min_pass_gap_m{1.80};
@@ -286,6 +313,7 @@ struct PlannerConfig {
   double recovery_speed_guard_v_max_mps{3.0};
   bool section_safety_profile_enabled{true};
   std::vector<SectionSafetyRule> section_safety_rules;
+  std::vector<OvertakePermissionRule> overtake_permission_rules;
   bool safe_stop_enabled{true};
   double safe_stop_v_mps{0.20};
   int safe_stop_trigger_cycles{1};

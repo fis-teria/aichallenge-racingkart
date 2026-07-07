@@ -108,6 +108,7 @@ BlockedInfo BlockedRiskAnalyzer::detectBlocked(
       info.front_delta_s = delta_s;
       info.front_delta_d = delta_d;
       info.front_rel_v = ego.v - opp.v;
+      info.front_vehicle_speed_mps = opp.v;
       info.front_s_dot_mps = s_dot;
       info.front_direction_known = direction_known;
       info.front_same_direction = same_direction;

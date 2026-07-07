@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -41,6 +43,53 @@ std::string resolveReferencePath(const std::string &package_name,
   }
   return ament_index_cpp::get_package_share_directory(package_name) + "/" +
          csv_path;
+}
+
+std::string trim(std::string value) {
+  const auto begin = value.find_first_not_of(" \t\r\n");
+  if (begin == std::string::npos) {
+    return "";
+  }
+  const auto end = value.find_last_not_of(" \t\r\n");
+  return value.substr(begin, end - begin + 1);
+}
+
+std::vector<std::string> splitCsvLine(const std::string &line) {
+  std::vector<std::string> columns;
+  std::stringstream ss(line);
+  std::string column;
+  while (std::getline(ss, column, ',')) {
+    columns.push_back(trim(column));
+  }
+  return columns;
+}
+
+std::optional<std::int64_t> parseInt64(const std::string &value) {
+  errno = 0;
+  char *end = nullptr;
+  const long parsed = std::strtol(value.c_str(), &end, 10);
+  if (errno != 0 || end == value.c_str() || *end != '\0') {
+    return std::nullopt;
+  }
+  return static_cast<std::int64_t>(parsed);
+}
+
+std::optional<bool> parseBool(const std::string &value) {
+  std::string lowered;
+  lowered.reserve(value.size());
+  std::transform(value.begin(), value.end(), std::back_inserter(lowered),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  if (lowered == "true" || lowered == "1" || lowered == "yes" ||
+      lowered == "allow") {
+    return true;
+  }
+  if (lowered == "false" || lowered == "0" || lowered == "no" ||
+      lowered == "deny") {
+    return false;
+  }
+  return std::nullopt;
 }
 
 std::string jsonNumber(double value) {
@@ -121,6 +170,10 @@ public:
         "reference_package", "multi_purpose_mpc_ros");
     const auto reference_csv = declare_parameter<std::string>(
         "reference_csv", "env/final_ver3/traj_mincurv_manual.csv");
+    const auto overtake_permission_package = declare_parameter<std::string>(
+        "overtake_permission_package", "overtake_planner");
+    const auto overtake_permission_csv = declare_parameter<std::string>(
+        "overtake_permission_csv", "config/overtake_permission.csv");
     own_vehicle_id_ = resolveOwnVehicleId(
         declare_parameter<std::string>("own_vehicle_id", "auto"), get_logger());
     ignore_near_ego_m_ = declare_parameter<double>("ignore_near_ego_m", 1.0);
@@ -201,6 +254,20 @@ public:
     config.straight_overtake_release_hysteresis_m_inv =
         declare_parameter<double>("straight_overtake_release_hysteresis_m_inv",
                                   0.005);
+    config.overtake_permission_profile_enabled =
+        declare_parameter<bool>("overtake_permission_profile_enabled", true);
+    config.default_overtake_allowed =
+        declare_parameter<bool>("default_overtake_allowed", true);
+    config.overtake_permission_lookahead_m =
+        declare_parameter<double>("overtake_permission_lookahead_m", 8.0);
+    config.slow_front_exception_enabled =
+        declare_parameter<bool>("slow_front_exception_enabled", true);
+    config.slow_front_exception_speed_mps =
+        declare_parameter<double>("slow_front_exception_speed_mps", 1.0);
+    config.slow_front_exception_distance_m =
+        declare_parameter<double>("slow_front_exception_distance_m", 8.0);
+    config.slow_front_exception_required_cycles =
+        declare_parameter<int>("slow_front_exception_required_cycles", 3);
     config.large_lateral_error_threshold_m =
         declare_parameter<double>("large_lateral_error_threshold_m", 0.60);
     config.large_lateral_error_v_max_mps =
@@ -324,6 +391,8 @@ public:
     }
     frame_ = frame;
     config.section_safety_rules = readSectionSafetyRules(frame_);
+    config.overtake_permission_rules = readOvertakePermissionRules(
+        frame_, overtake_permission_package, overtake_permission_csv);
     mpc_health_stale_time_sec_ = config.mpc_health_stale_time_sec;
     core_ = std::make_unique<OvertakePlannerCore>(frame_, config);
 
@@ -385,6 +454,13 @@ private:
     bool straight_overtake_start_allowed{true};
     double overtake_start_abs_curvature{0.0};
     std::string overtake_start_gate_reason{};
+    bool overtake_permission_allowed{true};
+    std::string overtake_permission_section_name{};
+    std::string overtake_permission_reason{};
+    bool front_vehicle_low_speed{false};
+    bool slow_front_exception_active{false};
+    int slow_front_exception_count{0};
+    double front_vehicle_speed_mps{std::numeric_limits<double>::quiet_NaN()};
     double future_wall_clearance_m{std::numeric_limits<double>::infinity()};
     std::string front_vehicle_id{};
     std::string side_vehicle_id{};
@@ -490,6 +566,81 @@ private:
       RCLCPP_INFO(get_logger(), "loaded %zu overtake section safety rules",
                   rules.size());
     }
+    return rules;
+  }
+
+  std::vector<OvertakePermissionRule>
+  readOvertakePermissionRules(const FrenetFrame &frame,
+                              const std::string &package_name,
+                              const std::string &csv_path) {
+    std::vector<OvertakePermissionRule> rules;
+    if (csv_path.empty()) {
+      return rules;
+    }
+
+    const auto resolved_path = resolveReferencePath(package_name, csv_path);
+    std::ifstream file(resolved_path);
+    if (!file.is_open()) {
+      RCLCPP_WARN(get_logger(),
+                  "overtake permission csv could not be opened: %s",
+                  resolved_path.c_str());
+      return rules;
+    }
+
+    std::string line;
+    std::size_t line_number = 0;
+    while (std::getline(file, line)) {
+      ++line_number;
+      line = trim(line);
+      if (line.empty() || line.front() == '#') {
+        continue;
+      }
+
+      const auto columns = splitCsvLine(line);
+      if (!columns.empty() && columns[0] == "name") {
+        continue;
+      }
+      if (columns.size() < 4) {
+        RCLCPP_WARN(get_logger(),
+                    "skipping overtake permission line %zu: expected "
+                    "name,start_wp,end_wp,allow_overtake",
+                    line_number);
+        continue;
+      }
+
+      const auto start_wp = parseInt64(columns[1]);
+      const auto end_wp = parseInt64(columns[2]);
+      const auto allow_overtake = parseBool(columns[3]);
+      if (!start_wp.has_value() || !end_wp.has_value() ||
+          !allow_overtake.has_value()) {
+        RCLCPP_WARN(get_logger(),
+                    "skipping overtake permission line %zu: invalid wp or "
+                    "allow_overtake value",
+                    line_number);
+        continue;
+      }
+
+      const auto start_s = sectionSFromWp(frame, start_wp.value());
+      const auto end_s = sectionSFromWp(frame, end_wp.value());
+      if (!start_s.has_value() || !end_s.has_value()) {
+        RCLCPP_WARN(get_logger(),
+                    "skipping overtake permission line %zu: wp out of "
+                    "reference range",
+                    line_number);
+        continue;
+      }
+
+      OvertakePermissionRule rule;
+      rule.name = columns[0].empty() ? "permission_" + std::to_string(rules.size())
+                                     : columns[0];
+      rule.s_start_m = start_s.value();
+      rule.s_end_m = end_s.value();
+      rule.allow_overtake = allow_overtake.value();
+      rules.push_back(std::move(rule));
+    }
+
+    RCLCPP_INFO(get_logger(), "loaded %zu overtake permission rules from %s",
+                rules.size(), resolved_path.c_str());
     return rules;
   }
 
@@ -669,6 +820,23 @@ private:
         << jsonNumber(output.blocked_info.overtake_start_abs_curvature) << ","
         << "\"overtake_start_gate_reason\":\""
         << output.blocked_info.overtake_start_gate_reason << "\","
+        << "\"overtake_permission_allowed\":"
+        << (output.blocked_info.overtake_permission_allowed ? "true"
+                                                            : "false")
+        << ","
+        << "\"overtake_permission_section_name\":\""
+        << output.blocked_info.overtake_permission_section_name << "\","
+        << "\"overtake_permission_reason\":\""
+        << output.blocked_info.overtake_permission_reason << "\","
+        << "\"front_vehicle_low_speed\":"
+        << (output.blocked_info.front_vehicle_low_speed ? "true" : "false")
+        << ","
+        << "\"slow_front_exception_active\":"
+        << (output.blocked_info.slow_front_exception_active ? "true"
+                                                            : "false")
+        << ","
+        << "\"slow_front_exception_count\":"
+        << output.blocked_info.slow_front_exception_count << ","
         << "\"future_side_by_side\":"
         << (output.blocked_info.future_side_by_side ? "true" : "false") << ","
         << "\"future_corner_side_by_side\":"
@@ -704,6 +872,8 @@ private:
         << ","
         << "\"front_rel_v\":" << jsonNumber(output.blocked_info.front_rel_v)
         << ","
+        << "\"front_vehicle_speed_mps\":"
+        << jsonNumber(output.blocked_info.front_vehicle_speed_mps) << ","
         << "\"front_s_dot_mps\":"
         << jsonNumber(output.blocked_info.front_s_dot_mps) << ","
         << "\"front_same_direction\":"
@@ -858,6 +1028,20 @@ private:
         output.blocked_info.overtake_start_abs_curvature;
     snapshot.overtake_start_gate_reason =
         output.blocked_info.overtake_start_gate_reason;
+    snapshot.overtake_permission_allowed =
+        output.blocked_info.overtake_permission_allowed;
+    snapshot.overtake_permission_section_name =
+        output.blocked_info.overtake_permission_section_name;
+    snapshot.overtake_permission_reason =
+        output.blocked_info.overtake_permission_reason;
+    snapshot.front_vehicle_low_speed =
+        output.blocked_info.front_vehicle_low_speed;
+    snapshot.slow_front_exception_active =
+        output.blocked_info.slow_front_exception_active;
+    snapshot.slow_front_exception_count =
+        output.blocked_info.slow_front_exception_count;
+    snapshot.front_vehicle_speed_mps =
+        output.blocked_info.front_vehicle_speed_mps;
     snapshot.future_wall_clearance_m =
         output.blocked_info.future_wall_clearance_m;
     snapshot.front_vehicle_id = output.blocked_info.nearest_id;
@@ -910,6 +1094,8 @@ private:
            snapshot.recovery_speed_guard_active ||
            snapshot.lateral_target_hold_active ||
            !snapshot.straight_overtake_start_allowed ||
+           !snapshot.overtake_permission_allowed ||
+           snapshot.slow_front_exception_active ||
            !snapshot.active_section_name.empty() ||
            !snapshot.front_vehicle_id.empty() ||
            !snapshot.side_vehicle_id.empty() ||
@@ -946,6 +1132,19 @@ private:
                  previous.overtake_start_abs_curvature) > 0.02 ||
         current.overtake_start_gate_reason !=
             previous.overtake_start_gate_reason ||
+        current.overtake_permission_allowed !=
+            previous.overtake_permission_allowed ||
+        current.overtake_permission_section_name !=
+            previous.overtake_permission_section_name ||
+        current.overtake_permission_reason !=
+            previous.overtake_permission_reason ||
+        current.front_vehicle_low_speed != previous.front_vehicle_low_speed ||
+        current.slow_front_exception_active !=
+            previous.slow_front_exception_active ||
+        current.slow_front_exception_count !=
+            previous.slow_front_exception_count ||
+        std::abs(current.front_vehicle_speed_mps -
+                 previous.front_vehicle_speed_mps) > 0.05 ||
         std::abs(current.future_wall_clearance_m -
                  previous.future_wall_clearance_m) > 0.05 ||
         current.front_vehicle_id != previous.front_vehicle_id ||
@@ -1016,6 +1215,9 @@ private:
         "can_left=%d can_right=%d pass_gap_reason=%s "
         "corner_abs_curvature=%.3f straight_start_allowed=%d "
         "overtake_start_abs_curvature=%.3f overtake_start_gate_reason=%s "
+        "permission_allowed=%d permission_section=%s permission_reason=%s "
+        "front_low_speed=%d slow_exception=%d slow_exception_count=%d "
+        "front_speed=%.2f "
         "future_wall_clearance=%.2f yield_reason=%s "
         "ego_s=%.2f ego_d=%.2f target_d=%.2f min_cbf_h=%.3f cbf_slack=%.3f "
         "safe_stop_triggered=%d start_grace=%d safe_stop_reason=%s "
@@ -1048,6 +1250,13 @@ private:
         output.blocked_info.straight_overtake_start_allowed,
         output.blocked_info.overtake_start_abs_curvature,
         output.blocked_info.overtake_start_gate_reason.c_str(),
+        output.blocked_info.overtake_permission_allowed,
+        output.blocked_info.overtake_permission_section_name.c_str(),
+        output.blocked_info.overtake_permission_reason.c_str(),
+        output.blocked_info.front_vehicle_low_speed,
+        output.blocked_info.slow_front_exception_active,
+        output.blocked_info.slow_front_exception_count,
+        output.blocked_info.front_vehicle_speed_mps,
         output.blocked_info.future_wall_clearance_m,
         output.blocked_info.yield_reason.c_str(), ego.frenet.s, ego.frenet.d,
         output.target_lateral_offset_m, output.min_cbf_h, output.cbf_slack,

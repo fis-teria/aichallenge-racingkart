@@ -65,6 +65,29 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 | `straight_overtake_lookahead_m` | `12.0` | `12.0` | 追い越し開始ゲートが先読みする距離。 |
 | `straight_overtake_release_hysteresis_m_inv` | `0.005` | `0.005` | 一度閉じたゲートを開き直すためのヒステリシス。 |
 
+ref velocity区間を元に追い越し開始を許可/禁止したい場合:
+
+| パラメータ | 現在値 | fallback | 見る理由 |
+|---|---:|---:|---|
+| `overtake_permission_profile_enabled` | `true` | `true` | `config/overtake_permission.csv` の区間許可gateを使う。 |
+| `overtake_permission_package` | `overtake_planner` | `overtake_planner` | 追い越し許可CSVを探すROS package。 |
+| `overtake_permission_csv` | `config/overtake_permission.csv` | 同左 | `name,start_wp,end_wp,allow_overtake` 形式のCSV。 |
+| `default_overtake_allowed` | `true` | `true` | CSVに該当しない区間で追い越し開始を許すか。 |
+| `overtake_permission_lookahead_m` | `8.0` | `8.0` | 近い将来の不可区間も見て追い越し開始を止める距離。 |
+| `slow_front_exception_enabled` | `true` | `true` | 不可区間でも前方車が停止/低速なら例外的にPASS開始を許す。 |
+| `slow_front_exception_speed_mps` | `1.0` | `1.0` | 停止/低速とみなす前方車速度。 |
+| `slow_front_exception_distance_m` | `8.0` | `8.0` | 低速例外を許す前方距離。 |
+| `slow_front_exception_required_cycles` | `3` | `3` | 低速例外に必要な連続判定周期数。 |
+
+CSV例:
+
+```csv
+name,start_wp,end_wp,allow_overtake
+s4,155,190,false
+s5,190,265,true
+s9,335,1,true
+```
+
 ## 起動/入出力
 
 主に `overtake_planner_node.cpp` が読みます。
@@ -87,7 +110,7 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 
 | パラメータ | 現在値 | fallback | 変更すると何が変わるか |
 |---|---:|---:|---|
-| `horizon_points` | `20` | `20` | overrideの点数。baseline MPCでは20、delay-awareではlaunchから50へ上書き。 |
+| `horizon_points` | `50` | `20` | overrideの点数。baseline MPCでは20、delay-aware/hybridでは50へ広げる。 |
 | `horizon_dt_sec` | `0.025` | `0.025` | override各点の時間刻み。 |
 
 ## BlockedRiskAnalyzer
@@ -157,6 +180,12 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 | `straight_overtake_max_curvature_m_inv` | `0.025` | `0.025` | 追い越し開始を許可する最大曲率。 |
 | `straight_overtake_lookahead_m` | `12.0` | `12.0` | 開始ゲートが曲率を見る前方距離。 |
 | `straight_overtake_release_hysteresis_m_inv` | `0.005` | `0.005` | 閉じた開始ゲートを開き直すヒステリシス。 |
+| `overtake_permission_profile_enabled` | `true` | `true` | 区間許可CSVで新規PASS開始を制御する。 |
+| `overtake_permission_lookahead_m` | `8.0` | `8.0` | 前方の不可区間を見て開始を早めに抑制する。 |
+| `slow_front_exception_enabled` | `true` | `true` | 不可区間でも停止/低速前方車だけ例外的に追い越しを許す。 |
+| `slow_front_exception_speed_mps` | `1.0` | `1.0` | 低速例外の相手速度しきい値。 |
+| `slow_front_exception_distance_m` | `8.0` | `8.0` | 低速例外を使う前方距離。 |
+| `slow_front_exception_required_cycles` | `3` | `3` | 低速例外を確定する連続周期数。 |
 | `corner_side_yield_curvature_m_inv` | `0.05` | `0.05` | 横並び中に譲りを強めるコーナー曲率。下げるほど緩いカーブでも譲る。 |
 | `corner_side_yield_lookahead_m` | `10.0` | `10.0` | 横並びコーナー判定で曲率を見る前方距離。 |
 | `large_lateral_error_threshold_m` | `0.60` | `0.60` | 横ずれがこの値を超え、危険文脈があるとPASSを凍結して復帰寄りにする。 |

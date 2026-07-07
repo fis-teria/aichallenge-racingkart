@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import difflib
 import hashlib
+import io
 import json
 import math
 import os
@@ -49,6 +50,8 @@ SYSTEM_LAUNCH_ROOT = Path("aichallenge/workspace/src/aichallenge_system/aichalle
 MPC_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros")
 OVERTAKE_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/overtake_planner")
 HYBRID_CONTROL_MUX_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux")
+OVERTAKE_PERMISSION_CSV_PATH = OVERTAKE_ROOT / "config/overtake_permission.csv"
+OVERTAKE_PERMISSION_COLUMNS = ["name", "start_wp", "end_wp", "allow_overtake"]
 MPC_CONFIG_PATH = MPC_ROOT / "config/config.yaml"
 DELAY_AWARE_MPC_CONFIG_PATH = Path(
     "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_aware_config.yaml"
@@ -93,37 +96,156 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "mpc.use_curvature_speed_profile": "参照パス曲率からwaypointごとの速度プロファイルを作るかどうかです。trueでコーナー速度が曲率に応じて下がります。",
     "mpc.use_ref_vel_as_speed_cap": "ref_vel.yamlの区間速度を目標速度の上限として使うかどうかです。trueでも曲率速度は保持され、低い方が採用されます。",
     "mpc.speed_profile_debug_publish_period_sec": "/mpc/speed_profile_debugをpublishする周期[s]です。0以下で停止します。",
+    "mpc.lateral_target_mode": "MPCの横方向目標の作り方です。通常はreference_pathで、参照線中心に追従します。",
+    "mpc.wall_margin_m": "MPC内部の壁・境界に対する追加マージン[m]です。大きいほど壁際を避けますが通れる幅は狭くなります。",
+    "mpc.use_grade_accel_feedforward": "勾配推定による加速度feedforwardを使うかどうかです。坂や路面傾きでの速度落ち対策に使います。",
+    "mpc.grade_ff_gain": "勾配feedforwardの効きの強さです。大きいほど坂に対する加減速補正が強くなります。",
+    "mpc.grade_ff_max_accel_mps2": "勾配feedforwardで足せる最大加速度[m/s^2]です。過剰な加速を抑える上限です。",
+    "mpc.grade_ff_window_m": "勾配推定に使う前方/近傍の距離窓[m]です。大きいほど滑らかですが局所変化に鈍くなります。",
+    "mpc.grade_ff_min_distance_delta_m": "勾配計算で必要な最小距離差[m]です。小さすぎる点間でのノイズを避けます。",
+    "mpc.grade_ff_min_speed_mps": "勾配feedforwardを有効にする最低速度[m/s]です。低速時の不安定な補正を避けます。",
+    "mpc.grade_ff_low_pass_gain": "勾配feedforward加速度のローパス係数です。小さいほど滑らか、大きいほど即応します。",
+    "mpc.grade_ff_only_when_not_decelerating": "減速指令中に勾配feedforwardを抑えるかどうかです。trueでブレーキ側の意図を優先します。",
+    "mpc.grade_ff_speed_error_deadband_mps": "速度誤差がこの範囲[m/s]以内なら勾配補正を弱めるためのデッドバンドです。",
     "mpc.v_max": "MPCの最高速度[km/h]です。区間速度や曲率制限より上には出ません。",
     "mpc.ay_max": "許容横加速度[m/s^2]です。小さいほどコーナー速度が下がり安全寄りになります。",
     "v2x_obstacle_avoidance.vehicle_radius": "V2X車両を障害物として扱うときの半径[m]です。",
     "v2x_obstacle_avoidance.v_max_safety": "V2X速度推定の安全上限[m/s]です。異常に速い推定値を破棄します。",
     "v2x_obstacle_avoidance.position_jump_threshold": "V2X位置が瞬間的に飛んだと判定する距離[m]です。",
+    "delay_aware_mpc.enabled": "delay-aware MPCの遅延補償を有効にする実験メタデータです。launch側のdelay_enabledと揃えて使います。",
+    "delay_aware_mpc.mode": "遅延補償モードです。baseline, state_shift, state_shift_with_steer_lag, delay_augmentedを選べます。",
+    "delay_aware_mpc.steering_delay_sec": "ステアリング遅延として前方予測する時間[s]です。AWSIM想定値は0.20s前後です。",
+    "delay_aware_mpc.prediction_dt": "遅延補償の状態予測を積分する刻み幅[s]です。小さいほど精細ですが計算量が増えます。",
+    "delay_aware_mpc.steering_time_constant_sec": "ステア一次遅れモデルの時定数[s]です。大きいほど実ステア追従を遅く見積もります。",
+    "delay_aware_mpc.use_reference_time_shift": "trueにすると遅延補償後poseを基準にMPC参照pathへ投影します。",
+    "delay_aware_mpc.use_steering_status": "実測steering_statusが新鮮な場合に、それを遅延予測のステア入力として優先します。",
+    "delay_aware_mpc.steering_status_timeout_sec": "steering_statusを新鮮とみなす最大時間[s]です。",
+    "delay_aware_mpc.use_yaw_rate_fallback": "steering_statusが使えない場合にyaw rateからステア相当を推定します。",
+    "delay_aware_mpc.use_command_history_fallback": "実測ステア/yaw rateが使えない場合に過去の制御指令からステアを推定します。",
+    "delay_aware_mpc.min_velocity_for_yaw_prediction": "yaw rate fallbackを使う最低速度[m/s]です。低速時の推定発散を避けます。",
+    "delay_aware_mpc.publish_debug_topics": "/delay_aware_mpc/debugなどの遅延補償debug topicをpublishするかどうかです。",
+    "delay_aware_mpc.debug_publish_period_sec": "遅延補償debug topicをpublishする周期[s]です。0以下なら実装側で停止扱いになることがあります。",
+    "delay_compensated_odometry.ros__parameters.enabled": "delay compensated odometryノードを有効にするフラグです。falseで入力odomをそのまま扱う比較に使います。",
+    "delay_compensated_odometry.ros__parameters.mode": "遅延補償モードです。state_shift_with_steer_lagが現在の主運用です。",
+    "delay_compensated_odometry.ros__parameters.steering_delay_sec": "ステアリング遅延として予測する時間[s]です。大きいほど未来姿勢へ強く補償します。",
+    "delay_compensated_odometry.ros__parameters.prediction_dt": "遅延補償予測の積分刻み幅[s]です。小さいほど精細ですが計算量が増えます。",
+    "delay_compensated_odometry.ros__parameters.steering_time_constant_sec": "ステア一次遅れの時定数[s]です。実ステアが指令へ追いつく遅さを表します。",
+    "delay_compensated_odometry.ros__parameters.wheelbase": "遅延中のyaw予測に使うホイールベース[m]です。車両モデルと合わせます。",
+    "delay_compensated_odometry.ros__parameters.use_reference_time_shift": "trueにすると遅延補償後poseをMPC入力として使い、参照投影も揃えます。",
+    "delay_compensated_odometry.ros__parameters.use_steering_status": "steering_statusが新鮮な場合に実測ステアを優先して予測します。",
+    "delay_compensated_odometry.ros__parameters.steering_status_timeout_sec": "steering_statusを新鮮とみなす最大時間[s]です。",
+    "delay_compensated_odometry.ros__parameters.use_yaw_rate_fallback": "実測ステアが使えない時にyaw rateからステアを推定します。",
+    "delay_compensated_odometry.ros__parameters.use_command_history_fallback": "実測ステア/yaw rateが使えない時に過去指令からステアを推定します。",
+    "delay_compensated_odometry.ros__parameters.min_velocity_for_yaw_prediction": "yaw rate fallbackを許可する最低速度[m/s]です。",
+    "delay_compensated_odometry.ros__parameters.debug_publish_period_sec": "/delay_aware_mpc/debugと/delayed_poseをpublishする周期[s]です。",
     "overtake_planner_node.ros__parameters.enabled": "overtake_planner全体を有効にするフラグです。falseにするとMPCへの追い抜きoverrideを止めます。",
+    "overtake_planner_node.ros__parameters.reference_package": "追い抜き判断のFrenet基準CSVを探すROS package名です。通常はMPCと同じmulti_purpose_mpc_rosです。",
     "overtake_planner_node.ros__parameters.reference_csv": "追い抜き判断のFrenet基準に使う参照CSVです。MPCの走行ラインと合わせるのが基本です。",
     "overtake_planner_node.ros__parameters.own_vehicle_id": "V2X上で自車として除外するIDです。autoならROS_DOMAIN_IDからd1などを推定します。",
+    "overtake_planner_node.ros__parameters.ego_stale_time_sec": "自車odometryを新鮮とみなす最大時間[s]です。超えるとplanner出力を安全側へ寄せます。",
+    "overtake_planner_node.ros__parameters.control_rate_hz": "overtake plannerの判断周期[Hz]です。高いほど細かく反応しますがCPU負荷が増えます。",
+    "overtake_planner_node.ros__parameters.horizon_points": "MPC/PurePursuitへ渡すoverride horizonの点数です。多いほど先まで意図を伝えます。",
+    "overtake_planner_node.ros__parameters.horizon_dt_sec": "override horizon各点の時間刻み[s]です。速度capや横オフセット列の密度に効きます。",
     "overtake_planner_node.ros__parameters.lookahead_s_m": "前方車両を追い抜き判断に入れる縦方向距離[m]です。大きいほど早めに反応します。",
     "overtake_planner_node.ros__parameters.follow_trigger_s_m": "前走車へ追従を始める距離[m]です。大きいほど詰める前に減速します。",
     "overtake_planner_node.ros__parameters.same_corridor_width_m": "前方閉塞判定で同じ走行コリドーとみなす横幅[m]です。",
+    "overtake_planner_node.ros__parameters.same_direction_filter_enabled": "相手車両が同方向に進んでいる時だけ前方/横並び判定へ使うフィルタです。",
+    "overtake_planner_node.ros__parameters.same_direction_min_speed_mps": "同方向判定に必要な相手車両の最低速度[m/s]です。低速ノイズを除外します。",
+    "overtake_planner_node.ros__parameters.same_direction_min_s_dot_mps": "Frenet s方向速度がこの値[m/s]以上なら同方向とみなします。",
+    "overtake_planner_node.ros__parameters.future_side_prediction_enabled": "将来の横並び/外壁リスクを予測して、早めにyield/recoveryへ入る機能です。",
+    "overtake_planner_node.ros__parameters.future_side_prediction_horizon_sec": "future side-by-side riskを見る予測時間[s]です。大きいほど早めに警戒します。",
+    "overtake_planner_node.ros__parameters.future_side_prediction_dt_sec": "future risk予測の時間刻み[s]です。小さいほど精細ですが計算量が増えます。",
+    "overtake_planner_node.ros__parameters.future_side_yield_wall_clearance_m": "将来横並び時に外壁側として危険とみなす壁クリアランス[m]です。",
     "overtake_planner_node.ros__parameters.dv_block_threshold_mps": "相対速度で詰まり中と判定するしきい値[m/s]です。小さいほど早くblockedになります。",
+    "overtake_planner_node.ros__parameters.opponent_stale_time_sec": "V2X相手車両情報を新鮮とみなす最大時間[s]です。古い相手情報を判定から外します。",
     "overtake_planner_node.ros__parameters.side_by_side_s_m": "横並びとみなす縦方向距離[m]です。",
     "overtake_planner_node.ros__parameters.side_margin_m": "横並びとみなす横方向距離[m]です。大きいほど横並び検出が広くなります。",
+    "overtake_planner_node.ros__parameters.parallel_side_detection_enabled": "直線などでほぼ横並びの相手をside-by-side候補として補足する追加判定です。",
+    "overtake_planner_node.ros__parameters.parallel_side_s_m": "parallel side判定で見る縦方向距離[m]です。スタート直線の並走検出に効きます。",
+    "overtake_planner_node.ros__parameters.parallel_side_margin_m": "parallel side判定で見る横方向距離[m]です。大きいほど並走検出が広がります。",
     "overtake_planner_node.ros__parameters.side_yield_s_m": "横並び中に相手がこの距離[m]以上前なら、自車が後ろへ譲る判定にします。",
     "overtake_planner_node.ros__parameters.side_by_side_target_gap_m": "横並び維持時に相手から横へ確保したい距離[m]です。",
     "overtake_planner_node.ros__parameters.side_by_side_shift_distance_m": "横並び維持の横移動をならす距離[m]です。大きいほどゆっくり横へ逃げます。",
     "overtake_planner_node.ros__parameters.side_by_side_speed_cap_mps": "横並び維持時の速度上限[m/s]です。相手速度からyield marginを引いた値との低い方を使います。",
+    "overtake_planner_node.ros__parameters.corner_side_yield_curvature_m_inv": "この曲率[1/m]以上のコーナーで横並びyieldを強めます。",
+    "overtake_planner_node.ros__parameters.corner_side_yield_lookahead_m": "コーナー横並びリスクを見る前方距離[m]です。",
+    "overtake_planner_node.ros__parameters.corner_side_yield_wall_clearance_m": "コーナー横並び時に外壁側危険とみなす壁クリアランス[m]です。",
+    "overtake_planner_node.ros__parameters.corner_yield_target_d_m": "コーナーyield/recovery時に寄せる横位置d[m]です。0に近いほど中央寄せです。",
+    "overtake_planner_node.ros__parameters.corner_yield_rejoin_gap_m": "コーナーyield後に通常追従へ戻るための前方ギャップ[m]です。",
+    "overtake_planner_node.ros__parameters.yield_rejoin_wall_clearance_m": "yield解除時に必要な壁クリアランス[m]です。小さいと壁際で復帰しやすくなります。",
+    "overtake_planner_node.ros__parameters.recovery_release_lateral_error_m": "recovery解除を許す横誤差[m]です。大きいほど早く解除します。",
+    "overtake_planner_node.ros__parameters.yield_release_lateral_error_m": "yield解除を許す横誤差[m]です。大きいほど早く通常状態へ戻ります。",
+    "overtake_planner_node.ros__parameters.corner_follow_speed_margin_mps": "コーナーで前走車へ追従する時、相手速度から引く余裕[m/s]です。",
+    "overtake_planner_node.ros__parameters.corner_yield_v_max_mps": "コーナーyield中の速度上限[m/s]です。高いほど勝ちに行きますが外壁リスクが増えます。",
+    "overtake_planner_node.ros__parameters.straight_only_overtake_enabled": "trueにすると追い越し開始を直線相当に限定します。コーナー追い越し崩れ対策です。",
+    "overtake_planner_node.ros__parameters.straight_overtake_max_curvature_m_inv": "追い越し可能な直線とみなす最大曲率[1/m]です。小さいほど厳しく直線限定します。",
+    "overtake_planner_node.ros__parameters.straight_overtake_lookahead_m": "直線判定で前方曲率を見る距離[m]です。大きいほど先のコーナーを早めに考慮します。",
+    "overtake_planner_node.ros__parameters.straight_overtake_release_hysteresis_m_inv": "直線判定解除のヒステリシス[1/m]です。判定のチャタリングを抑えます。",
+    "overtake_planner_node.ros__parameters.overtake_permission_profile_enabled": "区間ごとの追い越し許可CSVを使うかどうかです。falseなら区間許可gateを無効化します。",
+    "overtake_planner_node.ros__parameters.overtake_permission_package": "追い越し許可CSVを探すROS package名です。通常はovertake_plannerです。",
+    "overtake_planner_node.ros__parameters.overtake_permission_csv": "追い越し許可区間CSVのパスです。name,start_wp,end_wp,allow_overtake形式で指定します。",
+    "overtake_planner_node.ros__parameters.default_overtake_allowed": "追い越し許可CSVに該当しない区間で追い越し開始を許すかどうかです。",
+    "overtake_planner_node.ros__parameters.overtake_permission_lookahead_m": "追い越し開始gateで前方の不可区間を先読みする距離[m]です。大きいほど早めに開始を止めます。",
+    "overtake_planner_node.ros__parameters.slow_front_exception_enabled": "追い越し不可区間でも、前方車が停止/低速なら例外的に追い越し開始を許す機能です。",
+    "overtake_planner_node.ros__parameters.slow_front_exception_speed_mps": "低速前方車例外で停止/低速とみなす相手速度[m/s]です。",
+    "overtake_planner_node.ros__parameters.slow_front_exception_distance_m": "低速前方車例外を許す前方距離[m]です。遠い停止車へ早すぎる回避をしないための上限です。",
+    "overtake_planner_node.ros__parameters.slow_front_exception_required_cycles": "低速前方車例外が有効になるまでに必要な連続判定周期数です。V2X速度0の瞬間ノイズを抑えます。",
+    "overtake_planner_node.ros__parameters.large_lateral_error_threshold_m": "自車が参照横位置から大きく外れたとみなす横誤差[m]です。",
+    "overtake_planner_node.ros__parameters.large_lateral_error_v_max_mps": "横誤差が大きい時の速度上限[m/s]です。姿勢を戻す時間を作ります。",
     "overtake_planner_node.ros__parameters.min_pass_gap_m": "左右追い抜き候補に必要な最小横ギャップ[m]です。",
+    "overtake_planner_node.ros__parameters.pass_gap_hysteresis_m": "pass gap判定のヒステリシス[m]です。通れる/通れない判定の揺れを抑えます。",
     "overtake_planner_node.ros__parameters.yield_speed_margin_mps": "譲り・横並び時に相手速度から引く速度余裕[m/s]です。大きいほど後ろに下がりやすくなります。",
+    "overtake_planner_node.ros__parameters.yield_min_speed_cap_mps": "yield中でも下げすぎない最低速度cap[m/s]です。高いほどレース寄り、低いほど安全寄りです。",
     "overtake_planner_node.ros__parameters.yield_rejoin_gap_m": "譲り状態から追従へ戻る前方距離[m]です。",
     "overtake_planner_node.ros__parameters.left_offset_m": "左追い抜き時にMPCへ渡す横オフセット[m]です。",
     "overtake_planner_node.ros__parameters.right_offset_m": "右追い抜き時にMPCへ渡す横オフセット[m]です。",
+    "overtake_planner_node.ros__parameters.prepare_distance_m": "追い越し準備の横移動を始める距離[m]です。大きいほど早めにラインを作ります。",
+    "overtake_planner_node.ros__parameters.merge_distance_m": "追い越し後に中心/基準ラインへ戻る距離[m]です。大きいほど戻りが緩やかです。",
     "overtake_planner_node.ros__parameters.follow_speed_margin_mps": "追従時に前走車速度から引く速度余裕[m/s]です。",
+    "overtake_planner_node.ros__parameters.recovery_v_max_mps": "recovery中の速度上限[m/s]です。高いほど復帰は速いですが制御余裕が減ります。",
+    "overtake_planner_node.ros__parameters.wall_margin_recovery_v_max_mps": "壁マージン不足でrecoveryする時の速度上限[m/s]です。",
+    "overtake_planner_node.ros__parameters.outside_corridor_recovery_centering_time_sec": "安全範囲外から中央寄せrecoveryへ戻す時定数[s]です。小さいほど強く中央へ戻します。",
+    "overtake_planner_node.ros__parameters.v_passthrough_mps": "この速度[m/s]までは速度capを実質通すための上限値です。通常は十分大きくします。",
+    "overtake_planner_node.ros__parameters.d_min_m": "plannerが許容する最小横位置d[m]です。走行可能幅の左/内側境界に対応します。",
+    "overtake_planner_node.ros__parameters.d_max_m": "plannerが許容する最大横位置d[m]です。走行可能幅の右/外側境界に対応します。",
+    "overtake_planner_node.ros__parameters.min_wall_margin_m": "壁に対して最低限確保したいマージン[m]です。大きいほど壁際を避けます。",
     "overtake_planner_node.ros__parameters.safety_ellipse_a_m": "他車との安全楕円の前後方向半径[m]です。",
     "overtake_planner_node.ros__parameters.safety_ellipse_b_m": "他車との安全楕円の左右方向半径[m]です。",
     "overtake_planner_node.ros__parameters.min_ellipse_h": "安全楕円の最小余裕です。大きいほど他車へ保守的になります。",
     "overtake_planner_node.ros__parameters.pass_safe_required_cycles": "追い抜き候補が安全と連続判定される必要周期数です。",
     "overtake_planner_node.ros__parameters.merge_front_gap_m": "追い抜き後に中心へ戻るための前方ギャップ[m]です。",
     "overtake_planner_node.ros__parameters.abort_timeout_sec": "追い抜き状態を続けすぎた場合に中止復帰へ入る時間[s]です。",
+    "overtake_planner_node.ros__parameters.min_mode_hold_time_sec": "状態遷移後に同じmodeを最低保持する時間[s]です。チャタリングを抑えます。",
     "overtake_planner_node.ros__parameters.keep_mode_bonus": "現在モードを少し優先してチャタリングを抑えるスコア補正です。",
+    "overtake_planner_node.ros__parameters.lateral_target_max_step_m": "1周期で許す横目標dの最大変化[m]です。小さいほど目標が滑らかになります。",
+    "overtake_planner_node.ros__parameters.high_speed_curve_lateral_hold_enabled": "高速コーナー中に横目標の急変を抑えるhold機能です。",
+    "overtake_planner_node.ros__parameters.high_speed_curve_lateral_hold_min_speed_mps": "高速コーナーholdを開始する最低速度[m/s]です。",
+    "overtake_planner_node.ros__parameters.high_speed_curve_lateral_hold_release_speed_mps": "速度がこの値[m/s]以下になると高速コーナーholdを解除しやすくなります。",
+    "overtake_planner_node.ros__parameters.high_speed_curve_lateral_hold_release_curvature_m_inv": "曲率がこの値[1/m]以下なら高速コーナーholdを解除しやすくなります。",
+    "overtake_planner_node.ros__parameters.speed_only_fallback_enabled": "安全な横回避が作れない時に速度capだけ出すfallbackを有効にします。",
+    "overtake_planner_node.ros__parameters.speed_only_fallback_v_max_mps": "speed-only fallback中の速度上限[m/s]です。",
+    "overtake_planner_node.ros__parameters.wall_risk_speed_guard_enabled": "壁リスクが高い時に速度上限を下げるguardを有効にします。",
+    "overtake_planner_node.ros__parameters.wall_soft_margin_m": "壁リスクspeed guardを始めるソフトマージン[m]です。",
+    "overtake_planner_node.ros__parameters.wall_risk_v_max_mps": "壁リスク中の速度上限[m/s]です。",
+    "overtake_planner_node.ros__parameters.mpc_health_speed_guard_enabled": "MPC infeasible/solve遅延が悪化した時に速度上限を下げるguardを有効にします。",
+    "overtake_planner_node.ros__parameters.mpc_health_infeasible_count_threshold": "MPC health guardを発動するinfeasible連続回数です。",
+    "overtake_planner_node.ros__parameters.mpc_health_solve_time_warn_ms": "MPC solveが遅いとみなす時間[ms]です。超えるとspeed guard候補になります。",
+    "overtake_planner_node.ros__parameters.mpc_health_v_max_mps": "MPC health悪化時の速度上限[m/s]です。",
+    "overtake_planner_node.ros__parameters.mpc_health_stale_time_sec": "MPC health debugを新鮮とみなす最大時間[s]です。",
+    "overtake_planner_node.ros__parameters.recovery_speed_guard_enabled": "recovery中に速度上限を下げるguardを有効にします。",
+    "overtake_planner_node.ros__parameters.recovery_speed_guard_v_max_mps": "recovery speed guard中の速度上限[m/s]です。",
+    "overtake_planner_node.ros__parameters.section_safety_profile_enabled": "区間ごとの安全マージンprofileを有効にするフラグです。配列設定がある場合に使います。",
+    "overtake_planner_node.ros__parameters.safe_stop_enabled": "回避も追い越しも安全でない時にsafe stop modeを使うかどうかです。",
+    "overtake_planner_node.ros__parameters.safe_stop_v_mps": "safe stop中に目標とする低速/停止速度[m/s]です。",
+    "overtake_planner_node.ros__parameters.safe_stop_trigger_cycles": "safe stop発動に必要な連続危険判定回数です。",
+    "overtake_planner_node.ros__parameters.start_grace_safe_stop_enabled": "スタート直後の低速/並走でsafe stopを緩めるgraceを有効にします。",
+    "overtake_planner_node.ros__parameters.start_grace_duration_sec": "start graceを有効にするスタート後時間[s]です。",
+    "overtake_planner_node.ros__parameters.start_grace_max_speed_mps": "この速度[m/s]以下ならstart grace中とみなしてsafe stopを抑制します。",
+    "overtake_planner_node.ros__parameters.safe_stop_release_cycles": "safe stop解除に必要な連続安全判定回数です。",
+    "overtake_planner_node.ros__parameters.safe_stop_release_front_gap_m": "safe stop解除に必要な前方車両との距離[m]です。",
+    "overtake_planner_node.ros__parameters.safe_stop_release_wall_clearance_m": "safe stop解除に必要な壁クリアランス[m]です。",
+    "overtake_planner_node.ros__parameters.safe_stop_lateral_error_threshold_m": "safe stop解除時に許容する横誤差[m]です。",
+    "overtake_planner_node.ros__parameters.safe_stop_release_speed_mps": "safe stop解除判定で自車が十分低速とみなす速度[m/s]です。",
     "hybrid_control_mux_node.ros__parameters.enabled": "hybrid control mux全体を有効にするフラグです。falseにするとMPC指令が新鮮な間だけMPCを通し、それ以外は停止します。",
     "hybrid_control_mux_node.ros__parameters.control_rate_hz": "MPC/Pure Pursuit/停止のどれを出すか判定する周期[Hz]です。",
     "hybrid_control_mux_node.ros__parameters.mpc_cmd_timeout_sec": "MPC制御指令を新鮮とみなす最大時間[s]です。短いほどMPC遅延に敏感になります。",
@@ -139,9 +261,24 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "hybrid_control_mux_node.ros__parameters.use_pure_pursuit_on_mpc_cmd_timeout": "MPC制御指令がtimeoutしたときPure Pursuitへ切り替えるかどうかです。",
     "hybrid_control_mux_node.ros__parameters.use_pure_pursuit_on_mpc_health_timeout": "MPC healthがtimeoutしたときPure Pursuitへ切り替えるかどうかです。debug topic欠落だけで落としたくない場合はfalseにします。",
     "hybrid_control_mux_node.ros__parameters.debug_publish_period_sec": "/hybrid_control_mux/debugをpublishする周期[s]です。0以下で停止します。",
+    "hybrid_control_mux_node.ros__parameters.enable_steering_rate_limit": "mux出力後の最終ステア指令にレート制限をかけるかどうかです。MPC/PP切り替え時の急操舵を抑えます。",
+    "hybrid_control_mux_node.ros__parameters.max_steering_angle_rad": "mux出力後に許すステア角の絶対上限[rad]です。NaNや過大な指令もこの範囲へ丸めます。",
+    "hybrid_control_mux_node.ros__parameters.max_steering_rate_radps": "mux出力後に許すステア変化速度[rad/s]です。値を小さくすると切り替え時の操舵が滑らかになります。",
+    "hybrid_control_mux_node.ros__parameters.max_steering_delta_per_cycle": "1制御周期あたりの追加ステア変化上限[rad]です。0以下ならmax_steering_rate_radpsとdtだけで制限します。",
+    "hybrid_control_mux_node.ros__parameters.steering_limiter_reset_dt_sec": "前回出力からこの時間[s]を超えて空いた場合、ステアレート制限の履歴をリセットします。",
+    "hybrid_control_mux_node.ros__parameters.reset_steering_limiter_on_mode_change": "MPC/PP/stopの出力元が切り替わった時にステアレート制限の履歴をリセットするかどうかです。",
+    "hybrid_control_mux_node.ros__parameters.steering_log_throttle_sec": "ステア角/レート制限ログを再出力する最小間隔[s]です。小さいほど詳細にログが出ます。",
+}
+
+GENERIC_DESCRIPTION_DEFAULTS = {
+    "launch引数です。defaultを変更すると、このlaunch内で使われる既定値が変わります。",
+    "ROSパラメータ設定です。nameとvalueでノードへ渡す値を指定します。",
 }
 
 DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
+    "use_sim_time": "ROSのsimulation timeを使うかどうかです。AWSIM/dev/evalでは通常trueです。",
+    "enabled": "対象ノードの機能を有効にするフラグです。falseにするとその補助処理を止めます。",
+    "mode": "対象ノードの動作モードです。delay-aware系では遅延補償方式を指定します。",
     "delay_enabled": "delay-aware odometry補償を有効にするフラグです。baseline比較ではfalseまたはmode=baselineを使います。",
     "delay_mode": "遅延補償モードです。baseline, state_shift, state_shift_with_steer_lag, delay_augmentedを選べます。",
     "steering_delay_sec": "ステアリング遅延として前方予測する時間[s]です。AWSIM想定値は0.20sです。",
@@ -157,6 +294,8 @@ DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
     "debug_publish_period_sec": "/delay_aware_mpc/debugと/delayed_poseをpublishする周期[s]です。",
     "use_obstacle_avoidance": "MPC側の障害物回避連携を有効にするlaunch引数です。",
     "use_overtake_planner": "overtake_plannerからの経路overrideをMPCへ入れるlaunch引数です。",
+    "use_boost_acceleration": "boost commander向けの加速コマンド形式を使うかどうかです。通常のAckermann出力ではfalseです。",
+    "use_stats": "MPC内部の実行統計収集を有効にするかどうかです。調査時以外はfalseで軽くします。",
     "fallback_speed_mps": "hybrid fallback中のPure Pursuit目標速度[m/s]です。mux側の速度上限と合わせて調整します。",
     "input_mpc_cmd": "hybrid control muxが受け取るMPC制御指令topicです。",
     "input_pure_pursuit_cmd": "hybrid control muxが受け取るPure Pursuit制御指令topicです。",
@@ -165,14 +304,40 @@ DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
     "output_debug": "hybrid control muxの切り替え状態を出すdebug topicです。",
     "output_raw_control_cmd": "各制御器のraw制御指令を確認するためのtopicです。",
     "input_kinematics": "制御器へ入力するodometry topicです。hybridではdelay補償後のodometryをPure Pursuitにも渡します。",
+    "input_odom": "overtake plannerへ入力する自車odometry topicです。delay-aware運用では補償後odomへ差し替えます。",
+    "input_trajectory": "Pure Pursuitが通常追従するTrajectory topicです。MPC horizonが使えない場合の基準経路になります。",
+    "input_mpc_predicted_horizon": "Pure Pursuit fallback中に優先追従するMPC予測ホライズンtopicです。",
+    "output_mpc_predicted_horizon": "MPCがPure Pursuit fallbackへ渡す予測ホライズンtopicです。",
+    "param_file": "ノードへ読み込ませるYAMLパラメータファイルです。hybrid_control_muxでは切り替え条件と出力制限をまとめて指定します。",
+    "param_path": "overtake plannerへ読み込ませるパラメータYAMLのパスです。",
+    "horizon_points": "overtake plannerが出すoverride horizon点数のlaunch上書き値です。",
+    "wheel_base": "Pure Pursuitの操舵角計算に使うホイールベース[m]です。車両モデル値と合わせます。",
     "use_external_target_vel": "Pure Pursuitの目標速度をlaunch引数から指定するかどうかです。",
     "external_target_vel": "Pure Pursuitの外部指定目標速度です。hybrid fallback速度と連動します。",
+    "max_odom_age_sec": "Pure Pursuitがodometryをfreshとみなす最大時間[s]です。短いほど安全寄りですが停止しやすくなります。",
+    "max_trajectory_age_sec": "通常Trajectoryをfreshとみなす最大時間[s]です。Trajectory配信が低頻度なら広げます。",
+    "max_override_age_sec": "overtake reference overrideをfreshとみなす最大時間[s]です。planner周期より少し長めにします。",
+    "stop_on_stale_input": "入力がmissing/staleの時にPure Pursuitが停止指令を出すかどうかです。安全寄りならtrueです。",
+    "diagnostic_throttle_sec": "Pure Pursuitのstale警告ログを間引く周期[s]です。調査時は短め、通常時は長めにします。",
+    "use_mpc_predicted_horizon": "trueにするとMPC予測ホライズンを通常Trajectoryより優先し、その上でlookahead点を探します。",
+    "max_mpc_horizon_age_sec": "MPC予測ホライズンをfreshとみなす最大時間[s]です。MPC solveが遅い場合は0.30-0.50s程度まで広げる候補です。",
+    "min_mpc_horizon_points": "MPC予測ホライズンとして使う最小点数です。短すぎる予測をfallback追従に使わないための条件です。",
+    "max_mpc_horizon_start_distance_m": "MPC予測ホライズン先頭点と自車位置の許容距離[m]です。大きいほど古い/遠いhorizonも使いやすくなります。",
+    "min_mpc_horizon_arc_length_m": "MPC予測ホライズン全体に必要な最小弧長[m]です。短すぎてlookaheadが末端に張り付くのを防ぎます。",
     "use_overtake_reference_override": "Pure Pursuitが/overtake/reference_overrideを読み、fallback中も追い越し・追従の横オフセットと速度capを反映するかどうかです。",
     "input_overtake_reference_override": "Pure Pursuitへ渡すovertake plannerのreference override topicです。",
     "overtake_override_timeout_sec": "Pure Pursuit側でovertake reference overrideを新鮮とみなす最大時間[s]です。古い追い越し指令を使い続けないための上限です。",
     "lookahead_gain": "Pure Pursuitの速度比例lookahead係数です。大きいほど先を見て操舵します。",
     "lookahead_min_distance": "Pure Pursuitの最小lookahead距離[m]です。大きいほど操舵が穏やかになります。",
+    "curvature_adaptive_lookahead_enabled": "trueにすると経路曲率に応じてlookaheadを短くします。カーブで手前を見るための設定です。",
+    "curvature_lookahead_min_distance": "曲率適応後のlookahead下限[m]です。小さいほど鋭く曲がりますが操舵が急になります。",
+    "curvature_lookahead_sensitivity": "曲率に対するlookahead短縮感度です。大きいほどカーブで手前を見るようになります。",
+    "curvature_lookahead_window_ratio": "曲率を見る距離窓をbase lookaheadの何倍にするかです。大きいほど先のカーブも拾います。",
+    "curvature_lookahead_max_window_distance": "曲率評価に使う距離窓の上限[m]です。遠すぎるカーブへの過反応を抑えます。",
+    "curvature_lookahead_min_arc_length": "曲率計算に使う最小弧長[m]です。近すぎる点列やノイズの影響を抑えます。",
+    "curvature_lookahead_smoothing_alpha": "lookahead変化の平滑化係数です。1.0に近いほど即応、0.0に近いほど滑らかです。",
     "speed_proportional_gain": "Pure Pursuitの速度追従ゲインです。大きいほど目標速度へ強く合わせます。",
+    "steering_tire_angle_gain": "Pure Pursuitで計算した操舵角へ掛けるゲインです。大きいほど曲がりますが角度/rate limitに当たりやすくなります。",
 }
 
 CONTROL_DEFAULT_XMLS = [
@@ -237,6 +402,11 @@ CATALOG: dict[str, list[dict[str, str]]] = {
             "kind": "yaml",
         },
         {
+            "label": "Overtake permission profile",
+            "path": str(OVERTAKE_PERMISSION_CSV_PATH),
+            "kind": "csv",
+        },
+        {
             "label": "Overtake planner launch",
             "path": str(OVERTAKE_ROOT / "launch/overtake_planner.launch.xml"),
             "kind": "xml",
@@ -257,6 +427,11 @@ CATALOG: dict[str, list[dict[str, str]]] = {
             "label": "Overtake planner params",
             "path": str(OVERTAKE_ROOT / "config/overtake_planner.param.yaml"),
             "kind": "yaml",
+        },
+        {
+            "label": "Overtake permission profile",
+            "path": str(OVERTAKE_PERMISSION_CSV_PATH),
+            "kind": "csv",
         },
         {
             "label": "Overtake planner launch",
@@ -314,6 +489,11 @@ CATALOG: dict[str, list[dict[str, str]]] = {
             "label": "Overtake planner params",
             "path": str(OVERTAKE_ROOT / "config/overtake_planner.param.yaml"),
             "kind": "yaml",
+        },
+        {
+            "label": "Overtake permission profile",
+            "path": str(OVERTAKE_PERMISSION_CSV_PATH),
+            "kind": "csv",
         },
         {
             "label": "Overtake planner launch",
@@ -678,6 +858,42 @@ def parse_control_default() -> str:
     return "mpc"
 
 
+def is_overtake_permission_csv(path: str | Path) -> bool:
+    return str(rel_path(path)) == str(OVERTAKE_PERMISSION_CSV_PATH)
+
+
+def validate_overtake_permission_csv(content: str) -> None:
+    parsed_rows = list(csv.reader(content.splitlines()))
+    rows = list(csv.DictReader(content.splitlines()))
+    if not rows and not content.strip():
+        raise ValueError("overtake permission CSV is empty")
+    header = parsed_rows[0] if parsed_rows else []
+    if header != OVERTAKE_PERMISSION_COLUMNS:
+        expected = ",".join(OVERTAKE_PERMISSION_COLUMNS)
+        actual = ",".join(header) if header else "(empty)"
+        raise ValueError(f"overtake permission CSV header must be {expected}: got {actual}")
+    for index, row in enumerate(rows, start=2):
+        name = str(row.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"line {index}: name is required")
+        if "," in name or "\n" in name or "\r" in name:
+            raise ValueError(f"line {index}: name must not contain commas or newlines")
+        for column in ("start_wp", "end_wp"):
+            value = str(row.get(column, "")).strip()
+            if not re.fullmatch(r"-?\d+", value):
+                raise ValueError(f"line {index}: {column} must be an integer")
+        _csv_bool(str(row.get("allow_overtake", "")).strip(), f"line {index}: allow_overtake")
+
+
+def _csv_bool(value: str, label: str = "boolean") -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError(f"{label} must be true or false")
+
+
 def validate_content(path: str, content: str) -> None:
     suffix = rel_path(path).suffix.lower()
     if suffix in {".yaml", ".yml"}:
@@ -690,6 +906,8 @@ def validate_content(path: str, content: str) -> None:
         rows = list(csv.reader(content.splitlines()))
         if content.strip() and not rows:
             raise ValueError("CSV parse produced no rows")
+        if is_overtake_permission_csv(path):
+            validate_overtake_permission_csv(content)
 
 
 def structured_rows(path: str, content: str) -> dict[str, Any]:
@@ -703,6 +921,8 @@ def structured_rows(path: str, content: str) -> dict[str, Any]:
         rows = _xml_rows(content)
         enrich_row_descriptions(relative, "xml", rows)
         return {"kind": "xml", "rows": rows}
+    if suffix == ".csv":
+        return {"kind": "csv", "rows": _csv_rows(content)}
     return {"kind": "text", "rows": []}
 
 
@@ -713,8 +933,10 @@ def apply_structured_rows(path: str, content: str, rows: list[dict[str, Any]]) -
         updated = _apply_yaml_rows(content, rows)
     elif suffix == ".xml":
         updated = _apply_xml_rows(content, rows)
+    elif suffix == ".csv":
+        updated = _apply_csv_rows(content, rows)
     else:
-        raise ValueError("structured edit is only available for YAML and XML")
+        raise ValueError("structured edit is only available for YAML, XML, and CSV")
     validate_content(path, updated)
     descriptions_changed = save_row_descriptions(relative, rows)
     return {"content": updated, "descriptions_changed": descriptions_changed}
@@ -724,8 +946,30 @@ def enrich_row_descriptions(path: str, kind: str, rows: list[dict[str, Any]]) ->
     stored = read_descriptions().get(path, {})
     for row in rows:
         key = description_key(kind, row)
+        default = default_description(kind, row)
+        stored_description = stored.get(key)
         row["description_key"] = key
-        row["description"] = stored.get(key, default_description(kind, row))
+        row["description"] = preferred_description(stored_description, default)
+
+
+def preferred_description(stored_description: str | None, default: str) -> str:
+    if stored_description is None:
+        return default
+    stored_value = str(stored_description)
+    if is_generic_description(stored_value) and default and default != stored_value:
+        return default
+    return stored_value
+
+
+def is_generic_description(description: str) -> bool:
+    value = description.strip()
+    if value in GENERIC_DESCRIPTION_DEFAULTS:
+        return True
+    return bool(
+        re.match(r"^.+ の数値パラメータです。単位や効果が未整理なら、このdescription欄にメモして保存できます。$", value)
+        or re.match(r"^.+ の設定値です。意味や調整メモはこのdescription欄でGUIに保持できます。$", value)
+        or re.match(r"^.+ を有効/無効にするフラグです。$", value)
+    )
 
 
 def save_row_descriptions(path: str, rows: list[dict[str, Any]]) -> bool:
@@ -802,6 +1046,8 @@ def default_description(kind: str, row: dict[str, Any]) -> str:
         attrs = row.get("attrs") if isinstance(row.get("attrs"), dict) else {}
         tag = str(row.get("tag") or "")
         name = str(attrs.get("name") or "")
+        if tag == "param" and attrs.get("from"):
+            return "外部YAMLパラメータファイルを読み込む設定です。fromの参照先を変えると読み込む設定一式が変わります。"
         if name in DELAY_AWARE_XML_DEFAULTS:
             return DELAY_AWARE_XML_DEFAULTS[name]
         if tag == "arg":
@@ -918,6 +1164,81 @@ def _apply_yaml_rows(content: str, rows: list[dict[str, Any]]) -> str:
             updated = re.sub(r"^(\s*[^:#][^:]*?:\s*)(.*?)(\s+#.*)?$", lambda m: f"{m.group(1)}{new_value}{m.group(3) or ''}", body)
         lines[index - 1] = updated + newline
     return "".join(lines)
+
+
+def _csv_rows(content: str) -> list[dict[str, Any]]:
+    lines = content.splitlines()
+    if not lines:
+        return []
+    reader = csv.reader(lines)
+    try:
+        columns = [column.strip() for column in next(reader)]
+    except StopIteration:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line_no, values in enumerate(reader, start=2):
+        if not values or all(not str(value).strip() for value in values):
+            continue
+        fields = {
+            column: values[index].strip() if index < len(values) else ""
+            for index, column in enumerate(columns)
+        }
+        rows.append(
+            {
+                "id": f"csv:{line_no}",
+                "line": line_no,
+                "path": f"row[{len(rows)}]",
+                "fields": fields,
+                "field_order": columns,
+                "field_types": {column: _csv_value_type(fields.get(column, "")) for column in columns},
+                "editable": True,
+            }
+        )
+    return rows
+
+
+def _csv_value_type(value: str) -> str:
+    stripped = value.strip()
+    lowered = stripped.lower()
+    if lowered in {"true", "false"}:
+        return "bool"
+    if re.fullmatch(r"-?\d+", stripped):
+        return "int"
+    if re.fullmatch(r"-?(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|-?\d+[eE][+-]?\d+", stripped):
+        return "float"
+    return "str"
+
+
+def _apply_csv_rows(content: str, rows: list[dict[str, Any]]) -> str:
+    existing_lines = content.splitlines()
+    columns: list[str] = []
+    if existing_lines:
+        try:
+            columns = [column.strip() for column in next(csv.reader(existing_lines))]
+        except StopIteration:
+            columns = []
+    if not columns:
+        for row in rows:
+            field_order = row.get("field_order")
+            if isinstance(field_order, list) and field_order:
+                columns = [str(column) for column in field_order]
+                break
+            fields = row.get("fields")
+            if isinstance(fields, dict) and fields:
+                columns = [str(column) for column in fields.keys()]
+                break
+    if not columns:
+        raise ValueError("CSV header is required for structured edit")
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n", extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        fields = row.get("fields")
+        if not isinstance(fields, dict):
+            continue
+        writer.writerow({column: str(fields.get(column, "")) for column in columns})
+    return output.getvalue()
 
 
 def _xml_rows(content: str) -> list[dict[str, Any]]:

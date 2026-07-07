@@ -35,7 +35,7 @@ tools/run_tuning_gui.bash --restart
 - テーブルには編集可能な `description` 列があります。説明文は `tools/tuning_gui/.state/parameter_descriptions.json` に保存される GUI メタデータで、YAML/XML のコメントには書き込まれません。
 - XML ファイルは要素ごとに1行で表示され、`name`、`default`、`value`、`to`、`from`、`args`、`file` などのよく使う編集可能属性が列にまとめられます。
 - テーブルセルを編集して保存すると、GUI は検証前にテーブルの変更をファイル本文へ反映します。
-- CSV ファイル、コメント、YAML/XML の構造的な編集、大きな手動変更には、引き続きテキスト編集モードを使えます。
+- CSV ファイル、コメント、YAML/XML の構造的な編集、大きな手動変更には、引き続きテキスト編集モードを使えます。ただし `Overtake permission profile` は専用の表編集で区間と `allow_overtake` を変更できます。
 - `Path Editor` は現在有効な MPC 参照経路を占有グリッドマップ上で開きます。経路点の移動、追加、削除、平滑化を行い、再計算した `s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps2` CSV として保存できます。
 - 経路平滑化は点数を維持し、保存前に近傍平均のパスを適用します。`undo` は直前の平滑化操作前の点列に戻します。
 - `move` モードでは、マップ上の空白部分をドラッグして矩形で点を選択します。選択済みの緑色の点または選択済みセグメントをドラッグすると、選択範囲全体をまとめて移動できます。マップのパンには中クリック、Alt ドラッグ、Shift ドラッグを使えます。
@@ -49,7 +49,7 @@ tools/run_tuning_gui.bash --restart
 - `追加Autoware車両` は自車以外に起動する追加Autoware台数です。通常 `dev` では `0台` が `make dev`、`1台`〜`3台` が `make dev2`〜`make dev4` に対応します。`AWSIMヘッドレス` の場合も同じターゲットを使い、AWSIMの車両数は通常通り `dev2`〜`dev4` 側で指定されます。
 - ヘッダーの `Run Settings` から `Simulator`、`Safety Gate`、`Multiplay` の設定を開けます。
 - `Safety Gate` の `gate` ボタンは `make gate1`〜`make gate3` を呼び出し、AWSIMの `SafetyGate/scenario*.yaml` を使って障害物停止、追い越し、車線維持のシナリオを実行します。
-- `control_method` が `mpc`、`delay_aware_mpc`、`hybrid_delay_aware_mpc` のとき、Files に `Overtake planner params` が出ます。`side_yield_s_m`、`side_margin_m`、`yield_speed_margin_mps` などの追い抜き・横並び設定を表編集で変更できます。
+- `control_method` が `mpc`、`delay_aware_mpc`、`hybrid_delay_aware_mpc` のとき、Files に `Overtake planner params` と `Overtake permission profile` が出ます。`Overtake permission profile` では `name`、`start_wp`、`end_wp`、`allow_overtake` を表編集でき、行追加・削除もできます。
 - `control_method` が `hybrid_delay_aware_mpc` のとき、Files に `Hybrid delay-aware MPC launch params`、`Hybrid control mux params`、`Hybrid control mux launch`、`Pure Pursuit launch params` が出ます。MPC infeasible時のPure Pursuit fallback速度、追い越しoverride連携、切り替え閾値、復帰条件、timeoutを表編集で変更できます。
 - `Simulator` の各項目は `AWSIM_EXTRA_ARGS` や `AWSIM_START_MODE` / `AWSIM_LAPS` / `AWSIM_TIMEOUT` としてAWSIM起動オプションへ変換されます。
 - `raw args` はGUIやlaunchが管理する `--camera`、`--laps`、`--scenario` などと重複すると起動前にエラーになります。

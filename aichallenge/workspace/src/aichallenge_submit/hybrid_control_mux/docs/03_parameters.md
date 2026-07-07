@@ -22,13 +22,13 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/co
 | --- | --- | --- |
 | `enabled` | `true` | hybrid control mux の切り替え処理を有効にする。false の場合は MPC が fresh なら MPC、そうでなければ stop を出す |
 | `control_rate_hz` | `50.0` | mux が出力判定を行う周期 |
-| `mpc_cmd_timeout_sec` | `0.06` | MPC 指令を fresh とみなす最大時間 |
+| `mpc_cmd_timeout_sec` | `0.12` | MPC 指令を fresh とみなす最大時間 |
 | `pure_pursuit_cmd_timeout_sec` | `0.20` | Pure Pursuit 指令を fresh とみなす最大時間 |
 | `mpc_health_timeout_sec` | `0.75` | MPC health を有効とみなす最大時間 |
 | `fallback_trigger_infeasible_count` | `1` | Pure Pursuit へ切り替えるために必要な連続 infeasible 回数 |
 | `fallback_release_solved_cycles` | `3` | MPC へ復帰するために必要な連続 solved 回数 |
 | `fallback_min_hold_sec` | `1.0` | Pure Pursuit フォールバックを最低限維持する時間 |
-| `fallback_speed_mps` | `9.5` | フォールバック中の速度上限 |
+| `fallback_speed_mps` | `10.0` | フォールバック中の速度上限 |
 | `fallback_accel_max_mps2` | `1.3` | フォールバック中の加速度上限 |
 | `fallback_decel_min_mps2` | `-1.5` | フォールバック中の減速度下限 |
 | `stop_decel_mps2` | `-1.5` | stop 指令を出すときの加速度 |
@@ -36,7 +36,7 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/co
 | `use_pure_pursuit_on_mpc_health_timeout` | `false` | MPC health が timeout したときに Pure Pursuit へ切り替える |
 | `debug_publish_period_sec` | `0.25` | debug JSON を publish する周期 |
 | `enable_steering_rate_limit` | `true` | 最終出力の操舵角レート制限を有効にする |
-| `max_steering_angle_rad` | `0.5585053606381855` | 最終出力の操舵角上限 [rad] |
+| `max_steering_angle_rad` | `1.708` | 最終出力の操舵角上限 [rad] |
 | `max_steering_rate_radps` | `8.0` | 最終出力の操舵角変化率上限 [rad/s] |
 | `max_steering_delta_per_cycle` | `0.0` | 1周期あたりの追加操舵変化量上限 [rad]。0以下なら無効 |
 | `steering_limiter_reset_dt_sec` | `0.50` | 前回出力からこの時間を超えたら操舵レート制限をリセットする |
@@ -81,7 +81,7 @@ MPC 指令がこの時間以上届かない場合、MPC 指令は古いとみな
 - 小さくすると、MPC の遅れに敏感になる
 - 大きくすると、多少遅れても MPC を使い続ける
 
-制御周期に対して短すぎると、正常な publish 揺らぎでも timeout する可能性があります。
+制御周期に対して短すぎると、正常な publish 揺らぎでも timeout する可能性があります。`0.12` は、MPC の通常 solve が 60ms を超える場面でも即座に Pure Pursuit へ落ちすぎないようにした値です。
 
 ### `pure_pursuit_cmd_timeout_sec`
 

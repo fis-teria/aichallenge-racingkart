@@ -100,6 +100,8 @@ public:
         declare_parameter<bool>("use_yaw_rate_fallback", true);
     use_command_history_fallback_ =
         declare_parameter<bool>("use_command_history_fallback", true);
+    input_control_cmd_raw_topic_ = declare_parameter<std::string>(
+        "input_control_cmd_raw_topic", "/control/command/control_cmd_raw");
     min_velocity_for_yaw_prediction_ =
         declare_parameter<double>("min_velocity_for_yaw_prediction", 0.20);
     debug_publish_period_sec_ =
@@ -121,7 +123,7 @@ public:
         });
     command_sub_ = create_subscription<
         autoware_auto_control_msgs::msg::AckermannControlCommand>(
-        "/control/command/control_cmd_raw", rclcpp::QoS(1),
+        input_control_cmd_raw_topic_, rclcpp::QoS(1),
         [this](const autoware_auto_control_msgs::msg::AckermannControlCommand::
                    ConstSharedPtr msg) { on_control_command(msg); });
     steering_sub_ =
@@ -132,8 +134,9 @@ public:
 
     RCLCPP_INFO(
         get_logger(),
-        "delay-aware odometry mode=%s delay=%.3fs dt=%.3fs wheelbase=%.3fm",
-        mode_.c_str(), steering_delay_sec_, prediction_dt_, wheelbase_);
+        "delay-aware odometry mode=%s delay=%.3fs dt=%.3fs wheelbase=%.3fm raw_cmd=%s",
+        mode_.c_str(), steering_delay_sec_, prediction_dt_, wheelbase_,
+        input_control_cmd_raw_topic_.c_str());
   }
 
 private:
@@ -158,6 +161,9 @@ private:
     steering_time_constant_sec_ = std::max(1.0e-3, steering_time_constant_sec_);
     wheelbase_ = std::max(1.0e-3, wheelbase_);
     steering_status_timeout_sec_ = std::max(0.0, steering_status_timeout_sec_);
+    if (input_control_cmd_raw_topic_.empty()) {
+      input_control_cmd_raw_topic_ = "/control/command/control_cmd_raw";
+    }
     min_velocity_for_yaw_prediction_ =
         std::max(1.0e-3, min_velocity_for_yaw_prediction_);
     debug_publish_period_sec_ = std::max(0.0, debug_publish_period_sec_);
@@ -377,6 +383,7 @@ private:
   double steering_status_timeout_sec_{};
   bool use_yaw_rate_fallback_{};
   bool use_command_history_fallback_{};
+  std::string input_control_cmd_raw_topic_;
   double min_velocity_for_yaw_prediction_{};
   double debug_publish_period_sec_{};
 

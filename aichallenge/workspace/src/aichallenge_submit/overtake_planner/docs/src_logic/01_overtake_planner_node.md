@@ -67,6 +67,19 @@ indexが範囲外なら `std::nullopt` を返し、そのruleは後段でskipさ
 
 `s` 指定があればそれを使い、なければwp indexから `s` へ変換します。
 
+## `readOvertakePermissionRules()`
+
+`config/overtake_permission.csv` を読み、`OvertakePermissionRule` の配列へ変換します。
+CSVは次の4列です。
+
+```csv
+name,start_wp,end_wp,allow_overtake
+```
+
+`start_wp/end_wp` は参照線の `s` に変換されます。
+`allow_overtake=false` の区間では、通常は追い越し開始せず `FOLLOW_BLOCKED` を維持します。
+停止/低速の前方車だけは、Core側の `slow_front_exception_*` 条件を満たすと例外的にPASS開始できます。
+
 ## `updateMpcHealth()`
 
 MPC debug JSONから `mpc_infeasible_count` と `mpc_solve_time_ms` を読み、`MpcHealthStatus` として保持します。
@@ -171,4 +184,3 @@ else
 ## `main()`
 
 ROSを初期化し、`OvertakePlannerNode` をspinします。
-

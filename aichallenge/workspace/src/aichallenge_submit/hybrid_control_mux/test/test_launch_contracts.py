@@ -26,12 +26,24 @@ def test_pure_pursuit_launch_wires_timing_and_vehicle_geometry():
     assert params["use_mpc_predicted_horizon"] == "$(var use_mpc_predicted_horizon)"
     assert params["max_mpc_horizon_age_sec"] == "$(var max_mpc_horizon_age_sec)"
     assert params["min_mpc_horizon_points"] == "$(var min_mpc_horizon_points)"
+    assert params["pp_control_delay_sec"] == "$(var pp_control_delay_sec)"
+    assert params["steering_time_constant_sec"] == "$(var steering_time_constant_sec)"
+    assert params["steering_status_timeout_sec"] == "$(var steering_status_timeout_sec)"
+    assert (
+        params["min_velocity_for_delay_compensation_mps"]
+        == "$(var min_velocity_for_delay_compensation_mps)"
+    )
+    assert (
+        params["horizon_curvature_feedforward_gain"]
+        == "$(var horizon_curvature_feedforward_gain)"
+    )
 
     remaps = {
         element.attrib.get("from"): element.attrib.get("to")
         for element in root.iter("remap")
     }
     assert remaps["input/mpc_predicted_horizon"] == "$(var input_mpc_predicted_horizon)"
+    assert remaps["input/steering_status"] == "$(var input_steering_status)"
 
 
 def test_pure_pursuit_launch_uses_mpc_consistent_steering_gain():
@@ -43,6 +55,16 @@ def test_pure_pursuit_launch_uses_mpc_consistent_steering_gain():
     ]
 
     assert steering_gain_values == ["1.639", "1.639"]
+
+
+def test_delay_aware_mpc_launch_wires_raw_command_history_input():
+    root = _parse_launch("aichallenge_submit_launch/launch/control/delay_aware_mpc.launch.xml")
+    params = {
+        element.attrib.get("name"): element.attrib.get("value")
+        for element in root.iter("param")
+    }
+
+    assert params["input_control_cmd_raw_topic"] == "$(var input_control_cmd_raw)"
 
 
 def test_hybrid_delay_aware_mpc_explicitly_passes_pure_pursuit_wheel_base():
@@ -94,6 +116,11 @@ def test_hybrid_delay_aware_mpc_wires_mpc_horizon_to_pure_pursuit():
     }
 
     assert delay_args["output_mpc_predicted_horizon"] == "/hybrid_control/mpc/predicted_horizon"
+    assert delay_args["input_control_cmd_raw"] == "/hybrid_control/mpc/control_cmd_raw"
     assert pp_args["input_mpc_predicted_horizon"] == "/hybrid_control/mpc/predicted_horizon"
+    assert pp_args["input_steering_status"] == "/vehicle/status/steering_status"
     assert pp_args["use_mpc_predicted_horizon"] == "true"
     assert pp_args["max_mpc_horizon_age_sec"] == "0.15"
+    assert pp_args["pp_control_delay_sec"] == "0.0"
+    assert pp_args["steering_time_constant_sec"] == "0.30"
+    assert pp_args["horizon_curvature_feedforward_gain"] == "0.0"

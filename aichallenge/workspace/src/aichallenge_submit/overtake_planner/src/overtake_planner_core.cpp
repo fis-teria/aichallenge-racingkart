@@ -132,6 +132,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     // 自車状態や参照線が無いとFrenet判断ができないので、何も介入しない。
     mode_ = BehaviorMode::FREE_RUN;
     safe_stop_trigger_count_ = 0;
+    slow_front_exception_count_ = 0;
     last_published_lateral_offsets_.clear();
     last_published_lateral_target_sec_ =
         std::numeric_limits<double>::quiet_NaN();
@@ -148,11 +149,41 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   }
 
   const ActiveSectionSafety active_section = activeSectionSafety(ego.frenet.s);
+  const ActiveOvertakePermission active_overtake_permission =
+      activeOvertakePermission(ego.frenet.s);
   const double wall_soft_margin = effectiveWallSoftMargin(active_section);
   BlockedInfo blocked = blocked_risk_.detectBlocked(ego, opponents, now_sec);
   const auto predictions = predictOpponents(opponents, now_sec);
   blocked =
       blocked_risk_.evaluatePassGap(blocked, opponents, predictions, mode_);
+  blocked.overtake_permission_allowed =
+      !config_.overtake_permission_profile_enabled ||
+      active_overtake_permission.allow_overtake;
+  blocked.overtake_permission_section_name = active_overtake_permission.name;
+  if (!config_.overtake_permission_profile_enabled) {
+    blocked.overtake_permission_reason = "permission_profile_disabled";
+  } else if (active_overtake_permission.active) {
+    blocked.overtake_permission_reason =
+        active_overtake_permission.allow_overtake ? "section_allowed"
+                                                  : "section_disallowed";
+  } else {
+    blocked.overtake_permission_reason =
+        config_.default_overtake_allowed ? "default_allowed"
+                                         : "default_disallowed";
+  }
+  blocked.front_vehicle_low_speed =
+      config_.slow_front_exception_enabled && blocked.nearest_index >= 0 &&
+      std::isfinite(blocked.front_vehicle_speed_mps) &&
+      blocked.front_vehicle_speed_mps <=
+          std::max(0.0, config_.slow_front_exception_speed_mps) &&
+      blocked.front_delta_s <=
+          std::max(0.0, config_.slow_front_exception_distance_m);
+  blocked.slow_front_exception_active = updateSlowFrontException(blocked);
+  blocked.slow_front_exception_count = slow_front_exception_count_;
+  if (!blocked.overtake_permission_allowed &&
+      blocked.slow_front_exception_active) {
+    blocked.overtake_permission_reason = "slow_front_exception";
+  }
   blocked.corner_abs_curvature =
       maxAbsCurvatureAhead(ego.frenet.s, config_.corner_side_yield_lookahead_m);
   blocked.corner_side_by_side =
@@ -182,6 +213,19 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     }
   } else {
     straight_overtake_start_allowed_ = true;
+  }
+  const bool permission_start_allowed =
+      blocked.overtake_permission_allowed ||
+      blocked.slow_front_exception_active;
+  if (!permission_start_allowed) {
+    straight_overtake_start_allowed_ = false;
+    blocked.straight_overtake_start_allowed = false;
+    if (blocked.overtake_start_gate_reason.empty()) {
+      blocked.overtake_start_gate_reason =
+          blocked.overtake_permission_reason.empty()
+              ? "section_disallowed"
+              : blocked.overtake_permission_reason;
+    }
   }
   blocked.ego_lateral_offset_m = ego.frenet.d;
   blocked.ego_speed_mps = ego.v;
@@ -494,6 +538,12 @@ OvertakePlannerCore::candidateScore(const CandidateTrajectory &candidate,
   case CandidateType::PASS_LEFT:
   case CandidateType::PASS_RIGHT:
     score = blocked_info.side_by_side ? 200.0 : -10.0;
+    if (mode_ == BehaviorMode::FOLLOW_BLOCKED &&
+        blocked_info.straight_overtake_start_allowed &&
+        blocked_info.blocked && !blocked_info.side_by_side &&
+        !blocked_info.future_yield_required) {
+      score -= 1.0;
+    }
     break;
   case CandidateType::RECOVERY:
     score = 40.0;
@@ -587,8 +637,63 @@ ActiveSectionSafety OvertakePlannerCore::activeSectionSafety(double s) const {
   return active;
 }
 
+ActiveOvertakePermission
+OvertakePlannerCore::activeOvertakePermission(double s) const {
+  ActiveOvertakePermission current = overtakePermissionAtS(s);
+  if (!config_.overtake_permission_profile_enabled ||
+      config_.overtake_permission_lookahead_m <= 0.0) {
+    return current;
+  }
+
+  const int sample_count = 8;
+  const double ds = config_.overtake_permission_lookahead_m /
+                    static_cast<double>(sample_count);
+  for (int i = 1; i <= sample_count; ++i) {
+    const auto ahead =
+        overtakePermissionAtS(s + ds * static_cast<double>(i));
+    if (!ahead.allow_overtake) {
+      return ahead;
+    }
+  }
+  return current;
+}
+
+ActiveOvertakePermission
+OvertakePlannerCore::overtakePermissionAtS(double s) const {
+  ActiveOvertakePermission active;
+  active.allow_overtake = config_.default_overtake_allowed;
+  if (!config_.overtake_permission_profile_enabled) {
+    active.allow_overtake = true;
+    return active;
+  }
+  for (const auto &rule : config_.overtake_permission_rules) {
+    if (!permissionRuleContainsS(rule, s)) {
+      continue;
+    }
+    active.active = true;
+    active.name = rule.name;
+    active.allow_overtake = rule.allow_overtake;
+    return active;
+  }
+  return active;
+}
+
 bool OvertakePlannerCore::sectionContainsS(const SectionSafetyRule &rule,
                                            double s) const {
+  if (frame_.empty()) {
+    return false;
+  }
+  const double start = frame_.wrapS(rule.s_start_m);
+  const double end = frame_.wrapS(rule.s_end_m);
+  const double wrapped_s = frame_.wrapS(s);
+  if (start <= end) {
+    return wrapped_s >= start && wrapped_s <= end;
+  }
+  return wrapped_s >= start || wrapped_s <= end;
+}
+
+bool OvertakePlannerCore::permissionRuleContainsS(
+    const OvertakePermissionRule &rule, double s) const {
   if (frame_.empty()) {
     return false;
   }
@@ -605,6 +710,18 @@ double OvertakePlannerCore::effectiveWallSoftMargin(
     const ActiveSectionSafety &section) const {
   const double base = std::max(0.0, config_.wall_soft_margin_m);
   return base * std::max(1.0, section.wall_margin_scale);
+}
+
+bool OvertakePlannerCore::updateSlowFrontException(
+    const BlockedInfo &blocked) {
+  if (!config_.slow_front_exception_enabled || !blocked.front_vehicle_low_speed) {
+    slow_front_exception_count_ = 0;
+    return false;
+  }
+  ++slow_front_exception_count_;
+  const int required_cycles =
+      std::max(1, config_.slow_front_exception_required_cycles);
+  return slow_front_exception_count_ >= required_cycles;
 }
 
 bool OvertakePlannerCore::shouldSuppressSafeStopForStartGrace(

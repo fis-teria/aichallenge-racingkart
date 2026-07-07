@@ -20,6 +20,7 @@ delay_aware_mpc:
   steering_status_timeout_sec: 0.20
   use_yaw_rate_fallback: true
   use_command_history_fallback: true
+  input_control_cmd_raw_topic: "/control/command/control_cmd_raw"
   min_velocity_for_yaw_prediction: 0.20
   publish_debug_topics: true
   debug_publish_period_sec: 0.25

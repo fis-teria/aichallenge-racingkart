@@ -42,8 +42,13 @@ private:
   // 横並び中に近い先の曲率を見て、カーブで横へ押し出す判断を抑える。
   double maxAbsCurvatureAhead(double s, double lookahead_m) const;
   ActiveSectionSafety activeSectionSafety(double s) const;
+  ActiveOvertakePermission activeOvertakePermission(double s) const;
+  ActiveOvertakePermission overtakePermissionAtS(double s) const;
   bool sectionContainsS(const SectionSafetyRule &rule, double s) const;
+  bool permissionRuleContainsS(const OvertakePermissionRule &rule,
+                               double s) const;
   double effectiveWallSoftMargin(const ActiveSectionSafety &section) const;
+  bool updateSlowFrontException(const BlockedInfo &blocked);
   bool shouldSuppressSafeStopForStartGrace(double now_sec,
                                            const EgoState &ego,
                                            const BlockedInfo &blocked) const;
@@ -65,6 +70,7 @@ private:
   BehaviorMode mode_{BehaviorMode::FREE_RUN};
   double first_valid_update_sec_{std::numeric_limits<double>::quiet_NaN()};
   int safe_stop_trigger_count_{0};
+  int slow_front_exception_count_{0};
   bool straight_overtake_start_allowed_{true};
   std::vector<double> last_published_lateral_offsets_;
   double last_published_lateral_target_sec_{

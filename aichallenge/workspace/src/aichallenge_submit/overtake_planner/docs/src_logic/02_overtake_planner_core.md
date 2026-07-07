@@ -109,6 +109,7 @@ Coreから見ると「候補種別を指定して、候補軌道を1本作る」
 - future yieldやcorner side-by-sideでは `YIELD_BEHIND` を優先。
 - 通常の前方閉塞では `PASS_LEFT/RIGHT` を狙う。
 - 現在modeに沿う候補は `keep_mode_bonus` で少し優遇する。
+- `FOLLOW_BLOCKED` 中に追い越し開始ゲートが開いた場合は、安全な `PASS_LEFT/RIGHT` を少しだけ優先し、禁止区間やカーブ後に追従へ張り付かないようにする。
 
 ## `maxAbsCurvatureAhead()`
 
@@ -125,10 +126,22 @@ Coreから見ると「候補種別を指定して、候補軌道を1本作る」
 現在の `s` がsection safety ruleに入っているかを見ます。
 一致したruleのprofileから、壁余裕scale、速度cap scale、outer yield強制などを作ります。
 
+## `activeOvertakePermission()`
+
+現在の `s` と `overtake_permission_lookahead_m` 先までを見て、新規追い越し開始を許可する区間かを判定します。
+`config/overtake_permission.csv` の `allow_overtake=false` に入ると、PASS候補が安全でも状態機械は `FOLLOW_BLOCKED` を維持します。
+
+低速前方車例外はこの後段で評価され、停止/低速車が近距離で連続検出された場合だけ `slow_front_exception_active=true` として不可区間でもPASS開始を許します。
+
 ## `sectionContainsS()`
 
 閉ループコース上で、`s` がsection範囲内かを判定します。
 startがendをまたぐ区間にも対応します。
+
+## `permissionRuleContainsS()`
+
+`OvertakePermissionRule` 用の区間判定です。
+`sectionContainsS()` と同じく、最終区間のようにstartがendをまたぐwrap-around範囲にも対応します。
 
 ## `effectiveWallSoftMargin()`
 
@@ -165,4 +178,3 @@ SAFE_STOPでは止める意図を優先し、このrate limitはかけません�
 
 1. feasible候補があるならfeasible候補だけでscore最小を選ぶ。
 2. 全部infeasibleなら、診断用にscore最小のinfeasible候補を返す。
-

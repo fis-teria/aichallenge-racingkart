@@ -1604,6 +1604,98 @@ TEST(OvertakePlannerCore, CurvedRoadStraightOnlyGatePreventsPassStart) {
   EXPECT_TRUE(output.active_override);
 }
 
+TEST(OvertakePlannerCore, OvertakePermissionDisallowedSectionKeepsFollow) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.overtake_permission_profile_enabled = true;
+  config.overtake_permission_lookahead_m = 0.0;
+  config.slow_front_exception_enabled = false;
+  config.overtake_permission_rules.push_back(
+      overtake_planner::OvertakePermissionRule{"slow_corner", 0.0, 20.0, false});
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent = makeOpponent(frame, 13.0, -0.6);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_TRUE(output.blocked_info.can_pass_left);
+  EXPECT_FALSE(output.blocked_info.overtake_permission_allowed);
+  EXPECT_EQ(output.blocked_info.overtake_permission_section_name,
+            "slow_corner");
+  EXPECT_EQ(output.blocked_info.overtake_permission_reason,
+            "section_disallowed");
+  EXPECT_FALSE(output.blocked_info.straight_overtake_start_allowed);
+  EXPECT_EQ(output.blocked_info.overtake_start_gate_reason,
+            "section_disallowed");
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::FOLLOW);
+}
+
+TEST(OvertakePlannerCore, SlowFrontExceptionAllowsPassInDisallowedSection) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.overtake_permission_profile_enabled = true;
+  config.overtake_permission_lookahead_m = 0.0;
+  config.slow_front_exception_enabled = true;
+  config.slow_front_exception_speed_mps = 1.0;
+  config.slow_front_exception_distance_m = 8.5;
+  config.slow_front_exception_required_cycles = 2;
+  config.overtake_permission_rules.push_back(
+      overtake_planner::OvertakePermissionRule{"slow_corner", 0.0, 20.0, false});
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto stopped_opponent = makeOpponent(frame, 13.0, -0.7);
+  stopped_opponent.vx = 0.0;
+  stopped_opponent.v = 0.0;
+
+  const auto first = core.update(0.1, ego, {stopped_opponent});
+  EXPECT_FALSE(first.blocked_info.slow_front_exception_active);
+  EXPECT_FALSE(first.blocked_info.straight_overtake_start_allowed);
+  EXPECT_EQ(first.mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+
+  const auto second = core.update(0.2, ego, {stopped_opponent});
+  EXPECT_TRUE(second.blocked_info.front_vehicle_low_speed);
+  EXPECT_TRUE(second.blocked_info.slow_front_exception_active);
+  EXPECT_EQ(second.blocked_info.slow_front_exception_count, 2);
+  EXPECT_FALSE(second.blocked_info.overtake_permission_allowed);
+  EXPECT_EQ(second.blocked_info.overtake_permission_reason,
+            "slow_front_exception");
+  EXPECT_TRUE(second.blocked_info.straight_overtake_start_allowed);
+  EXPECT_TRUE(second.blocked_info.overtake_start_gate_reason.empty());
+  EXPECT_EQ(second.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+  EXPECT_EQ(second.selected, overtake_planner::CandidateType::PASS_LEFT);
+}
+
+TEST(OvertakePlannerCore, OvertakePermissionLookaheadPreventsPassStart) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.overtake_permission_profile_enabled = true;
+  config.overtake_permission_lookahead_m = 8.0;
+  config.slow_front_exception_enabled = false;
+  config.overtake_permission_rules.push_back(
+      overtake_planner::OvertakePermissionRule{"next_slow_corner", 12.0, 20.0,
+                                               false});
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent = makeOpponent(frame, 13.0, -0.6);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_FALSE(output.blocked_info.overtake_permission_allowed);
+  EXPECT_EQ(output.blocked_info.overtake_permission_section_name,
+            "next_slow_corner");
+  EXPECT_FALSE(output.blocked_info.straight_overtake_start_allowed);
+  EXPECT_EQ(output.blocked_info.overtake_start_gate_reason,
+            "section_disallowed");
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+}
+
 TEST(OvertakePlannerCore, StraightOnlyGateReopensAfterHysteresisClears) {
   const auto frame = makeStraightGateHysteresisFrame();
   auto config = makeConfig();

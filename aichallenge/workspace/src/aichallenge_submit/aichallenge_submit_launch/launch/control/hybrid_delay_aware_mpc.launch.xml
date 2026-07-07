@@ -4,7 +4,7 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="use_obstacle_avoidance" default="true"/>
   <arg name="use_overtake_planner" default="true"/>
-  <arg name="fallback_speed_mps" default="9.5"/>
+  <arg name="fallback_speed_mps" default="10.0"/>
 
   <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/delay_aware_mpc.launch.xml">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
@@ -13,6 +13,7 @@
     <arg name="output_control_cmd" value="/hybrid_control/mpc/control_cmd"/>
     <arg name="output_raw_control_cmd" value="/hybrid_control/mpc/control_cmd_raw"/>
     <arg name="output_mpc_predicted_horizon" value="/hybrid_control/mpc/predicted_horizon"/>
+    <arg name="input_control_cmd_raw" value="/hybrid_control/mpc/control_cmd_raw"/>
   </include>
 
   <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">
@@ -20,6 +21,7 @@
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
     <arg name="input_mpc_predicted_horizon" value="/hybrid_control/mpc/predicted_horizon"/>
+    <arg name="input_steering_status" value="/vehicle/status/steering_status"/>
     <arg name="output_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd"/>
     <arg name="output_raw_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd_raw"/>
     <arg name="wheel_base" value="1.087"/>
@@ -41,6 +43,13 @@
     <arg name="curvature_lookahead_max_window_distance" value="10.0"/>
     <arg name="curvature_lookahead_min_arc_length" value="1.0"/>
     <arg name="curvature_lookahead_smoothing_alpha" value="0.35"/>
+    <arg name="pp_control_delay_sec" value="0.0"/>
+    <arg name="pp_prediction_dt_sec" value="0.02"/>
+    <arg name="steering_time_constant_sec" value="0.30"/>
+    <arg name="steering_status_timeout_sec" value="0.20"/>
+    <arg name="min_velocity_for_delay_compensation_mps" value="0.20"/>
+    <arg name="horizon_curvature_feedforward_gain" value="0.0"/>
+    <arg name="horizon_curvature_feedforward_max_rad" value="0.08"/>
     <arg name="speed_proportional_gain" value="0.8"/>
   </include>
 
