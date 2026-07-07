@@ -1,4 +1,5 @@
 #include "simple_pure_pursuit/lookahead.hpp"
+#include "simple_pure_pursuit/safety.hpp"
 
 #include <geometry_msgs/msg/quaternion.hpp>
 #include <gtest/gtest.h>
@@ -7,6 +8,7 @@
 
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace {
 
@@ -240,4 +242,101 @@ TEST(Lookahead, InvalidAndShortTrajectoryFallsBackToZeroCurvature) {
   EXPECT_NEAR(simple_pure_pursuit::estimateTrajectoryCurvature(
                   repeated_trajectory, 0, 5, 0.5),
               0.0, 1.0e-9);
+}
+
+TEST(Safety, MissingInputsAreInvalid) {
+  const auto result =
+      simple_pure_pursuit::evaluateRequiredInputFreshness(
+          std::nullopt, std::nullopt, 10.0, 0.2, 0.5);
+
+  EXPECT_FALSE(result.fresh);
+  EXPECT_EQ(result.reason, "missing_odom");
+}
+
+TEST(Safety, StaleOdometryIsInvalid) {
+  const auto result =
+      simple_pure_pursuit::evaluateRequiredInputFreshness(
+          9.0, 9.9, 10.0, 0.2, 0.5);
+
+  EXPECT_FALSE(result.fresh);
+  EXPECT_EQ(result.reason, "stale_odom");
+  EXPECT_NEAR(result.ages.odom_age_sec, 1.0, 1.0e-9);
+}
+
+TEST(Safety, StaleTrajectoryIsInvalid) {
+  const auto result =
+      simple_pure_pursuit::evaluateRequiredInputFreshness(
+          9.9, 9.0, 10.0, 0.2, 0.5);
+
+  EXPECT_FALSE(result.fresh);
+  EXPECT_EQ(result.reason, "stale_trajectory");
+  EXPECT_NEAR(result.ages.trajectory_age_sec, 1.0, 1.0e-9);
+}
+
+TEST(Safety, FreshInputsAreValid) {
+  const auto result =
+      simple_pure_pursuit::evaluateRequiredInputFreshness(
+          9.9, 9.7, 10.0, 0.2, 0.5);
+
+  EXPECT_TRUE(result.fresh);
+  EXPECT_EQ(result.reason, "fresh");
+  EXPECT_NEAR(result.ages.odom_age_sec, 0.1, 1.0e-9);
+  EXPECT_NEAR(result.ages.trajectory_age_sec, 0.3, 1.0e-9);
+}
+
+TEST(Safety, NegativeMaxAgeDisablesThatFreshnessCheck) {
+  const auto result =
+      simple_pure_pursuit::evaluateRequiredInputFreshness(
+          1.0, 1.0, 10.0, -1.0, -1.0);
+
+  EXPECT_TRUE(result.fresh);
+}
+
+TEST(Safety, DisabledMpcHorizonIsRejected) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonFreshness(
+      false, 9.99, 10.0, 0.15, 20, 5, 0.1, 2.0, 6.0, 2.0, true, true);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "disabled");
+}
+
+TEST(Safety, StaleMpcHorizonIsRejected) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonFreshness(
+      true, 9.0, 10.0, 0.15, 20, 5, 0.1, 2.0, 6.0, 2.0, true, true);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "stale");
+}
+
+TEST(Safety, ShortMpcHorizonIsRejected) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonFreshness(
+      true, 9.99, 10.0, 0.15, 2, 5, 0.1, 2.0, 6.0, 2.0, true, true);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "short");
+}
+
+TEST(Safety, FarMpcHorizonStartIsRejected) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonFreshness(
+      true, 9.99, 10.0, 0.15, 20, 5, 3.0, 2.0, 6.0, 2.0, true, true);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "start_distance");
+}
+
+TEST(Safety, ShortArcMpcHorizonIsRejected) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonFreshness(
+      true, 9.99, 10.0, 0.15, 20, 5, 0.1, 2.0, 1.0, 2.0, true, true);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "short_arc");
+}
+
+TEST(Safety, FreshMpcHorizonIsUsable) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonFreshness(
+      true, 9.99, 10.0, 0.15, 20, 5, 0.1, 2.0, 6.0, 2.0, true, true);
+
+  EXPECT_TRUE(result.usable);
+  EXPECT_EQ(result.reason, "fresh");
+  EXPECT_NEAR(result.age_sec, 0.01, 1.0e-9);
 }

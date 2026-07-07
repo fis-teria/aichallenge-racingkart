@@ -148,6 +148,7 @@ struct BlockedInfo {
   double future_prediction_time_sec{0.0};
   std::string yield_reason{};
   double ego_lateral_offset_m{0.0};
+  double ego_speed_mps{0.0};
   double ego_wall_clearance_m{std::numeric_limits<double>::infinity()};
   double left_pass_gap_m{std::numeric_limits<double>::infinity()};
   double right_pass_gap_m{std::numeric_limits<double>::infinity()};
@@ -243,6 +244,7 @@ struct PlannerConfig {
   double min_pass_gap_m{1.80};
   double pass_gap_hysteresis_m{0.15};
   double yield_speed_margin_mps{0.60};
+  double yield_min_speed_cap_mps{0.50};
   double yield_rejoin_gap_m{3.0};
   double left_offset_m{0.80};
   double right_offset_m{-0.80};
@@ -266,6 +268,10 @@ struct PlannerConfig {
   double min_mode_hold_time_sec{0.60};
   double keep_mode_bonus{25.0};
   double lateral_target_max_step_m{0.25};
+  bool high_speed_curve_lateral_hold_enabled{true};
+  double high_speed_curve_lateral_hold_min_speed_mps{4.0};
+  double high_speed_curve_lateral_hold_release_speed_mps{2.5};
+  double high_speed_curve_lateral_hold_release_curvature_m_inv{0.025};
   bool speed_only_fallback_enabled{true};
   double speed_only_fallback_v_max_mps{3.0};
   bool wall_risk_speed_guard_enabled{true};
@@ -276,11 +282,16 @@ struct PlannerConfig {
   double mpc_health_solve_time_warn_ms{80.0};
   double mpc_health_v_max_mps{3.0};
   double mpc_health_stale_time_sec{0.60};
+  bool recovery_speed_guard_enabled{true};
+  double recovery_speed_guard_v_max_mps{3.0};
   bool section_safety_profile_enabled{true};
   std::vector<SectionSafetyRule> section_safety_rules;
   bool safe_stop_enabled{true};
   double safe_stop_v_mps{0.20};
   int safe_stop_trigger_cycles{1};
+  bool start_grace_safe_stop_enabled{true};
+  double start_grace_duration_sec{8.0};
+  double start_grace_max_speed_mps{1.5};
   int safe_stop_release_cycles{5};
   double safe_stop_release_front_gap_m{5.0};
   double safe_stop_release_wall_clearance_m{0.20};
@@ -302,6 +313,7 @@ struct PlannerOutput {
   double cbf_slack{0.0};
   int active_cbf_constraint_count{0};
   bool safe_stop_triggered{false};
+  bool start_grace_active{false};
   bool safe_stop_release_ready{false};
   std::string safe_stop_reason{};
   std::string safe_stop_reject_reason{};
@@ -312,6 +324,9 @@ struct PlannerOutput {
   bool speed_only_fallback_active{false};
   bool wall_risk_speed_guard_active{false};
   bool mpc_health_speed_guard_active{false};
+  bool recovery_speed_guard_active{false};
+  bool lateral_target_hold_active{false};
+  std::string lateral_target_hold_reason{};
   double applied_speed_cap_mps{std::numeric_limits<double>::quiet_NaN()};
   std::string speed_cap_reason{};
   double wall_soft_margin_m{std::numeric_limits<double>::quiet_NaN()};

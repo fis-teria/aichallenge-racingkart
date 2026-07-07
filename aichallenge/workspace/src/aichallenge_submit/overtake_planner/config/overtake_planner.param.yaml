@@ -49,6 +49,7 @@ overtake_planner_node:
     min_pass_gap_m: 1.8
     pass_gap_hysteresis_m: 0.15
     yield_speed_margin_mps: 0.60
+    yield_min_speed_cap_mps: 9.5
     yield_rejoin_gap_m: 3.0
     left_offset_m: 0.80
     right_offset_m: -0.80
@@ -71,6 +72,10 @@ overtake_planner_node:
     min_mode_hold_time_sec: 0.60
     keep_mode_bonus: 25.0
     lateral_target_max_step_m: 0.25
+    high_speed_curve_lateral_hold_enabled: true
+    high_speed_curve_lateral_hold_min_speed_mps: 4.0
+    high_speed_curve_lateral_hold_release_speed_mps: 2.5
+    high_speed_curve_lateral_hold_release_curvature_m_inv: 0.025
     speed_only_fallback_enabled: true
     speed_only_fallback_v_max_mps: 8.0
     wall_risk_speed_guard_enabled: true
@@ -81,11 +86,16 @@ overtake_planner_node:
     mpc_health_solve_time_warn_ms: 80.0
     mpc_health_v_max_mps: 8.0
     mpc_health_stale_time_sec: 0.60
+    recovery_speed_guard_enabled: true
+    recovery_speed_guard_v_max_mps: 8.0
     section_safety_profile_enabled: true
     # Add same-length arrays to enable section presets, e.g. names/profiles/start_wp/end_wp.
     safe_stop_enabled: true
     safe_stop_v_mps: 0.20
     safe_stop_trigger_cycles: 1
+    start_grace_safe_stop_enabled: true
+    start_grace_duration_sec: 8.0
+    start_grace_max_speed_mps: 1.5
     safe_stop_release_cycles: 5
     safe_stop_release_front_gap_m: 5.0
     safe_stop_release_wall_clearance_m: 0.20

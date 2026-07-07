@@ -31,7 +31,7 @@ from rclpy.parameter import Parameter
 
 # autoware
 from autoware_auto_control_msgs.msg import AckermannControlCommand
-from autoware_auto_planning_msgs.msg import Trajectory
+from autoware_auto_planning_msgs.msg import Trajectory, TrajectoryPoint
 from v2x_msgs.msg import V2XVehiclePositionArray
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     V2XVehicleTracker,
@@ -92,6 +92,13 @@ def yaw_from_quaternion(q: Quaternion):
         yaw = np.arctan2(2. * (q.x*q.y + q.w*q.z), sqw + sqx - sqy - sqz)
 
     return yaw
+
+def quaternion_from_yaw(yaw: float) -> Quaternion:
+    q = Quaternion()
+    half_yaw = yaw * 0.5
+    q.z = float(np.sin(half_yaw))
+    q.w = float(np.cos(half_yaw))
+    return q
 
 def odom_to_pose_2d(odom: Odometry) -> Pose2D:
     pose = Pose2D()
@@ -828,6 +835,8 @@ class MPCController(Node):
             MarkerArray, "/mpc/prediction", 1)
         self._mpc_pred_pub_dummy = self.create_publisher(
             MarkerArray, "/planning/scenario_planning/lane_driving/motion_planning/obstacle_stop_planner/virtual_wall", 1)
+        self._mpc_pred_trajectory_pub = self.create_publisher(
+            Trajectory, "/mpc/predicted_horizon", 1)
 
         latching_qos = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         # NOTE:評価環境での可視化のためにダミーのトピック名を使用
@@ -1059,6 +1068,36 @@ class MPCController(Node):
         self._mpc_pred_pub.publish(pred_marker_array)
         self._mpc_pred_pub_dummy.publish(pred_marker_array)
 
+    def _publish_mpc_predicted_horizon(self, stamp) -> None:
+        predicted = getattr(self._mpc, "current_prediction_trajectory", None)
+        trajectory = Trajectory()
+        trajectory.header.stamp = stamp.to_msg()
+        trajectory.header.frame_id = "map"
+        if self._last_mpc_status != "solved" or not self._enable_control or not predicted:
+            self._mpc_pred_trajectory_pub.publish(trajectory)
+            return
+
+        for x, y, yaw, speed_mps in predicted:
+            if not np.isfinite([x, y, yaw, speed_mps]).all():
+                continue
+            point = TrajectoryPoint()
+            point.pose.position.x = float(x)
+            point.pose.position.y = float(y)
+            point.pose.position.z = 0.0
+            point.pose.orientation = quaternion_from_yaw(float(yaw))
+            point.longitudinal_velocity_mps = float(max(0.0, speed_mps))
+            point.lateral_velocity_mps = 0.0
+            point.acceleration_mps2 = 0.0
+            point.heading_rate_rps = 0.0
+            trajectory.points.append(point)
+
+        if len(trajectory.points) >= 2:
+            self._mpc_pred_trajectory_pub.publish(trajectory)
+        else:
+            empty_trajectory = Trajectory()
+            empty_trajectory.header = trajectory.header
+            self._mpc_pred_trajectory_pub.publish(empty_trajectory)
+
     def _publish_ref_path_marker(self, ref_path: ReferencePath):
         WP_SPHERE_ENABLED = False
 
@@ -1232,6 +1271,7 @@ class MPCController(Node):
         # Publish control command
         self._publish_control_command(now, u, acc, bug_acc_enabled)
         self._publish_speed_profile_debug(now, self._mpc.model.wp_id, v, float(u[0]))
+        self._publish_mpc_predicted_horizon(now)
 
         # Log states
         self._sim_logger.log(self._car, u, t)

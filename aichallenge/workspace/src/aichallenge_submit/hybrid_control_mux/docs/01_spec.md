@@ -14,6 +14,7 @@
 - MPC が連続して infeasible になったときは Pure Pursuit の制御指令へ切り替える
 - MPC の制御指令が途切れたときも、設定により Pure Pursuit へ切り替える
 - hybrid 起動時の Pure Pursuit は `/overtake/reference_override` を読み、追い越し・追従用の横オフセットと速度 cap を反映した trajectory を追う
+- MPC / Pure Pursuit / stop の最終出力に対して、操舵角と操舵角変化率を制限する
 - Pure Pursuit の指令も使えないときは停止指令を出す
 - 切り替え状態を `/hybrid_control_mux/debug` に JSON 形式で出す
 
@@ -23,7 +24,10 @@
 - Pure Pursuit 内で独自に障害物回避や追い越し判断を行う
 - 相手車両の未来位置を予測する
 - 走行経路や速度プロファイルを生成する
+- `/mpc/prediction` の MarkerArray を制御入力として使う
 - 複数の最終制御コマンドを同時に `/control/command/control_cmd` へ出す
+
+`/mpc/prediction` は可視化用の MarkerArray であり、制御用の timestamp、frame、速度、鮮度、index 契約が足りません。Pure Pursuit の lookahead を MPC 予測ホライズンへ合わせる処理は、制御用に型付きの新規 topic を設計してから追加します。
 
 ## 起動方法
 

@@ -5,6 +5,30 @@
 
 namespace overtake_planner {
 
+namespace {
+
+double releaseCurvature(const PlannerConfig &config) {
+  if (config.high_speed_curve_lateral_hold_release_curvature_m_inv >= 0.0) {
+    return config.high_speed_curve_lateral_hold_release_curvature_m_inv;
+  }
+  return std::max(0.0, config.corner_side_yield_curvature_m_inv * 0.5);
+}
+
+bool shouldHoldHighSpeedCurveRecovery(const PlannerConfig &config,
+                                      const BlockedInfo &blocked_info) {
+  if (!config.high_speed_curve_lateral_hold_enabled) {
+    return false;
+  }
+  const double release_speed =
+      config.high_speed_curve_lateral_hold_release_speed_mps >= 0.0
+          ? config.high_speed_curve_lateral_hold_release_speed_mps
+          : config.high_speed_curve_lateral_hold_min_speed_mps;
+  return blocked_info.ego_speed_mps > release_speed &&
+         blocked_info.corner_abs_curvature > releaseCurvature(config);
+}
+
+} // namespace
+
 BehaviorStateMachine::BehaviorStateMachine(PlannerConfig config)
     : config_(config) {}
 
@@ -94,6 +118,24 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     }
 
     ++safe_stop_hold_count_;
+    const bool recovery_required =
+        !safe_stop_context.requested && !blocked_info.blocked &&
+        !blocked_info.side_by_side && !blocked_info.future_yield_required &&
+        (blocked_info.ego_wall_clearance_m <
+             config_.safe_stop_release_wall_clearance_m ||
+         !lateralReleaseReady(blocked_info,
+                              config_.safe_stop_lateral_error_threshold_m));
+    if (recovery_required && canSwitch(now_sec)) {
+      next = BehaviorMode::ABORT_RECOVERY;
+      safe_stop_hold_count_ = 0;
+      safe_stop_release_count_ = 0;
+      pass_left_safe_cycles_ = 0;
+      pass_right_safe_cycles_ = 0;
+      markIfChanged(now_sec, current, next);
+      future_yield_hold_active_ = false;
+      return next;
+    }
+
     if (safe_stop_context.release_ready) {
       ++safe_stop_release_count_;
     } else {
@@ -268,7 +310,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     if (blocked_info.ego_wall_clearance_m <
             config_.yield_rejoin_wall_clearance_m ||
         !lateralReleaseReady(blocked_info,
-                             config_.recovery_release_lateral_error_m)) {
+                             config_.recovery_release_lateral_error_m) ||
+        shouldHoldHighSpeedCurveRecovery(config_, blocked_info)) {
       next = BehaviorMode::ABORT_RECOVERY;
     } else if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;

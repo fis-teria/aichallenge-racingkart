@@ -107,12 +107,24 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
       target_d = std::clamp(opp.frenet.d, lower_d, upper_d);
     }
   } else if (type == CandidateType::SAFE_STOP) {
-    target_d = std::clamp(ego.frenet.d, lower_d, upper_d);
+    const bool release_threshold_active =
+        std::isfinite(config_.safe_stop_lateral_error_threshold_m) &&
+        config_.safe_stop_lateral_error_threshold_m >= 0.0;
+    const bool safe_stop_lateral_error_remaining =
+        release_threshold_active &&
+        std::abs(ego.frenet.d) >
+            config_.safe_stop_lateral_error_threshold_m;
+    target_d = outside_safe_corridor || safe_stop_lateral_error_remaining
+                   ? 0.0
+                   : std::clamp(ego.frenet.d, lower_d, upper_d);
+    target_d = std::clamp(target_d, lower_d, upper_d);
     shift_distance =
         std::max(config_.merge_distance_m, config_.prepare_distance_m);
   }
 
   double speed_cap = config_.v_passthrough_mps;
+  const double yield_min_speed_cap =
+      finitePositiveOr(config_.yield_min_speed_cap_mps, 0.5);
   const double ego_wall_clearance = wallClearance(ego.frenet.d);
   if (type == CandidateType::FOLLOW && blocked_info.nearest_index >= 0) {
     // FOLLOWは前走車より少し低い速度上限にして、MPC側の速度計画を抑える。
@@ -128,11 +140,12 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     if (blocked_info.side_index >= 0) {
       const auto &opp =
           opponents[static_cast<std::size_t>(blocked_info.side_index)];
-      speed_cap = std::min(
-          speed_cap, std::max(0.5, opp.v - config_.yield_speed_margin_mps));
+      speed_cap =
+          std::min(speed_cap, std::max(yield_min_speed_cap,
+                                       opp.v - config_.yield_speed_margin_mps));
     }
   } else if (type == CandidateType::YIELD_BEHIND) {
-    speed_cap = 0.5;
+    speed_cap = yield_min_speed_cap;
     const int target_index = yieldTargetIndex(blocked_info);
     const bool corner_yield = blocked_info.corner_side_by_side ||
                               blocked_info.future_corner_side_by_side ||
@@ -143,7 +156,7 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
       const double margin = corner_yield
                                 ? config_.corner_follow_speed_margin_mps
                                 : config_.yield_speed_margin_mps;
-      speed_cap = std::max(0.5, opp.v - margin);
+      speed_cap = std::max(yield_min_speed_cap, opp.v - margin);
     }
     if (corner_yield && config_.corner_yield_v_max_mps > 0.0) {
       speed_cap = std::min(speed_cap, config_.corner_yield_v_max_mps);
@@ -190,8 +203,13 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     const bool recovery_center_pull =
         type == CandidateType::RECOVERY && !blocked_info.side_by_side &&
         (outside_safe_corridor || recovery_lateral_error_remaining);
+    const bool safe_stop_center_pull =
+        type == CandidateType::SAFE_STOP &&
+        (outside_safe_corridor ||
+         std::abs(start_d - target_d) >
+             std::max(0.0, config_.safe_stop_lateral_error_threshold_m));
     double ratio = smoothstep(ds / std::max(1.0, shift_distance));
-    if (recovery_center_pull &&
+    if ((recovery_center_pull || safe_stop_center_pull) &&
         config_.outside_corridor_recovery_centering_time_sec > 0.0) {
       ratio = std::max(
           ratio,

@@ -44,6 +44,7 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 | `side_by_side_shift_distance_m` | `7.0` | `7.0` | 横方向へ移る距離。上げると操舵が穏やか。 |
 | `wall_risk_v_max_mps` | `8.0` | `5.0` | 壁リスク時の速度上限。下げると壁際の破綻を抑えやすい。 |
 | `mpc_health_v_max_mps` | `8.0` | `3.0` | MPC不調時の速度上限。下げると計算破綻時に保守的。 |
+| `recovery_speed_guard_v_max_mps` | `3.0` | `3.0` | `RECOVERY` / `ABORT_RECOVERY` 中だけ、壁リスク・MPC不調・大横ずれ時に追加で速度を絞る。通常の壁/MPC capを攻めた値にしている場合の保険。 |
 
 スタート直後から第1コーナーまで横並びを認識しない場合:
 
@@ -186,6 +187,7 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 | `v_passthrough_mps` | `50.0` | `50.0` | plannerが速度を制限しない時の実質上限。 |
 | `follow_speed_margin_mps` | `0.20` | `0.20` | FOLLOW時に前走車よりどれだけ遅くするか。 |
 | `yield_speed_margin_mps` | `0.60` | `0.60` | YIELD/SIDE_BY_SIDEで相手よりどれだけ遅くするか。 |
+| `yield_min_speed_cap_mps` | `0.50` | `0.50` | YIELD/SIDE_BY_SIDEで相手速度基準capが低くなりすぎる時の下限。PurePursuit fallback時の約2km/h低速化を上げたい時に調整する。 |
 | `corner_follow_speed_margin_mps` | `0.20` | `0.20` | コーナー譲り時に相手よりどれだけ遅くするか。 |
 | `side_by_side_speed_cap_mps` | `7.5` | `7.5` | SIDE_BY_SIDE_KEEPの通常速度上限。 |
 | `corner_yield_v_max_mps` | `8.0` | `3.0` | コーナー譲り時の最大速度。 |
@@ -231,7 +233,11 @@ upper_d = d_max_m - min_wall_margin_m
 | `abort_timeout_sec` | `5.0` | `5.0` | 追い越し状態が長引いた時に復帰へ倒す時間。 |
 | `min_mode_hold_time_sec` | `0.60` | `0.60` | モード切替直後の保持時間。 |
 | `keep_mode_bonus` | `25.0` | `25.0` | 現在モードに沿う候補をスコア上優遇する強さ。 |
-| `lateral_target_max_step_m` | `0.25` | `0.25` | MPCへpublishする横オフセット列の1周期あたり最大変化量。`0` 以下で無効。 |
+| `lateral_target_max_step_m` | `0.25` | `0.25` | MPCへpublishする横オフセット列の1周期あたり最大変化量。SAFE_STOPも対象。`0` 以下で無効。 |
+| `high_speed_curve_lateral_hold_enabled` | `true` | `true` | 高速カーブ中の横目標holdを有効化する。 |
+| `high_speed_curve_lateral_hold_min_speed_mps` | `4.0` | `4.0` | この速度以上で、カーブ中のYIELD/RECOVERY/SAFE_STOP/SPEED_GUARD横目標をhold対象にする。 |
+| `high_speed_curve_lateral_hold_release_speed_mps` | `2.5` | `2.5` | この速度以下まで落ちたら、カーブ中でもholdを解除できる。 |
+| `high_speed_curve_lateral_hold_release_curvature_m_inv` | `0.025` | `0.025` | この曲率以下ならカーブ脱出とみなし、holdを解除できる。 |
 
 ## PlannerOutputBuilder / 速度ガード
 
@@ -252,6 +258,8 @@ upper_d = d_max_m - min_wall_margin_m
 | `mpc_health_solve_time_warn_ms` | `80.0` | `80.0` | solve timeがこの値以上なら速度ガード。 |
 | `mpc_health_v_max_mps` | `8.0` | `3.0` | MPC health悪化時の速度上限。 |
 | `mpc_health_stale_time_sec` | `0.60` | `0.60` | MPC health debugが古い場合のstale判定。 |
+| `recovery_speed_guard_enabled` | `true` | `true` | `RECOVERY` / `ABORT_RECOVERY` 中に復帰専用の低速capを重ねる。 |
+| `recovery_speed_guard_v_max_mps` | `3.0` | `3.0` | 復帰専用速度cap。`wall_risk_v_max_mps` や `mpc_health_v_max_mps` を高めにしていても、壁際復帰とPP fallback中はこの値で抑えやすくする。 |
 
 ## Section safety profile
 
@@ -295,11 +303,17 @@ MPC側で `0.0 m/s` が無効扱いにならないよう、停止意図は小さ
 | `safe_stop_enabled` | `true` | `true` | SAFE_STOP候補を使う。 |
 | `safe_stop_v_mps` | `0.20` | `0.20` | SAFE_STOP中に出す速度上限。 |
 | `safe_stop_trigger_cycles` | `1` | `1` | 通常fallbackがunsafeな状態が何周期続いたらSAFE_STOPへ入るか。 |
+| `start_grace_safe_stop_enabled` | `true` | `true` | 発進直後の横並び/並走リスクで、前方閉塞が無い時だけSAFE_STOP突入を猶予する。 |
+| `start_grace_duration_sec` | `8.0` | `8.0` | 最初の有効な自車状態を受けてから一度だけ、何秒間start graceを有効にするか。 |
+| `start_grace_max_speed_mps` | `1.5` | `1.5` | start graceを適用する自車速度上限。負値で速度条件を無効化。 |
 | `safe_stop_release_cycles` | `5` | `5` | 解除条件が何周期続いたらSAFE_STOPを抜けるか。 |
 | `safe_stop_release_front_gap_m` | `5.0` | `5.0` | 再発進に必要な前方ギャップ。 |
 | `safe_stop_release_wall_clearance_m` | `0.20` | `0.20` | 再発進に必要な壁余裕。 |
 | `safe_stop_lateral_error_threshold_m` | `0.40` | `0.40` | SAFE_STOP目標dからの許容横ずれ。 |
 | `safe_stop_release_speed_mps` | `0.50` | `0.50` | 再発進判定に入る自車速度上限。 |
+
+SAFE_STOP中に停止要求が消えても、壁余裕または中心からの横ずれが解除条件を満たさない場合は `FREE_RUN` へ直帰せず、`ABORT_RECOVERY` に渡します。
+このとき `CandidateBuilder` は SAFE_STOP / RECOVERY の参照を中央方向へ寄せ、`recovery_speed_guard_*` が有効なら復帰中の速度を追加で抑えます。
 
 ## 症状別の調整例
 
@@ -313,6 +327,8 @@ corner_side_yield_wall_clearance_m: 0.55
 corner_yield_v_max_mps: 8.0
 wall_risk_v_max_mps: 8.0
 mpc_health_v_max_mps: 8.0
+recovery_speed_guard_enabled: true
+recovery_speed_guard_v_max_mps: 3.0
 outside_corridor_recovery_centering_time_sec: 1.0
 recovery_release_lateral_error_m: 0.60
 yield_release_lateral_error_m: 0.60

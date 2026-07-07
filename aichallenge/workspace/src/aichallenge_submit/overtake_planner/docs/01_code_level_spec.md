@@ -3,6 +3,8 @@
 この文書は、`overtake_planner` のコードを読むための地図です。
 実装の目的は、MPC本体を大きく変えずに、V2Xで見える前走車や横並び車両に対して、短いhorizonの横オフセット列と速度上限列を `/overtake/reference_override` へ出すことです。
 
+より細かいソースファイル別の実装ロジックは `docs/06_source_logic_walkthrough.md` にまとめています。
+
 ## 入口
 
 パッケージはここです。
@@ -252,6 +254,7 @@ MPCへ渡す候補軌道です。
 そのため、risk判定側は `SPEED_GUARD` の出力形式を知らなくてよい構造です。
 速度だけを落とす `SPEED_GUARD` では、横オフセットを中心線 `d=0` へ0埋めせず、現在の横位置を保持します。
 その後、`OvertakePlannerCore` が前回publishした横オフセット列との差分を `lateral_target_max_step_m` で制限します。
+高速カーブ中の `YIELD_BEHIND`, `ABORT_RECOVERY`, `SAFE_STOP`, `SPEED_GUARD` では、rate limit後の横オフセット列を `high_speed_curve_lateral_hold_*` 条件でholdし、低速化またはカーブ脱出まで短周期の再選択を抑えます。
 
 `BlockedRiskAnalyzer` と `FutureSideBySideRiskAnalyzer` への責務分割そのものでは、新しいYAMLパラメータは追加していません。
 この文書では、分割前から入っているfuture side prediction、parallel side、straight-only gate、speed guard、MPC health guard系のパラメータもあわせて説明しています。
@@ -426,6 +429,8 @@ h = (x_body / safety_ellipse_a_m)^2
   - 自車の壁余裕が `wall_soft_margin_m` 未満なら `wall_risk_v_max_mps` へ絞る
 - `mpc_health_speed_guard_enabled`
   - `/mpc/speed_profile_debug` の `mpc_infeasible_count`、`mpc_solve_time_ms`、またはstale状態で `mpc_health_v_max_mps` へ絞る
+- `recovery_speed_guard_enabled`
+  - `RECOVERY` / `ABORT_RECOVERY` 中に壁リスク、MPC health悪化、大きい横ずれのいずれかがある場合、横方向overrideは維持したまま `recovery_speed_guard_v_max_mps` を追加で重ねる
 - section safety profile
   - `side_by_side_corner_strict` などの区間プロファイルが有効なら、壁余裕や速度capをさらに厳しくする
 
@@ -527,6 +532,8 @@ overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_G
 - `speed_only_fallback_active`
 - `wall_risk_speed_guard_active`
 - `mpc_health_speed_guard_active`
+- `lateral_target_hold_active`
+- `lateral_target_hold_reason`
 - `speed_cap_reason`
 - `applied_speed_cap_mps`
 - `active_section_name`

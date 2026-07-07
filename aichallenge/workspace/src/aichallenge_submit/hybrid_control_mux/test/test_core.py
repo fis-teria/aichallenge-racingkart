@@ -1,4 +1,12 @@
-from hybrid_control_mux.core import HybridMuxConfig, HybridMuxCore, MpcHealth
+import pytest
+
+from hybrid_control_mux.core import (
+    HybridMuxConfig,
+    HybridMuxCore,
+    MpcHealth,
+    SteeringLimiter,
+    SteeringLimiterConfig,
+)
 
 
 def test_uses_mpc_when_healthy():
@@ -82,3 +90,86 @@ def test_stops_when_fallback_requested_without_pure_pursuit_command():
         mpc_health=MpcHealth(False, "stale", 1, 1.0),
     )
     assert timeout_decision.source == "stop"
+
+
+def test_steering_limiter_clamps_absolute_angle():
+    limiter = SteeringLimiter(
+        SteeringLimiterConfig(
+            enabled=True,
+            max_steering_angle_rad=0.5,
+            max_steering_rate_radps=10.0,
+        )
+    )
+
+    result = limiter.update(1.0, 1.0, "mpc")
+
+    assert result.limited_steering_rad == pytest.approx(0.5)
+    assert result.angle_limited
+    assert not result.rate_limited
+
+
+def test_steering_limiter_rate_limits_across_source_switch_by_default():
+    limiter = SteeringLimiter(
+        SteeringLimiterConfig(
+            enabled=True,
+            max_steering_angle_rad=1.0,
+            max_steering_rate_radps=1.0,
+            reset_on_mode_change=False,
+        )
+    )
+    first = limiter.update(0.0, 1.00, "mpc")
+    second = limiter.update(0.50, 1.02, "pure_pursuit")
+
+    assert first.limiter_reset
+    assert second.limited_steering_rad == pytest.approx(0.02)
+    assert second.rate_limited
+    assert not second.limiter_reset
+
+
+def test_steering_limiter_can_reset_on_source_switch():
+    limiter = SteeringLimiter(
+        SteeringLimiterConfig(
+            enabled=True,
+            max_steering_angle_rad=1.0,
+            max_steering_rate_radps=1.0,
+            reset_on_mode_change=True,
+        )
+    )
+    limiter.update(0.0, 1.00, "mpc")
+    result = limiter.update(0.50, 1.02, "pure_pursuit")
+
+    assert result.limited_steering_rad == pytest.approx(0.50)
+    assert not result.rate_limited
+    assert result.limiter_reset
+
+
+def test_steering_limiter_treats_nonfinite_input_as_zero():
+    limiter = SteeringLimiter(
+        SteeringLimiterConfig(
+            enabled=True,
+            max_steering_angle_rad=0.5,
+            max_steering_rate_radps=1.0,
+        )
+    )
+
+    result = limiter.update(float("nan"), 1.0, "pure_pursuit")
+
+    assert result.raw_steering_rad == pytest.approx(0.0)
+    assert result.limited_steering_rad == pytest.approx(0.0)
+
+
+def test_steering_limiter_reset_bypasses_rate_limit_for_stop():
+    limiter = SteeringLimiter(
+        SteeringLimiterConfig(
+            enabled=True,
+            max_steering_angle_rad=1.0,
+            max_steering_rate_radps=0.1,
+        )
+    )
+    limiter.update(0.8, 1.00, "mpc")
+
+    result = limiter.reset(0.0, 1.01, "stop")
+
+    assert result.limited_steering_rad == pytest.approx(0.0)
+    assert not result.rate_limited
+    assert result.limiter_reset

@@ -12,16 +12,24 @@
     <arg name="use_overtake_planner" value="$(var use_overtake_planner)"/>
     <arg name="output_control_cmd" value="/hybrid_control/mpc/control_cmd"/>
     <arg name="output_raw_control_cmd" value="/hybrid_control/mpc/control_cmd_raw"/>
+    <arg name="output_mpc_predicted_horizon" value="/hybrid_control/mpc/predicted_horizon"/>
   </include>
 
   <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">
     <arg name="simulation" value="$(var simulation)"/>
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
+    <arg name="input_mpc_predicted_horizon" value="/hybrid_control/mpc/predicted_horizon"/>
     <arg name="output_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd"/>
     <arg name="output_raw_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd_raw"/>
+    <arg name="wheel_base" value="1.087"/>
     <arg name="use_external_target_vel" value="true"/>
     <arg name="external_target_vel" value="$(var fallback_speed_mps)"/>
+    <arg name="use_mpc_predicted_horizon" value="true"/>
+    <arg name="max_mpc_horizon_age_sec" value="0.15"/>
+    <arg name="min_mpc_horizon_points" value="5"/>
+    <arg name="max_mpc_horizon_start_distance_m" value="2.0"/>
+    <arg name="min_mpc_horizon_arc_length_m" value="2.0"/>
     <arg name="use_overtake_reference_override" value="$(var use_overtake_planner)"/>
     <arg name="input_overtake_reference_override" value="/overtake/reference_override"/>
     <arg name="lookahead_gain" value="0.5"/>

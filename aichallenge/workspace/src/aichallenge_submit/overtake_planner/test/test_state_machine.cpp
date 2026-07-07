@@ -301,6 +301,52 @@ TEST(BehaviorStateMachine, YieldWaitsUntilEgoHasWallClearance)
   EXPECT_EQ(next, overtake_planner::BehaviorMode::YIELD_BEHIND);
 }
 
+TEST(BehaviorStateMachine, AbortRecoveryHoldsDuringHighSpeedCurve)
+{
+  overtake_planner::PlannerConfig config;
+  config.high_speed_curve_lateral_hold_enabled = true;
+  config.high_speed_curve_lateral_hold_release_speed_mps = 2.5;
+  config.high_speed_curve_lateral_hold_release_curvature_m_inv = 0.025;
+  config.yield_rejoin_wall_clearance_m = 0.15;
+  config.recovery_release_lateral_error_m = 0.60;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.ego_wall_clearance_m = 0.5;
+  info.ego_lateral_offset_m = 0.0;
+  info.ego_speed_mps = 5.0;
+  info.corner_abs_curvature = 0.08;
+
+  const auto next = sm.update(
+    2.0, overtake_planner::BehaviorMode::ABORT_RECOVERY,
+    overtake_planner::CandidateType::FASTEST, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+}
+
+TEST(BehaviorStateMachine, AbortRecoveryReleasesAfterLowSpeedInCurve)
+{
+  overtake_planner::PlannerConfig config;
+  config.high_speed_curve_lateral_hold_enabled = true;
+  config.high_speed_curve_lateral_hold_release_speed_mps = 2.5;
+  config.high_speed_curve_lateral_hold_release_curvature_m_inv = 0.025;
+  config.yield_rejoin_wall_clearance_m = 0.15;
+  config.recovery_release_lateral_error_m = 0.60;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.ego_wall_clearance_m = 0.5;
+  info.ego_lateral_offset_m = 0.0;
+  info.ego_speed_mps = 2.0;
+  info.corner_abs_curvature = 0.08;
+
+  const auto next = sm.update(
+    2.0, overtake_planner::BehaviorMode::ABORT_RECOVERY,
+    overtake_planner::CandidateType::FASTEST, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::FREE_RUN);
+}
+
 TEST(BehaviorStateMachine, YieldWaitsUntilLateralErrorRecovers)
 {
   overtake_planner::PlannerConfig config;
@@ -411,6 +457,63 @@ TEST(BehaviorStateMachine, SafeStopHoldsUntilReleaseCyclesSatisfied)
   mode = sm.update(
     2.3, mode, overtake_planner::CandidateType::FASTEST, info, true, safe_stop);
   EXPECT_EQ(mode, overtake_planner::BehaviorMode::FREE_RUN);
+}
+
+TEST(BehaviorStateMachine, SafeStopHandsOffToRecoveryWhenReleasedButNotCentered)
+{
+  overtake_planner::PlannerConfig config;
+  config.min_mode_hold_time_sec = 0.0;
+  config.safe_stop_lateral_error_threshold_m = 0.40;
+  config.safe_stop_release_wall_clearance_m = 0.20;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  overtake_planner::SafeStopContext safe_stop;
+  safe_stop.requested = true;
+  safe_stop.candidate_feasible = true;
+
+  auto mode = sm.update(
+    2.0, overtake_planner::BehaviorMode::FOLLOW_BLOCKED,
+    overtake_planner::CandidateType::SAFE_STOP, info, true, safe_stop);
+  ASSERT_EQ(mode, overtake_planner::BehaviorMode::SAFE_STOP);
+
+  info.ego_lateral_offset_m = 0.75;
+  info.ego_wall_clearance_m = 0.10;
+  safe_stop.requested = false;
+  safe_stop.release_ready = false;
+  mode = sm.update(
+    2.1, mode, overtake_planner::CandidateType::FASTEST, info, true, safe_stop);
+
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+  EXPECT_EQ(sm.safeStopHoldCount(), 0);
+  EXPECT_EQ(sm.safeStopReleaseCount(), 0);
+}
+
+TEST(BehaviorStateMachine, SafeStopReleaseWithBlockedFrontReturnsToFollow)
+{
+  overtake_planner::PlannerConfig config;
+  config.safe_stop_release_cycles = 1;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  overtake_planner::SafeStopContext safe_stop;
+  safe_stop.requested = true;
+  safe_stop.candidate_feasible = true;
+
+  auto mode = sm.update(
+    2.0, overtake_planner::BehaviorMode::FOLLOW_BLOCKED,
+    overtake_planner::CandidateType::SAFE_STOP, info, true, safe_stop);
+  ASSERT_EQ(mode, overtake_planner::BehaviorMode::SAFE_STOP);
+
+  info.blocked = true;
+  safe_stop.requested = false;
+  safe_stop.release_ready = true;
+  mode = sm.update(
+    2.1, mode, overtake_planner::CandidateType::FOLLOW, info, true, safe_stop);
+
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+  EXPECT_EQ(sm.safeStopHoldCount(), 0);
+  EXPECT_EQ(sm.safeStopReleaseCount(), 0);
 }
 
 TEST(BehaviorStateMachine, SafeStopLeavesWhenStopCandidateBecomesInfeasible)

@@ -4,13 +4,25 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="input_kinematics" default="/localization/kinematic_state"/>
   <arg name="input_trajectory" default="/planning/scenario_planning/trajectory"/>
+  <arg name="input_mpc_predicted_horizon" default="/mpc/predicted_horizon"/>
   <arg name="output_control_cmd" default="/control/command/control_cmd"/>
   <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
   <arg name="use_external_target_vel" default="false"/>
   <arg name="external_target_vel" default="9.5"/>
+  <arg name="wheel_base" default="1.087"/>
   <arg name="use_overtake_reference_override" default="true"/>
   <arg name="input_overtake_reference_override" default="/overtake/reference_override"/>
   <arg name="overtake_override_timeout_sec" default="0.50"/>
+  <arg name="max_odom_age_sec" default="0.20"/>
+  <arg name="max_trajectory_age_sec" default="1.5"/>
+  <arg name="max_override_age_sec" default="0.50"/>
+  <arg name="stop_on_stale_input" default="true"/>
+  <arg name="diagnostic_throttle_sec" default="1.0"/>
+  <arg name="use_mpc_predicted_horizon" default="false"/>
+  <arg name="max_mpc_horizon_age_sec" default="0.15"/>
+  <arg name="min_mpc_horizon_points" default="5"/>
+  <arg name="max_mpc_horizon_start_distance_m" default="2.0"/>
+  <arg name="min_mpc_horizon_arc_length_m" default="2.0"/>
   <arg name="lookahead_gain" default="0.5"/>
   <arg name="lookahead_min_distance" default="2.5"/>
   <arg name="curvature_adaptive_lookahead_enabled" default="true"/>
@@ -22,14 +34,26 @@
   <arg name="curvature_lookahead_smoothing_alpha" default="0.35"/>
   <arg name="speed_proportional_gain" default="1.0"/>
 
-  <let name="steering_tire_angle_gain_var" value="1.50" if="$(var simulation)"/>
+  <let name="steering_tire_angle_gain_var" value="1.639" if="$(var simulation)"/>
   <let name="steering_tire_angle_gain_var" value="1.639" unless="$(var simulation)"/>
 
   <node pkg="simple_pure_pursuit" exec="simple_pure_pursuit" name="simple_pure_pursuit_node" output="screen">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="use_external_target_vel" value="$(var use_external_target_vel)"/>
     <param name="external_target_vel" value="$(var external_target_vel)"/>
+    <param name="wheel_base" value="$(var wheel_base)"/>
     <param name="use_overtake_reference_override" value="$(var use_overtake_reference_override)"/>
     <param name="overtake_override_timeout_sec" value="$(var overtake_override_timeout_sec)"/>
+    <param name="max_odom_age_sec" value="$(var max_odom_age_sec)"/>
+    <param name="max_trajectory_age_sec" value="$(var max_trajectory_age_sec)"/>
+    <param name="max_override_age_sec" value="$(var max_override_age_sec)"/>
+    <param name="stop_on_stale_input" value="$(var stop_on_stale_input)"/>
+    <param name="diagnostic_throttle_sec" value="$(var diagnostic_throttle_sec)"/>
+    <param name="use_mpc_predicted_horizon" value="$(var use_mpc_predicted_horizon)"/>
+    <param name="max_mpc_horizon_age_sec" value="$(var max_mpc_horizon_age_sec)"/>
+    <param name="min_mpc_horizon_points" value="$(var min_mpc_horizon_points)"/>
+    <param name="max_mpc_horizon_start_distance_m" value="$(var max_mpc_horizon_start_distance_m)"/>
+    <param name="min_mpc_horizon_arc_length_m" value="$(var min_mpc_horizon_arc_length_m)"/>
     <param name="lookahead_gain" value="$(var lookahead_gain)"/>
     <param name="lookahead_min_distance" value="$(var lookahead_min_distance)"/>
     <param name="curvature_adaptive_lookahead_enabled" value="$(var curvature_adaptive_lookahead_enabled)"/>
@@ -44,6 +68,7 @@
 
     <remap from="input/kinematics" to="$(var input_kinematics)"/>
     <remap from="input/trajectory" to="$(var input_trajectory)"/>
+    <remap from="input/mpc_predicted_horizon" to="$(var input_mpc_predicted_horizon)"/>
     <remap from="input/overtake_reference_override" to="$(var input_overtake_reference_override)"/>
     <remap from="output/control_cmd" to="$(var output_control_cmd)"/>
     <remap from="output/raw_control_cmd" to="$(var output_raw_control_cmd)"/>

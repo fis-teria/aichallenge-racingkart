@@ -23,6 +23,8 @@
 
 `input/pure_pursuit_control_cmd` で Pure Pursuit の `AckermannControlCommand` を受け取ります。受信時刻を保存し、現在時刻との差が `pure_pursuit_cmd_timeout_sec` 以下なら fresh と判定します。
 
+Pure Pursuit ノード側でも odometry と trajectory の受信時刻を見ます。鮮度判定は `/clock` 停止時にも進む steady time で行います。どちらかが `max_odom_age_sec` / `max_trajectory_age_sec` を超えて古い場合は、古い経路追従を続けず停止指令を出します。`/overtake/reference_override` だけが古い場合は停止せず、その override を破棄して元の trajectory を追います。
+
 ### MPC health
 
 `input/mpc_health` で JSON 文字列を受け取ります。現在参照しているフィールドは以下です。
@@ -65,7 +67,7 @@ MPC health が missing、stale、parse_error の場合、`use_pure_pursuit_on_mp
 
 MPC health が有効で、`mpc_infeasible_count` が `fallback_trigger_infeasible_count` 以上なら `mpc_infeasible` を理由にフォールバックします。
 
-デフォルトでは `fallback_trigger_infeasible_count` は 2 です。1回だけの失敗で即座に切り替えず、連続失敗を見てから Pure Pursuit へ落とします。
+デフォルトでは `fallback_trigger_infeasible_count` は 1 です。MPC が infeasible になったら早めに Pure Pursuit へ逃がします。切り替えが多すぎる場合は 2 以上へ上げます。
 
 ## 通常状態の判定
 
@@ -112,7 +114,16 @@ Pure Pursuit を使う場合でも、そのまま全てを通すわけではあ�
 fallback_decel_min_mps2 <= acceleration <= fallback_accel_max_mps2
 ```
 
-操舵角は Pure Pursuit の値をそのまま使います。
+さらに MPC / Pure Pursuit / stop のどの出力を選んだ場合でも、最終 publish 直前に操舵角を整形します。
+
+```text
+abs(steering_tire_angle) <= max_steering_angle_rad
+abs(delta_steering) <= max_steering_rate_radps * dt
+```
+
+デフォルトでは `reset_steering_limiter_on_mode_change=false` なので、MPC から Pure Pursuit に切り替わった瞬間も前周期の最終操舵角から連続するように制限します。これにより、fallback の入り口で急に大きく切る挙動を抑えます。
+
+`source=stop` の場合は例外です。停止意思を優先し、操舵 limiter の状態を `0.0 rad` にリセットして停止指令をそのまま出します。
 
 `fallback_speed_mps` は `hybrid_control_mux` 側の速度上限であると同時に、`hybrid_delay_aware_mpc.launch.xml` から Pure Pursuit の `external_target_vel` にも渡されます。つまり、Pure Pursuit 自体の目標速度と mux 側の上限が同じ値になる構成です。
 
@@ -137,6 +148,8 @@ Pure Pursuit の lookahead は基本的に `lookahead_gain * max(target_speed, c
 
 これにより、Pure Pursuit fallback 中でも overtake planner の FOLLOW、YIELD、PASS 系の横オフセットと速度抑制が制御に乗ります。ただし、Pure Pursuit 自体が相手車両との制約を解くわけではありません。
 
+現時点では `/mpc/prediction` を Pure Pursuit の制御入力には使いません。既存 topic は MarkerArray 可視化で、制御用の鮮度、frame、速度、index 契約が不足しているためです。将来使う場合は、MarkerArray の流用ではなく、型付きの制御用 horizon topic を追加します。
+
 ## 停止指令の生成
 
 停止指令は以下の値で生成します。
@@ -159,6 +172,8 @@ hybrid control source=<source> reason=<reason> mpc_status=<status> mpc_infeasibl
 
 周期的な状態確認には `/hybrid_control_mux/debug` を使います。`source`、`reason`、`fallback_active`、`mpc_cmd_fresh`、`pure_pursuit_cmd_fresh`、`mpc_status`、`mpc_infeasible_count` を見ると、なぜ切り替わったかを追いやすいです。
 
+操舵制限が効いた場合は、`raw_steer_rad`、`limited_steer_rad`、`steering_delta_rad`、`steering_angle_limited`、`steering_rate_limited` を確認します。
+
 ## よく見るべき状態
 
 ### `source=pure_pursuit`
@@ -175,4 +190,4 @@ MPC の回復条件を満たしていません。`mpc_status`、`mpc_infeasible_
 
 ### フォールバックに入らない
 
-`mpc_infeasible_count` が閾値まで増えているかを確認します。デフォルトでは 2 回連続の infeasible が必要です。`mpc_status` が `infeasible` でも、`fallback_trigger_infeasible_count` が 2 以上の場合は count が閾値に届くまで切り替わりません。
+`mpc_infeasible_count` が閾値まで増えているかを確認します。デフォルトでは 1 回の infeasible でフォールバックします。`fallback_trigger_infeasible_count` を 2 以上へ上げた場合は、count が閾値に届くまで切り替わりません。

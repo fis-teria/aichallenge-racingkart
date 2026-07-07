@@ -22,19 +22,26 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/co
 | --- | --- | --- |
 | `enabled` | `true` | hybrid control mux の切り替え処理を有効にする。false の場合は MPC が fresh なら MPC、そうでなければ stop を出す |
 | `control_rate_hz` | `50.0` | mux が出力判定を行う周期 |
-| `mpc_cmd_timeout_sec` | `0.20` | MPC 指令を fresh とみなす最大時間 |
+| `mpc_cmd_timeout_sec` | `0.06` | MPC 指令を fresh とみなす最大時間 |
 | `pure_pursuit_cmd_timeout_sec` | `0.20` | Pure Pursuit 指令を fresh とみなす最大時間 |
 | `mpc_health_timeout_sec` | `0.75` | MPC health を有効とみなす最大時間 |
-| `fallback_trigger_infeasible_count` | `2` | Pure Pursuit へ切り替えるために必要な連続 infeasible 回数 |
+| `fallback_trigger_infeasible_count` | `1` | Pure Pursuit へ切り替えるために必要な連続 infeasible 回数 |
 | `fallback_release_solved_cycles` | `3` | MPC へ復帰するために必要な連続 solved 回数 |
 | `fallback_min_hold_sec` | `1.0` | Pure Pursuit フォールバックを最低限維持する時間 |
-| `fallback_speed_mps` | `2.0` | フォールバック中の速度上限 |
-| `fallback_accel_max_mps2` | `0.8` | フォールバック中の加速度上限 |
+| `fallback_speed_mps` | `9.5` | フォールバック中の速度上限 |
+| `fallback_accel_max_mps2` | `1.3` | フォールバック中の加速度上限 |
 | `fallback_decel_min_mps2` | `-1.5` | フォールバック中の減速度下限 |
 | `stop_decel_mps2` | `-1.5` | stop 指令を出すときの加速度 |
 | `use_pure_pursuit_on_mpc_cmd_timeout` | `true` | MPC 指令が timeout したときに Pure Pursuit へ切り替える |
 | `use_pure_pursuit_on_mpc_health_timeout` | `false` | MPC health が timeout したときに Pure Pursuit へ切り替える |
 | `debug_publish_period_sec` | `0.25` | debug JSON を publish する周期 |
+| `enable_steering_rate_limit` | `true` | 最終出力の操舵角レート制限を有効にする |
+| `max_steering_angle_rad` | `0.5585053606381855` | 最終出力の操舵角上限 [rad] |
+| `max_steering_rate_radps` | `8.0` | 最終出力の操舵角変化率上限 [rad/s] |
+| `max_steering_delta_per_cycle` | `0.0` | 1周期あたりの追加操舵変化量上限 [rad]。0以下なら無効 |
+| `steering_limiter_reset_dt_sec` | `0.50` | 前回出力からこの時間を超えたら操舵レート制限をリセットする |
+| `reset_steering_limiter_on_mode_change` | `false` | true なら MPC/Pure Pursuit/stop の source 切替時に操舵レート制限をリセットする |
+| `steering_log_throttle_sec` | `1.0` | 操舵制限ログの最短出力間隔 |
 
 ## 切り替え感度に関係するパラメータ
 
@@ -103,20 +110,47 @@ Pure Pursuit フォールバック中の速度上限です。
 
 hybrid 起動では Pure Pursuit も `/overtake/reference_override` の速度 cap を読みます。実際の fallback 目標速度は、基本的に `fallback_speed_mps` と overtake planner の速度 cap の低い方になります。
 
+## 操舵連続性に関係するパラメータ
+
+### `enable_steering_rate_limit`
+
+最終的に `/control/command/control_cmd` へ出す操舵角の急変を抑えます。MPC から Pure Pursuit へ切り替わる瞬間や、stop へ落ちる瞬間にも同じ limiter が効きます。
+
+### `max_steering_angle_rad`
+
+最終出力の絶対操舵角上限です。大きくすると大舵角を許しますが、Pure Pursuit fallback 中の急旋回リスクも上がります。
+
+### `max_steering_rate_radps`
+
+1秒あたりに許す操舵角変化量です。小さくすると切替時の急操作を抑えますが、低すぎると必要な旋回に追従できません。
+
+デフォルトは `8.0 rad/s` です。50 Hz 出力では1周期あたり約 `0.16 rad` の変化を許し、fallback 切替時の段差を抑えつつ、コーナーでの追従遅れが大きくなりすぎない値にしています。
+
+### `reset_steering_limiter_on_mode_change`
+
+デフォルトは false です。source が MPC から Pure Pursuit に変わっても、直前の最終操舵角から滑らかにつなぎます。true にすると切替時に Pure Pursuit の操舵角へ即座に移るため、挙動確認用以外では慎重に使ってください。
+
 ## Pure Pursuit fallback と overtake planner に関係するパラメータ
 
 以下は `pure_pursuit.launch.xml` 側の launch パラメータです。`hybrid_delay_aware_mpc.launch.xml` では、`use_overtake_reference_override` に `use_overtake_planner` と同じ値を渡します。
 
 | パラメータ | デフォルト | 内容 |
 | --- | --- | --- |
-| `use_overtake_reference_override` | `false` | Pure Pursuit が `/overtake/reference_override` を読み、横オフセットと速度 cap を反映するか |
+| `use_overtake_reference_override` | `true` | Pure Pursuit が `/overtake/reference_override` を読み、横オフセットと速度 cap を反映するか |
 | `input_overtake_reference_override` | `/overtake/reference_override` | Pure Pursuit が読む overtake planner の override topic |
 | `overtake_override_timeout_sec` | `0.50` | override を fresh とみなす最大時間 |
+| `wheel_base` | `1.087` | Pure Pursuit の幾何計算に使う wheel base [m]。MPC / vehicle_info と合わせる |
+| `steering_tire_angle_gain` | `1.639` | Pure Pursuit の操舵出力に掛けるゲイン。hybrid launch では simulation/非simulation とも同値 |
+| `max_odom_age_sec` | `0.20` | odometry 受信を fresh とみなす最大時間 [s] |
+| `max_trajectory_age_sec` | `0.50` | trajectory 受信を fresh とみなす最大時間 [s] |
+| `max_override_age_sec` | `0.50` | overtake override 受信を fresh とみなす最大時間 [s] |
+| `stop_on_stale_input` | `true` | odometry/trajectory が stale のとき停止指令を出す |
+| `diagnostic_throttle_sec` | `1.0` | Pure Pursuit の stale/override 警告ログ間隔 [s] |
 | `curvature_adaptive_lookahead_enabled` | `true` | 曲率が大きい区間で Pure Pursuit の lookahead を短くするか |
 | `curvature_lookahead_min_distance` | `3.5` | 曲率適応後の lookahead 下限 [m]。`lookahead_min_distance` 未満にはならない |
 | `curvature_lookahead_sensitivity` | `8.0` | 曲率に対して lookahead を短くする強さ |
-| `curvature_lookahead_window_ratio` | `1.25` | 曲率推定に使う距離窓を base lookahead の何倍にするか |
-| `curvature_lookahead_max_window_distance` | `12.0` | 曲率推定に使う距離窓の上限 [m] |
+| `curvature_lookahead_window_ratio` | `2.0` | 曲率推定に使う距離窓を base lookahead の何倍にするか |
+| `curvature_lookahead_max_window_distance` | `10.0` | 曲率推定に使う距離窓の上限 [m] |
 | `curvature_lookahead_min_arc_length` | `1.0` | 曲率推定に使う最小弧長 [m] |
 | `curvature_lookahead_smoothing_alpha` | `0.35` | lookahead 更新の平滑化係数。`1.0` に近いほど即応する |
 

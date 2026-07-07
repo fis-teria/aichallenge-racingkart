@@ -210,6 +210,8 @@ public:
         declare_parameter<double>("pass_gap_hysteresis_m", 0.15);
     config.yield_speed_margin_mps =
         declare_parameter<double>("yield_speed_margin_mps", 0.60);
+    config.yield_min_speed_cap_mps =
+        declare_parameter<double>("yield_min_speed_cap_mps", 0.50);
     config.yield_rejoin_gap_m =
         declare_parameter<double>("yield_rejoin_gap_m", 3.0);
     config.left_offset_m = declare_parameter<double>("left_offset_m", 0.80);
@@ -249,6 +251,17 @@ public:
     config.keep_mode_bonus = declare_parameter<double>("keep_mode_bonus", 25.0);
     config.lateral_target_max_step_m =
         declare_parameter<double>("lateral_target_max_step_m", 0.25);
+    config.high_speed_curve_lateral_hold_enabled =
+        declare_parameter<bool>("high_speed_curve_lateral_hold_enabled", true);
+    config.high_speed_curve_lateral_hold_min_speed_mps =
+        declare_parameter<double>("high_speed_curve_lateral_hold_min_speed_mps",
+                                  4.0);
+    config.high_speed_curve_lateral_hold_release_speed_mps =
+        declare_parameter<double>(
+            "high_speed_curve_lateral_hold_release_speed_mps", 2.5);
+    config.high_speed_curve_lateral_hold_release_curvature_m_inv =
+        declare_parameter<double>(
+            "high_speed_curve_lateral_hold_release_curvature_m_inv", 0.025);
     config.speed_only_fallback_enabled =
         declare_parameter<bool>("speed_only_fallback_enabled", true);
     config.speed_only_fallback_v_max_mps =
@@ -269,6 +282,10 @@ public:
         declare_parameter<double>("mpc_health_v_max_mps", 3.0);
     config.mpc_health_stale_time_sec =
         declare_parameter<double>("mpc_health_stale_time_sec", 0.60);
+    config.recovery_speed_guard_enabled =
+        declare_parameter<bool>("recovery_speed_guard_enabled", true);
+    config.recovery_speed_guard_v_max_mps =
+        declare_parameter<double>("recovery_speed_guard_v_max_mps", 3.0);
     config.section_safety_profile_enabled =
         declare_parameter<bool>("section_safety_profile_enabled", true);
     config.safe_stop_enabled =
@@ -276,6 +293,12 @@ public:
     config.safe_stop_v_mps = declare_parameter<double>("safe_stop_v_mps", 0.20);
     config.safe_stop_trigger_cycles =
         declare_parameter<int>("safe_stop_trigger_cycles", 1);
+    config.start_grace_safe_stop_enabled =
+        declare_parameter<bool>("start_grace_safe_stop_enabled", true);
+    config.start_grace_duration_sec =
+        declare_parameter<double>("start_grace_duration_sec", 8.0);
+    config.start_grace_max_speed_mps =
+        declare_parameter<double>("start_grace_max_speed_mps", 1.5);
     config.safe_stop_release_cycles =
         declare_parameter<int>("safe_stop_release_cycles", 5);
     config.safe_stop_release_front_gap_m =
@@ -370,6 +393,7 @@ private:
     std::string yield_reason{};
     std::string reason{};
     bool safe_stop_triggered{false};
+    bool start_grace_active{false};
     bool safe_stop_release_ready{false};
     std::string safe_stop_reason{};
     std::string safe_stop_reject_reason{};
@@ -379,6 +403,9 @@ private:
     bool speed_only_fallback_active{false};
     bool wall_risk_speed_guard_active{false};
     bool mpc_health_speed_guard_active{false};
+    bool recovery_speed_guard_active{false};
+    bool lateral_target_hold_active{false};
+    std::string lateral_target_hold_reason{};
     std::string speed_cap_reason{};
     std::string active_section_name{};
     std::string active_section_profile{};
@@ -747,6 +774,8 @@ private:
         << output.active_cbf_constraint_count << ","
         << "\"safe_stop_triggered\":"
         << (output.safe_stop_triggered ? "true" : "false") << ","
+        << "\"start_grace_active\":"
+        << (output.start_grace_active ? "true" : "false") << ","
         << "\"safe_stop_release_ready\":"
         << (output.safe_stop_release_ready ? "true" : "false") << ","
         << "\"safe_stop_reason\":\"" << output.safe_stop_reason << "\","
@@ -764,6 +793,12 @@ private:
         << (output.wall_risk_speed_guard_active ? "true" : "false") << ","
         << "\"mpc_health_speed_guard_active\":"
         << (output.mpc_health_speed_guard_active ? "true" : "false") << ","
+        << "\"recovery_speed_guard_active\":"
+        << (output.recovery_speed_guard_active ? "true" : "false") << ","
+        << "\"lateral_target_hold_active\":"
+        << (output.lateral_target_hold_active ? "true" : "false") << ","
+        << "\"lateral_target_hold_reason\":\""
+        << output.lateral_target_hold_reason << "\","
         << "\"speed_cap_reason\":\"" << output.speed_cap_reason << "\","
         << "\"applied_speed_cap_mps\":"
         << jsonNumber(output.applied_speed_cap_mps) << ","
@@ -832,6 +867,7 @@ private:
     snapshot.yield_reason = output.blocked_info.yield_reason;
     snapshot.reason = output.reason;
     snapshot.safe_stop_triggered = output.safe_stop_triggered;
+    snapshot.start_grace_active = output.start_grace_active;
     snapshot.safe_stop_release_ready = output.safe_stop_release_ready;
     snapshot.safe_stop_reason = output.safe_stop_reason;
     snapshot.safe_stop_reject_reason = output.safe_stop_reject_reason;
@@ -842,6 +878,9 @@ private:
     snapshot.wall_risk_speed_guard_active = output.wall_risk_speed_guard_active;
     snapshot.mpc_health_speed_guard_active =
         output.mpc_health_speed_guard_active;
+    snapshot.recovery_speed_guard_active = output.recovery_speed_guard_active;
+    snapshot.lateral_target_hold_active = output.lateral_target_hold_active;
+    snapshot.lateral_target_hold_reason = output.lateral_target_hold_reason;
     snapshot.speed_cap_reason = output.speed_cap_reason;
     snapshot.active_section_name = output.active_section.name;
     snapshot.active_section_profile = output.active_section.profile;
@@ -864,9 +903,12 @@ private:
            snapshot.future_corner_side_by_side ||
            snapshot.future_yield_required || snapshot.active_override ||
            snapshot.safe_stop_triggered ||
+           snapshot.start_grace_active ||
            snapshot.speed_only_fallback_active ||
            snapshot.wall_risk_speed_guard_active ||
            snapshot.mpc_health_speed_guard_active ||
+           snapshot.recovery_speed_guard_active ||
+           snapshot.lateral_target_hold_active ||
            !snapshot.straight_overtake_start_allowed ||
            !snapshot.active_section_name.empty() ||
            !snapshot.front_vehicle_id.empty() ||
@@ -912,6 +954,7 @@ private:
         current.pass_gap_reason != previous.pass_gap_reason ||
         current.yield_reason != previous.yield_reason ||
         current.safe_stop_triggered != previous.safe_stop_triggered ||
+        current.start_grace_active != previous.start_grace_active ||
         current.safe_stop_release_ready != previous.safe_stop_release_ready ||
         current.safe_stop_reason != previous.safe_stop_reason ||
         current.safe_stop_reject_reason != previous.safe_stop_reject_reason ||
@@ -924,6 +967,12 @@ private:
             previous.wall_risk_speed_guard_active ||
         current.mpc_health_speed_guard_active !=
             previous.mpc_health_speed_guard_active ||
+        current.recovery_speed_guard_active !=
+            previous.recovery_speed_guard_active ||
+        current.lateral_target_hold_active !=
+            previous.lateral_target_hold_active ||
+        current.lateral_target_hold_reason !=
+            previous.lateral_target_hold_reason ||
         current.speed_cap_reason != previous.speed_cap_reason ||
         current.active_section_name != previous.active_section_name ||
         current.active_section_profile != previous.active_section_profile ||
@@ -969,10 +1018,12 @@ private:
         "overtake_start_abs_curvature=%.3f overtake_start_gate_reason=%s "
         "future_wall_clearance=%.2f yield_reason=%s "
         "ego_s=%.2f ego_d=%.2f target_d=%.2f min_cbf_h=%.3f cbf_slack=%.3f "
-        "safe_stop_triggered=%d safe_stop_reason=%s safe_stop_reject_reason=%s "
+        "safe_stop_triggered=%d start_grace=%d safe_stop_reason=%s "
+        "safe_stop_reject_reason=%s "
         "safe_stop_trigger_count=%d safe_stop_hold_count=%d "
         "safe_stop_release_count=%d "
         "safe_stop_release_ready=%d speed_only=%d wall_guard=%d mpc_guard=%d "
+        "recovery_guard=%d "
         "speed_cap_reason=%s speed_cap=%.2f section=%s/%s mpc_infeasible=%d "
         "mpc_solve_ms=%.2f reason=%s",
         own_vehicle_id_.c_str(), static_cast<unsigned long>(attempt_id),
@@ -1000,12 +1051,14 @@ private:
         output.blocked_info.future_wall_clearance_m,
         output.blocked_info.yield_reason.c_str(), ego.frenet.s, ego.frenet.d,
         output.target_lateral_offset_m, output.min_cbf_h, output.cbf_slack,
-        output.safe_stop_triggered, output.safe_stop_reason.c_str(),
-        output.safe_stop_reject_reason.c_str(), output.safe_stop_trigger_count,
-        output.safe_stop_hold_count, output.safe_stop_release_count,
+        output.safe_stop_triggered, output.start_grace_active,
+        output.safe_stop_reason.c_str(), output.safe_stop_reject_reason.c_str(),
+        output.safe_stop_trigger_count, output.safe_stop_hold_count,
+        output.safe_stop_release_count,
         output.safe_stop_release_ready, output.speed_only_fallback_active,
         output.wall_risk_speed_guard_active,
-        output.mpc_health_speed_guard_active, output.speed_cap_reason.c_str(),
+        output.mpc_health_speed_guard_active,
+        output.recovery_speed_guard_active, output.speed_cap_reason.c_str(),
         output.applied_speed_cap_mps, output.active_section.name.c_str(),
         output.active_section.profile.c_str(),
         output.mpc_health.infeasible_count, output.mpc_health.solve_time_ms,

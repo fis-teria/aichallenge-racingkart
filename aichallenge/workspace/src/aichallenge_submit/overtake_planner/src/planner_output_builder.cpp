@@ -44,6 +44,11 @@ std::vector<double> uniformVector(std::size_t count, double value) {
   return std::vector<double>(std::max<std::size_t>(1, count), value);
 }
 
+bool isRecoverySpeedGuardMode(BehaviorMode mode, CandidateType selected) {
+  return mode == BehaviorMode::ABORT_RECOVERY ||
+         selected == CandidateType::RECOVERY;
+}
+
 double clampedCurrentLateralOffset(const PlannerConfig &config,
                                    const EgoState &ego) {
   const double lower_d = config.d_min_m + config.min_wall_margin_m;
@@ -119,6 +124,7 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   bool speed_only_fallback = false;
   bool wall_risk_guard = false;
   bool mpc_health_guard = false;
+  bool recovery_speed_guard = false;
   const bool allow_speed_guard = true;
   const auto requestSpeedCap = [&](double cap_mps, const std::string &reason) {
     if (!std::isfinite(cap_mps) || cap_mps <= 0.0) {
@@ -151,9 +157,12 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
     speed_only_fallback = true;
   }
 
-  if (allow_speed_guard && config_.wall_risk_speed_guard_enabled &&
+  const bool wall_risk_speed_guard_condition =
       input.wall_soft_margin_m > 0.0 &&
-      blocked.ego_wall_clearance_m < input.wall_soft_margin_m) {
+      blocked.ego_wall_clearance_m < input.wall_soft_margin_m;
+  const bool wall_risk_speed_guard_applies =
+      config_.wall_risk_speed_guard_enabled && wall_risk_speed_guard_condition;
+  if (allow_speed_guard && wall_risk_speed_guard_applies) {
     requestSpeedCap(config_.wall_risk_v_max_mps, "wall_risk_speed_guard");
     wall_risk_guard = true;
   }
@@ -179,16 +188,37 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
       config_.mpc_health_stale_time_sec > 0.0 &&
       std::isfinite(mpc_health.age_sec) &&
       mpc_health.age_sec > config_.mpc_health_stale_time_sec;
-  if (allow_speed_guard && config_.mpc_health_speed_guard_enabled &&
+  const bool mpc_health_speed_guard_condition =
       mpc_health.valid &&
       (mpc_health_infeasible_guard || mpc_health_solve_time_guard ||
-       mpc_health_stale_guard)) {
+       mpc_health_stale_guard);
+  const bool mpc_health_speed_guard_applies =
+      config_.mpc_health_speed_guard_enabled && mpc_health_speed_guard_condition;
+  if (allow_speed_guard && mpc_health_speed_guard_applies) {
     const std::string reason =
         mpc_health_infeasible_guard   ? "mpc_health_infeasible_guard"
         : mpc_health_solve_time_guard ? "mpc_health_solve_time_guard"
                                       : "mpc_health_stale_guard";
     requestSpeedCap(config_.mpc_health_v_max_mps, reason);
     mpc_health_guard = true;
+  }
+
+  const bool large_lateral_error =
+      config_.large_lateral_error_threshold_m >= 0.0 &&
+      std::isfinite(input.ego.frenet.d) &&
+      std::abs(input.ego.frenet.d) > config_.large_lateral_error_threshold_m;
+  if (allow_speed_guard && config_.recovery_speed_guard_enabled &&
+      isRecoverySpeedGuardMode(input.mode, selected.type) &&
+      (wall_risk_speed_guard_applies || mpc_health_speed_guard_applies ||
+       large_lateral_error)) {
+    const std::string reason =
+        mpc_health_speed_guard_applies
+            ? "recovery_mpc_health_speed_guard"
+            : wall_risk_speed_guard_applies
+                  ? "recovery_wall_risk_speed_guard"
+                  : "recovery_lateral_error_speed_guard";
+    requestSpeedCap(config_.recovery_speed_guard_v_max_mps, reason);
+    recovery_speed_guard = true;
   }
 
   if (std::isfinite(requested_speed_cap)) {
@@ -225,6 +255,7 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   output.speed_only_fallback_active = speed_only_fallback;
   output.wall_risk_speed_guard_active = wall_risk_guard;
   output.mpc_health_speed_guard_active = mpc_health_guard;
+  output.recovery_speed_guard_active = recovery_speed_guard;
   output.wall_soft_margin_m = input.wall_soft_margin_m;
   output.active_section = active_section;
   output.mpc_health = mpc_health;

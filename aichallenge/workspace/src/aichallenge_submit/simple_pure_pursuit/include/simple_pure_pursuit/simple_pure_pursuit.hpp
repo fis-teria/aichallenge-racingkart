@@ -2,6 +2,7 @@
 #define SIMPLE_PURE_PURSUIT_HPP_
 
 #include "simple_pure_pursuit/lookahead.hpp"
+#include "simple_pure_pursuit/safety.hpp"
 
 #include <autoware_auto_control_msgs/msg/ackermann_control_command.hpp>
 #include <autoware_auto_planning_msgs/msg/trajectory.hpp>
@@ -13,6 +14,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <optional>
 #include <rclcpp/rclcpp.hpp>
+#include <string>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <vector>
@@ -36,6 +38,7 @@ public:
   // subscribers
   rclcpp::Subscription<Odometry>::SharedPtr sub_kinematics_;
   rclcpp::Subscription<Trajectory>::SharedPtr sub_trajectory_;
+  rclcpp::Subscription<Trajectory>::SharedPtr sub_mpc_predicted_horizon_;
   rclcpp::Subscription<Float32MultiArray>::SharedPtr sub_overtake_override_;
 
   // publishers
@@ -49,7 +52,11 @@ public:
 
   // updated by subscribers
   Trajectory::SharedPtr trajectory_;
+  Trajectory::SharedPtr mpc_predicted_horizon_;
   Odometry::SharedPtr odometry_;
+  std::optional<double> last_odometry_receive_sec_;
+  std::optional<double> last_trajectory_receive_sec_;
+  std::optional<double> last_mpc_predicted_horizon_receive_sec_;
 
   // pure pursuit parameters
   const double wheel_base_;
@@ -60,6 +67,16 @@ public:
   const double external_target_vel_;
   const double steering_tire_angle_gain_;
   const double debug_publish_period_sec_;
+  const double max_odom_age_sec_;
+  const double max_trajectory_age_sec_;
+  const double max_override_age_sec_;
+  const bool stop_on_stale_input_;
+  const double diagnostic_throttle_sec_;
+  const bool use_mpc_predicted_horizon_;
+  const double max_mpc_horizon_age_sec_;
+  const int min_mpc_horizon_points_;
+  const double max_mpc_horizon_start_distance_m_;
+  const double min_mpc_horizon_arc_length_m_;
   const bool use_overtake_reference_override_;
   const double overtake_override_timeout_sec_;
   const bool curvature_adaptive_lookahead_enabled_;
@@ -80,7 +97,13 @@ public:
 
 private:
   void onTimer();
-  bool subscribeMessageAvailable();
+  double steadyNowSec() const;
+  FreshnessResult evaluateInputFreshness(double now_sec) const;
+  HorizonFreshnessResult evaluateMpcPredictedHorizon(double now_sec) const;
+  void publishStopForStaleInput(const rclcpp::Time &stamp,
+                                const FreshnessResult &freshness);
+  void publishStaleDebug(const rclcpp::Time &stamp,
+                         const FreshnessResult &freshness);
   void onOvertakeOverride(const Float32MultiArray::SharedPtr msg);
   void clearOvertakeOverride();
   bool applyOvertakeOverride(Trajectory &trajectory,
@@ -101,7 +124,12 @@ private:
                double rear_x, double rear_y, double alpha,
                double raw_steering_tire_angle, double steering_tire_angle,
                bool overtake_override_applied, double overtake_lateral_offset_m,
-               double overtake_speed_cap_mps);
+               double overtake_speed_cap_mps, double freshness_now_sec,
+               bool mpc_horizon_applied,
+               bool mpc_horizon_velocity_cap_applied,
+               double mpc_horizon_velocity_cap_mps,
+               const HorizonFreshnessResult &mpc_horizon_freshness,
+               const std::string &trajectory_source);
 };
 
 } // namespace simple_pure_pursuit

@@ -11,7 +11,14 @@ from autoware_auto_control_msgs.msg import AckermannControlCommand
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from hybrid_control_mux.core import HybridMuxConfig, HybridMuxCore, MpcHealth
+from hybrid_control_mux.core import (
+    HybridMuxConfig,
+    HybridMuxCore,
+    MpcHealth,
+    SteeringLimitResult,
+    SteeringLimiter,
+    SteeringLimiterConfig,
+)
 
 
 class HybridControlMuxNode(Node):
@@ -42,6 +49,10 @@ class HybridControlMuxNode(Node):
         self.debug_publish_period_sec = float(
             self.declare_parameter("debug_publish_period_sec", 0.25).value
         )
+        self.steering_log_throttle_sec = float(
+            self.declare_parameter("steering_log_throttle_sec", 1.0).value
+        )
+        self.last_steering_limit_log_sec = -1.0e9
 
         config = HybridMuxConfig(
             fallback_trigger_infeasible_count=int(
@@ -61,6 +72,26 @@ class HybridControlMuxNode(Node):
             ),
         )
         self.core = HybridMuxCore(config)
+        self.steering_limiter = SteeringLimiter(
+            SteeringLimiterConfig(
+                enabled=bool(self.declare_parameter("enable_steering_rate_limit", True).value),
+                max_steering_angle_rad=float(
+                    self.declare_parameter("max_steering_angle_rad", 0.5585053606381855).value
+                ),
+                max_steering_rate_radps=float(
+                    self.declare_parameter("max_steering_rate_radps", 8.0).value
+                ),
+                max_steering_delta_per_cycle=float(
+                    self.declare_parameter("max_steering_delta_per_cycle", 0.0).value
+                ),
+                reset_dt_threshold_sec=float(
+                    self.declare_parameter("steering_limiter_reset_dt_sec", 0.50).value
+                ),
+                reset_on_mode_change=bool(
+                    self.declare_parameter("reset_steering_limiter_on_mode_change", False).value
+                ),
+            )
+        )
 
         self.mpc_cmd: Optional[AckermannControlCommand] = None
         self.mpc_cmd_time_sec: Optional[float] = None
@@ -144,6 +175,7 @@ class HybridControlMuxNode(Node):
             solved_cycles = decision.solved_cycles
 
         cmd = self._select_command(decision_source, now_sec)
+        steering_result = self._limit_steering(cmd, decision_source, now_sec)
         self.control_pub.publish(cmd)
         self._publish_debug(
             now_sec=now_sec,
@@ -155,6 +187,7 @@ class HybridControlMuxNode(Node):
             pure_pursuit_cmd_fresh=pp_cmd_fresh,
             health=health,
             output_cmd=cmd,
+            steering_result=steering_result,
         )
 
         if decision_source != self.last_source:
@@ -184,6 +217,31 @@ class HybridControlMuxNode(Node):
             self.fallback_accel_max_mps2,
         )
         return cmd
+
+    def _limit_steering(
+        self, cmd: AckermannControlCommand, source: str, now_sec: float
+    ) -> SteeringLimitResult:
+        if source == "stop":
+            result = self.steering_limiter.reset(0.0, now_sec, source)
+            cmd.lateral.steering_tire_angle = 0.0
+            return result
+
+        result = self.steering_limiter.update(
+            float(cmd.lateral.steering_tire_angle), now_sec, source
+        )
+        cmd.lateral.steering_tire_angle = result.limited_steering_rad
+        if result.angle_limited or result.rate_limited:
+            if now_sec - self.last_steering_limit_log_sec >= self.steering_log_throttle_sec:
+                self.get_logger().warn(
+                    "hybrid steering limited "
+                    f"source={source} raw={result.raw_steering_rad:.3f} "
+                    f"limited={result.limited_steering_rad:.3f} "
+                    f"delta={result.steering_delta_rad:.3f} "
+                    f"angle_limited={result.angle_limited} "
+                    f"rate_limited={result.rate_limited}"
+                )
+                self.last_steering_limit_log_sec = now_sec
+        return result
 
     def _stop_command(self, now_sec: float) -> AckermannControlCommand:
         cmd = AckermannControlCommand()
@@ -230,6 +288,7 @@ class HybridControlMuxNode(Node):
         pure_pursuit_cmd_fresh: bool,
         health: MpcHealth,
         output_cmd: AckermannControlCommand,
+        steering_result: SteeringLimitResult,
     ) -> None:
         if self.debug_publish_period_sec <= 0.0:
             return
@@ -254,6 +313,12 @@ class HybridControlMuxNode(Node):
                 "output_speed_mps": output_cmd.longitudinal.speed,
                 "output_accel_mps2": output_cmd.longitudinal.acceleration,
                 "output_steer_rad": output_cmd.lateral.steering_tire_angle,
+                "raw_steer_rad": steering_result.raw_steering_rad,
+                "limited_steer_rad": steering_result.limited_steering_rad,
+                "steering_delta_rad": steering_result.steering_delta_rad,
+                "steering_angle_limited": steering_result.angle_limited,
+                "steering_rate_limited": steering_result.rate_limited,
+                "steering_limiter_reset": steering_result.limiter_reset,
             },
             separators=(",", ":"),
         )

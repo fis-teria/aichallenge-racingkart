@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import List, Tuple
 import threading
 import numpy as np
 import osqp
@@ -67,6 +67,7 @@ class MPC:
         self.use_max_kappa_pred = use_max_kappa_pred
         # 既存の初期化
         self.current_prediction = None
+        self.current_prediction_trajectory = None
         self.infeasibility_counter = 0
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
@@ -399,6 +400,8 @@ class MPC:
             self.current_control = control_signals
             x = np.reshape(dec.x[:(N+1)*nx], (N+1, nx))
             self.current_prediction = self.update_prediction(x, N)
+            self.current_prediction_trajectory = self.update_prediction_trajectory(
+                x, N, control_signals)
 
             u = np.array([v, delta])
             max_delta = np.max(np.abs(control_signals[1:len(control_signals)//3*2:2]))
@@ -449,6 +452,28 @@ class MPC:
             y_pred.append(predicted_temporal_state.y)
 
         return x_pred, y_pred
+
+    def update_prediction_trajectory(self, spatial_state_prediction, N, control_signals) -> List[Tuple[float, float, float, float]]:
+        """
+        Transform the full solved horizon into world-frame pose and speed tuples.
+        The ROS node converts this solver-local representation into a Trajectory.
+        """
+
+        predicted_trajectory = []
+        for n in range(0, N + 1):
+            associated_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id+n)
+            predicted_temporal_state = self.model.s2t(
+                associated_waypoint, spatial_state_prediction[n, :])
+            control_index = min(n, max(0, N - 1)) * self.nu
+            speed_mps = control_signals[control_index] if control_index < len(control_signals) else 0.0
+            predicted_trajectory.append((
+                predicted_temporal_state.x,
+                predicted_temporal_state.y,
+                predicted_temporal_state.psi,
+                float(speed_mps),
+            ))
+
+        return predicted_trajectory
 
     def show_prediction(self, ax):
         """

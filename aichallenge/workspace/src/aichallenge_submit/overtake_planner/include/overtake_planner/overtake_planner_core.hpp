@@ -44,9 +44,14 @@ private:
   ActiveSectionSafety activeSectionSafety(double s) const;
   bool sectionContainsS(const SectionSafetyRule &rule, double s) const;
   double effectiveWallSoftMargin(const ActiveSectionSafety &section) const;
+  bool shouldSuppressSafeStopForStartGrace(double now_sec,
+                                           const EgoState &ego,
+                                           const BlockedInfo &blocked) const;
   // 横並びで相手が縦方向に前へ出ている場合は、無理に並走せず後ろへ譲る。
   bool shouldYieldBehindSideBySide(const EgoState &ego,
                                    const BlockedInfo &blocked_info) const;
+  void applyHighSpeedCurveLateralHold(double now_sec, const EgoState &ego,
+                                      PlannerOutput &output);
   void applyLateralTargetRateLimit(double now_sec, PlannerOutput &output);
   void rememberPublishedLateralTarget(double now_sec,
                                       const PlannerOutput &output);
@@ -58,11 +63,15 @@ private:
   SafetyEvaluator safety_;
   BehaviorStateMachine state_machine_;
   BehaviorMode mode_{BehaviorMode::FREE_RUN};
-  double overtake_start_sec_{0.0};
+  double first_valid_update_sec_{std::numeric_limits<double>::quiet_NaN()};
   int safe_stop_trigger_count_{0};
   bool straight_overtake_start_allowed_{true};
   std::vector<double> last_published_lateral_offsets_;
   double last_published_lateral_target_sec_{
+      std::numeric_limits<double>::quiet_NaN()};
+  bool high_speed_curve_lateral_hold_active_{false};
+  std::vector<double> high_speed_curve_lateral_hold_offsets_;
+  double high_speed_curve_lateral_hold_sec_{
       std::numeric_limits<double>::quiet_NaN()};
 };
 

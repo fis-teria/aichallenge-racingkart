@@ -23,6 +23,9 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_hybrid_control_mux_core test/test_core.py
     APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}
   )
+  ament_add_pytest_test(test_hybrid_control_mux_launch_contracts test/test_launch_contracts.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}
+  )
 endif()
 
 ament_package()

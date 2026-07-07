@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 @dataclass
@@ -26,6 +27,104 @@ class MuxDecision:
     fallback_active: bool
     reason: str
     solved_cycles: int
+
+
+@dataclass
+class SteeringLimiterConfig:
+    enabled: bool = True
+    max_steering_angle_rad: float = 0.5585053606381855
+    max_steering_rate_radps: float = 8.0
+    max_steering_delta_per_cycle: float = 0.0
+    reset_dt_threshold_sec: float = 0.50
+    reset_on_mode_change: bool = False
+
+
+@dataclass
+class SteeringLimitResult:
+    raw_steering_rad: float
+    limited_steering_rad: float
+    steering_delta_rad: float
+    angle_limited: bool
+    rate_limited: bool
+    limiter_reset: bool
+
+
+class SteeringLimiter:
+    def __init__(self, config: SteeringLimiterConfig) -> None:
+        self.config = config
+        self.has_last_steering = False
+        self.last_steering_rad = 0.0
+        self.last_time_sec = 0.0
+        self.last_source = ""
+
+    def update(self, raw_steering_rad: float, now_sec: float, source: str) -> SteeringLimitResult:
+        finite_raw = raw_steering_rad if math.isfinite(raw_steering_rad) else 0.0
+        abs_limit = max(0.0, self.config.max_steering_angle_rad)
+        clamped = self._clamp(finite_raw, -abs_limit, abs_limit)
+        angle_limited = not math.isclose(clamped, finite_raw, abs_tol=1.0e-12)
+
+        mode_changed = self.has_last_steering and source != self.last_source
+        dt = now_sec - self.last_time_sec
+        reset = (
+            not self.config.enabled
+            or not self.has_last_steering
+            or not math.isfinite(dt)
+            or dt <= 0.0
+            or dt > self.config.reset_dt_threshold_sec
+            or (self.config.reset_on_mode_change and mode_changed)
+        )
+        limited = clamped
+        rate_limited = False
+
+        if self.config.enabled and not reset:
+            max_delta = max(0.0, self.config.max_steering_rate_radps) * dt
+            if self.config.max_steering_delta_per_cycle > 0.0:
+                max_delta = min(max_delta, self.config.max_steering_delta_per_cycle)
+            lower = self.last_steering_rad - max_delta
+            upper = self.last_steering_rad + max_delta
+            limited = self._clamp(clamped, lower, upper)
+            rate_limited = not math.isclose(limited, clamped, abs_tol=1.0e-12)
+            limited = self._clamp(limited, -abs_limit, abs_limit)
+
+        steering_delta = limited - self.last_steering_rad if self.has_last_steering else 0.0
+        self.last_steering_rad = limited
+        self.last_time_sec = now_sec
+        self.last_source = source
+        self.has_last_steering = True
+
+        return SteeringLimitResult(
+            raw_steering_rad=finite_raw,
+            limited_steering_rad=limited,
+            steering_delta_rad=steering_delta,
+            angle_limited=angle_limited,
+            rate_limited=rate_limited,
+            limiter_reset=reset,
+        )
+
+    def reset(self, raw_steering_rad: float, now_sec: float, source: str) -> SteeringLimitResult:
+        finite_raw = raw_steering_rad if math.isfinite(raw_steering_rad) else 0.0
+        abs_limit = max(0.0, self.config.max_steering_angle_rad)
+        clamped = self._clamp(finite_raw, -abs_limit, abs_limit)
+        angle_limited = not math.isclose(clamped, finite_raw, abs_tol=1.0e-12)
+        steering_delta = clamped - self.last_steering_rad if self.has_last_steering else 0.0
+
+        self.last_steering_rad = clamped
+        self.last_time_sec = now_sec
+        self.last_source = source
+        self.has_last_steering = True
+
+        return SteeringLimitResult(
+            raw_steering_rad=finite_raw,
+            limited_steering_rad=clamped,
+            steering_delta_rad=steering_delta,
+            angle_limited=angle_limited,
+            rate_limited=False,
+            limiter_reset=True,
+        )
+
+    @staticmethod
+    def _clamp(value: float, lower: float, upper: float) -> float:
+        return min(max(value, lower), upper)
 
 
 class HybridMuxCore:

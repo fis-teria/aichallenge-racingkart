@@ -6,8 +6,10 @@
 #include <tf2/utils.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iterator>
+#include <limits>
 #include <sstream>
 
 namespace simple_pure_pursuit {
@@ -16,10 +18,54 @@ using motion_utils::findNearestIndex;
 using tier4_autoware_utils::calcLateralDeviation;
 using tier4_autoware_utils::calcYawDeviation;
 
+namespace {
+constexpr std::size_t kMaxMpcHorizonNearestIndex = 3;
+
+double trajectoryArcLength(const Trajectory &trajectory) {
+  if (trajectory.points.size() < 2) {
+    return 0.0;
+  }
+
+  double length_m = 0.0;
+  for (std::size_t i = 1; i < trajectory.points.size(); ++i) {
+    const auto &prev = trajectory.points[i - 1].pose.position;
+    const auto &curr = trajectory.points[i].pose.position;
+    length_m += std::hypot(curr.x - prev.x, curr.y - prev.y);
+  }
+  return length_m;
+}
+
+bool trajectoryValuesValid(const Trajectory &trajectory) {
+  for (const auto &point : trajectory.points) {
+    const auto &pos = point.pose.position;
+    const auto &orientation = point.pose.orientation;
+    if (!std::isfinite(pos.x) || !std::isfinite(pos.y) ||
+        !std::isfinite(pos.z) || !std::isfinite(orientation.x) ||
+        !std::isfinite(orientation.y) || !std::isfinite(orientation.z) ||
+        !std::isfinite(orientation.w) ||
+        !std::isfinite(point.longitudinal_velocity_mps) ||
+        point.longitudinal_velocity_mps < 0.0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+double firstPointDistanceToEgo(const Trajectory &trajectory,
+                               const Odometry &odometry) {
+  if (trajectory.points.empty()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  const auto &first = trajectory.points.front().pose.position;
+  const auto &ego = odometry.pose.pose.position;
+  return std::hypot(first.x - ego.x, first.y - ego.y);
+}
+} // namespace
+
 SimplePurePursuit::SimplePurePursuit()
     : Node("simple_pure_pursuit"),
       // initialize parameters
-      wheel_base_(declare_parameter<float>("wheel_base", 2.14)),
+      wheel_base_(declare_parameter<float>("wheel_base", 1.087)),
       lookahead_gain_(declare_parameter<float>("lookahead_gain", 1.0)),
       lookahead_min_distance_(
           declare_parameter<float>("lookahead_min_distance", 1.0)),
@@ -33,6 +79,25 @@ SimplePurePursuit::SimplePurePursuit()
           declare_parameter<float>("steering_tire_angle_gain", 1.0)),
       debug_publish_period_sec_(
           declare_parameter<float>("debug_publish_period_sec", 0.25)),
+      max_odom_age_sec_(declare_parameter<float>("max_odom_age_sec", 0.20)),
+      max_trajectory_age_sec_(
+          declare_parameter<float>("max_trajectory_age_sec", 0.50)),
+      max_override_age_sec_(
+          declare_parameter<float>("max_override_age_sec", 0.50)),
+      stop_on_stale_input_(
+          declare_parameter<bool>("stop_on_stale_input", true)),
+      diagnostic_throttle_sec_(
+          declare_parameter<float>("diagnostic_throttle_sec", 1.0)),
+      use_mpc_predicted_horizon_(
+          declare_parameter<bool>("use_mpc_predicted_horizon", false)),
+      max_mpc_horizon_age_sec_(
+          declare_parameter<float>("max_mpc_horizon_age_sec", 0.15)),
+      min_mpc_horizon_points_(
+          declare_parameter<int>("min_mpc_horizon_points", 5)),
+      max_mpc_horizon_start_distance_m_(declare_parameter<float>(
+          "max_mpc_horizon_start_distance_m", 2.0)),
+      min_mpc_horizon_arc_length_m_(declare_parameter<float>(
+          "min_mpc_horizon_arc_length_m", 2.0)),
       use_overtake_reference_override_(
           declare_parameter<bool>("use_overtake_reference_override", false)),
       overtake_override_timeout_sec_(
@@ -62,10 +127,22 @@ SimplePurePursuit::SimplePurePursuit()
       rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile().best_effort();
   sub_kinematics_ = create_subscription<Odometry>(
       "input/kinematics", bv_qos,
-      [this](const Odometry::SharedPtr msg) { odometry_ = msg; });
+      [this](const Odometry::SharedPtr msg) {
+        odometry_ = msg;
+        last_odometry_receive_sec_ = steadyNowSec();
+      });
   sub_trajectory_ = create_subscription<Trajectory>(
       "input/trajectory", bv_qos,
-      [this](const Trajectory::SharedPtr msg) { trajectory_ = msg; });
+      [this](const Trajectory::SharedPtr msg) {
+        trajectory_ = msg;
+        last_trajectory_receive_sec_ = steadyNowSec();
+      });
+  sub_mpc_predicted_horizon_ = create_subscription<Trajectory>(
+      "input/mpc_predicted_horizon", bv_qos,
+      [this](const Trajectory::SharedPtr msg) {
+        mpc_predicted_horizon_ = msg;
+        last_mpc_predicted_horizon_receive_sec_ = steadyNowSec();
+      });
   sub_overtake_override_ = create_subscription<Float32MultiArray>(
       "input/overtake_reference_override", rclcpp::QoS(1),
       [this](const Float32MultiArray::SharedPtr msg) {
@@ -89,26 +166,64 @@ AckermannControlCommand zeroAckermannControlCommand(rclcpp::Time stamp) {
 }
 
 void SimplePurePursuit::onTimer() {
-  // check data
-  if (!subscribeMessageAvailable()) {
+  const auto stamp = get_clock()->now();
+  const double now_sec = steadyNowSec();
+  const auto freshness = evaluateInputFreshness(now_sec);
+  if (!freshness.fresh) {
+    has_smoothed_lookahead_distance_ = false;
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(),
+        static_cast<int>(std::max(0.1, diagnostic_throttle_sec_) * 1000.0),
+        "PurePursuit input invalid: %s odom_age=%.3f trajectory_age=%.3f",
+        freshness.reason.c_str(), freshness.ages.odom_age_sec,
+        freshness.ages.trajectory_age_sec);
+    publishStaleDebug(stamp, freshness);
+    if (stop_on_stale_input_) {
+      publishStopForStaleInput(stamp, freshness);
+    }
     return;
   }
-  const auto stamp = get_clock()->now();
-  const double now_sec = stamp.seconds();
+
+  if (overtake_override_active_ && !overtakeOverrideFresh(now_sec)) {
+    const double override_age_sec =
+        inputAgeSec(last_overtake_override_sec_, now_sec);
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(),
+        static_cast<int>(std::max(0.1, diagnostic_throttle_sec_) * 1000.0),
+        "PurePursuit overtake override stale: age=%.3f", override_age_sec);
+    clearOvertakeOverride();
+  }
+
+  const auto mpc_horizon_freshness = evaluateMpcPredictedHorizon(now_sec);
+  const bool mpc_horizon_applied = mpc_horizon_freshness.usable;
+  const Trajectory *control_trajectory =
+      mpc_horizon_applied ? mpc_predicted_horizon_.get() : trajectory_.get();
+  if (control_trajectory == nullptr || control_trajectory->points.empty()) {
+    FreshnessResult invalid;
+    invalid.reason =
+        mpc_horizon_applied ? "empty_mpc_horizon" : "empty_trajectory";
+    publishStaleDebug(stamp, invalid);
+    if (stop_on_stale_input_) {
+      publishStopForStaleInput(stamp, invalid);
+    }
+    return;
+  }
 
   size_t closet_traj_point_idx =
-      findNearestIndex(trajectory_->points, odometry_->pose.pose.position);
-  const Trajectory *control_trajectory = trajectory_.get();
+      findNearestIndex(control_trajectory->points, odometry_->pose.pose.position);
+  std::string trajectory_source =
+      mpc_horizon_applied ? "mpc_horizon" : "trajectory";
   Trajectory adjusted_trajectory;
   bool overtake_override_applied = false;
-  if (overtakeOverrideFresh(now_sec)) {
+  if (!mpc_horizon_applied && overtakeOverrideFresh(now_sec)) {
     adjusted_trajectory = *trajectory_;
     overtake_override_applied = applyOvertakeOverride(
         adjusted_trajectory, closet_traj_point_idx, now_sec);
     if (overtake_override_applied) {
       control_trajectory = &adjusted_trajectory;
+      trajectory_source = "trajectory_overtake_override";
     }
-  } else if (overtake_override_active_) {
+  } else if (!mpc_horizon_applied && overtake_override_active_) {
     clearOvertakeOverride();
   }
 
@@ -123,6 +238,17 @@ void SimplePurePursuit::onTimer() {
   double target_longitudinal_vel =
       use_external_target_vel_ ? external_target_vel_
                                : closet_traj_point.longitudinal_velocity_mps;
+  const double mpc_horizon_velocity_cap_mps =
+      mpc_horizon_applied ? closet_traj_point.longitudinal_velocity_mps : -1.0;
+  bool mpc_horizon_velocity_cap_applied = false;
+  if (mpc_horizon_applied &&
+      std::isfinite(mpc_horizon_velocity_cap_mps) &&
+      mpc_horizon_velocity_cap_mps >= 0.0) {
+    mpc_horizon_velocity_cap_applied =
+        mpc_horizon_velocity_cap_mps < target_longitudinal_vel;
+    target_longitudinal_vel =
+        std::min(target_longitudinal_vel, mpc_horizon_velocity_cap_mps);
+  }
   const auto overtake_speed_cap = overtakeSpeedCap(0, now_sec);
   if (overtake_speed_cap.has_value()) {
     target_longitudinal_vel =
@@ -160,7 +286,7 @@ void SimplePurePursuit::onTimer() {
   const double curvature_window_distance = std::min(
       curvature_window_max_m, base_lookahead_distance * curvature_window_ratio);
   const double path_curvature = estimateTrajectoryCurvature(
-      *trajectory_, closet_traj_point_idx, curvature_window_distance,
+      *control_trajectory, closet_traj_point_idx, curvature_window_distance,
       curvature_min_arc_m);
   const double desired_lookahead_distance = adaptiveLookaheadDistance(
       target_longitudinal_vel, current_longitudinal_vel, path_curvature,
@@ -217,30 +343,160 @@ void SimplePurePursuit::onTimer() {
                curvature_window_distance, lookahead_point_x, lookahead_point_y,
                rear_x, rear_y, alpha, raw_steering_tire_angle,
                cmd.lateral.steering_tire_angle, overtake_override_applied,
-               overtakeLateralOffset(0), overtake_speed_cap.value_or(0.0));
+               overtakeLateralOffset(0), overtake_speed_cap.value_or(0.0),
+               now_sec, mpc_horizon_applied,
+               mpc_horizon_velocity_cap_applied,
+               mpc_horizon_velocity_cap_mps, mpc_horizon_freshness,
+               trajectory_source);
 
   pub_cmd_->publish(cmd);
   cmd.lateral.steering_tire_angle = raw_steering_tire_angle;
   pub_raw_cmd_->publish(cmd);
 }
 
-bool SimplePurePursuit::subscribeMessageAvailable() {
-  if (!odometry_) {
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
-                         "odometry is not available");
-    return false;
+double SimplePurePursuit::steadyNowSec() const {
+  using clock = std::chrono::steady_clock;
+  const auto now = clock::now().time_since_epoch();
+  return std::chrono::duration<double>(now).count();
+}
+
+FreshnessResult SimplePurePursuit::evaluateInputFreshness(
+    double now_sec) const {
+  FreshnessResult result;
+  result.ages.odom_age_sec =
+      inputAgeSec(last_odometry_receive_sec_, now_sec);
+  result.ages.trajectory_age_sec =
+      inputAgeSec(last_trajectory_receive_sec_, now_sec);
+  result.ages.override_age_sec =
+      overtake_override_active_ ? inputAgeSec(last_overtake_override_sec_,
+                                              now_sec)
+                                : -1.0;
+
+  if (!last_odometry_receive_sec_.has_value() || !odometry_) {
+    result.reason = "missing_odom";
+    return result;
   }
-  if (!trajectory_) {
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
-                         "trajectory is not available");
-    return false;
+  if (!ageFresh(result.ages.odom_age_sec, max_odom_age_sec_)) {
+    result.reason = "stale_odom";
+    return result;
+  }
+
+  const bool trajectory_time_fresh =
+      last_trajectory_receive_sec_.has_value() &&
+      ageFresh(result.ages.trajectory_age_sec, max_trajectory_age_sec_);
+  if (trajectory_ && !trajectory_->points.empty() && trajectory_time_fresh) {
+    result.fresh = true;
+    result.reason = "fresh";
+    return result;
+  }
+
+  const auto horizon = evaluateMpcPredictedHorizon(now_sec);
+  if (horizon.usable) {
+    result.fresh = true;
+    result.reason = "fresh_mpc_horizon";
+    return result;
+  }
+
+  if (!last_trajectory_receive_sec_.has_value() || !trajectory_) {
+    result.reason = "missing_trajectory";
+    return result;
   }
   if (trajectory_->points.empty()) {
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000 /*ms*/,
-                         "trajectory points is empty");
-    return false;
+    result.reason = "empty_trajectory";
+    return result;
   }
-  return true;
+  if (!trajectory_time_fresh) {
+    result.reason = "stale_trajectory";
+    return result;
+  }
+  return result;
+}
+
+HorizonFreshnessResult
+SimplePurePursuit::evaluateMpcPredictedHorizon(double now_sec) const {
+  if (!odometry_) {
+    HorizonFreshnessResult result;
+    result.reason = "missing_odom";
+    result.age_sec =
+        inputAgeSec(last_mpc_predicted_horizon_receive_sec_, now_sec);
+    return result;
+  }
+
+  const std::size_t point_count =
+      mpc_predicted_horizon_ ? mpc_predicted_horizon_->points.size() : 0;
+  const std::size_t min_points = static_cast<std::size_t>(
+      std::max(1, min_mpc_horizon_points_));
+  const bool frame_valid =
+      mpc_predicted_horizon_ &&
+      mpc_predicted_horizon_->header.frame_id == "map";
+  const bool values_valid =
+      mpc_predicted_horizon_ && trajectoryValuesValid(*mpc_predicted_horizon_);
+  const double start_distance_m =
+      mpc_predicted_horizon_
+          ? firstPointDistanceToEgo(*mpc_predicted_horizon_, *odometry_)
+          : -1.0;
+  const double arc_length_m =
+      mpc_predicted_horizon_ ? trajectoryArcLength(*mpc_predicted_horizon_)
+                             : -1.0;
+
+  auto result = evaluateMpcHorizonFreshness(
+      use_mpc_predicted_horizon_, last_mpc_predicted_horizon_receive_sec_,
+      now_sec, max_mpc_horizon_age_sec_, point_count, min_points,
+      start_distance_m, max_mpc_horizon_start_distance_m_, arc_length_m,
+      min_mpc_horizon_arc_length_m_, values_valid, frame_valid);
+
+  if (result.usable) {
+    const auto nearest_idx = findNearestIndex(
+        mpc_predicted_horizon_->points, odometry_->pose.pose.position);
+    if (nearest_idx > kMaxMpcHorizonNearestIndex) {
+      result.usable = false;
+      result.reason = "nearest_index";
+    }
+  }
+
+  return result;
+}
+
+void SimplePurePursuit::publishStopForStaleInput(
+    const rclcpp::Time &stamp, const FreshnessResult &freshness) {
+  (void)freshness;
+  auto cmd = zeroAckermannControlCommand(stamp);
+  cmd.longitudinal.acceleration = -1.5;
+  pub_cmd_->publish(cmd);
+  pub_raw_cmd_->publish(cmd);
+}
+
+void SimplePurePursuit::publishStaleDebug(
+    const rclcpp::Time &stamp, const FreshnessResult &freshness) {
+  (void)stamp;
+  if (debug_publish_period_sec_ <= 0.0 || !pub_debug_) {
+    return;
+  }
+  const double now_sec = steadyNowSec();
+  if (now_sec - last_debug_publish_sec_ < debug_publish_period_sec_) {
+    return;
+  }
+  last_debug_publish_sec_ = now_sec;
+  const auto horizon = evaluateMpcPredictedHorizon(now_sec);
+
+  std::ostringstream json;
+  json << "{"
+       << "\"controller\":\"simple_pure_pursuit\","
+       << "\"stale_input\":true,"
+       << "\"stale_reason\":\"" << freshness.reason << "\","
+       << "\"stop_on_stale_input\":"
+       << (stop_on_stale_input_ ? "true" : "false") << ","
+       << "\"odom_age_sec\":" << freshness.ages.odom_age_sec << ","
+       << "\"trajectory_age_sec\":" << freshness.ages.trajectory_age_sec
+       << ","
+       << "\"override_age_sec\":" << freshness.ages.override_age_sec << ","
+       << "\"mpc_horizon_age_sec\":" << horizon.age_sec << ","
+       << "\"mpc_horizon_points\":" << horizon.point_count << ","
+       << "\"mpc_horizon_reject_reason\":\"" << horizon.reason << "\"}";
+
+  String msg;
+  msg.data = json.str();
+  pub_debug_->publish(msg);
 }
 
 void SimplePurePursuit::onOvertakeOverride(
@@ -249,7 +505,7 @@ void SimplePurePursuit::onOvertakeOverride(
     return;
   }
 
-  const double now_sec = get_clock()->now().seconds();
+  const double now_sec = steadyNowSec();
   const auto &data = msg->data;
   if (data.size() < 3 || static_cast<int>(data[0]) != 1) {
     clearOvertakeOverride();
@@ -299,10 +555,13 @@ void SimplePurePursuit::clearOvertakeOverride() {
 }
 
 bool SimplePurePursuit::overtakeOverrideFresh(double now_sec) const {
-  return use_overtake_reference_override_ && overtake_override_active_ &&
-         !overtake_lateral_offsets_.empty() &&
-         now_sec - last_overtake_override_sec_ <=
-             overtake_override_timeout_sec_;
+  if (!use_overtake_reference_override_ || !overtake_override_active_ ||
+      overtake_lateral_offsets_.empty()) {
+    return false;
+  }
+  const double age_sec = inputAgeSec(last_overtake_override_sec_, now_sec);
+  return ageFresh(age_sec, overtake_override_timeout_sec_) &&
+         ageFresh(age_sec, max_override_age_sec_);
 }
 
 bool SimplePurePursuit::applyOvertakeOverride(
@@ -371,16 +630,21 @@ void SimplePurePursuit::publishDebug(
     double lookahead_point_y, double rear_x, double rear_y, double alpha,
     double raw_steering_tire_angle, double steering_tire_angle,
     bool overtake_override_applied, double overtake_lateral_offset_m,
-    double overtake_speed_cap_mps) {
+    double overtake_speed_cap_mps, double freshness_now_sec,
+    bool mpc_horizon_applied, bool mpc_horizon_velocity_cap_applied,
+    double mpc_horizon_velocity_cap_mps,
+    const HorizonFreshnessResult &mpc_horizon_freshness,
+    const std::string &trajectory_source) {
+  (void)stamp;
   if (debug_publish_period_sec_ <= 0.0 || !pub_debug_) {
     return;
   }
 
-  const double now_sec = stamp.seconds();
-  if (now_sec - last_debug_publish_sec_ < debug_publish_period_sec_) {
+  if (freshness_now_sec - last_debug_publish_sec_ <
+      debug_publish_period_sec_) {
     return;
   }
-  last_debug_publish_sec_ = now_sec;
+  last_debug_publish_sec_ = freshness_now_sec;
 
   const auto &nearest = control_trajectory.points.at(nearest_traj_point_idx);
   const double ego_x = odometry_->pose.pose.position.x;
@@ -395,10 +659,38 @@ void SimplePurePursuit::publishDebug(
       -std::sin(ref_yaw) * dx + std::cos(ref_yaw) * dy;
   const double yaw_error_rad =
       std::atan2(std::sin(ego_yaw - ref_yaw), std::cos(ego_yaw - ref_yaw));
+  const double odom_age_sec =
+      inputAgeSec(last_odometry_receive_sec_, freshness_now_sec);
+  const double trajectory_age_sec =
+      inputAgeSec(last_trajectory_receive_sec_, freshness_now_sec);
+  const double override_age_sec =
+      overtake_override_active_ ? inputAgeSec(last_overtake_override_sec_,
+                                              freshness_now_sec)
+                                : -1.0;
 
   std::ostringstream json;
   json << "{"
        << "\"controller\":\"simple_pure_pursuit\","
+       << "\"stale_input\":false,"
+       << "\"odom_age_sec\":" << odom_age_sec << ","
+       << "\"trajectory_age_sec\":" << trajectory_age_sec << ","
+       << "\"override_age_sec\":" << override_age_sec << ","
+       << "\"trajectory_source\":\"" << trajectory_source << "\","
+       << "\"mpc_horizon_applied\":"
+       << (mpc_horizon_applied ? "true" : "false") << ","
+       << "\"mpc_horizon_velocity_cap_applied\":"
+       << (mpc_horizon_velocity_cap_applied ? "true" : "false") << ","
+       << "\"mpc_horizon_velocity_cap_mps\":"
+       << mpc_horizon_velocity_cap_mps << ","
+       << "\"mpc_horizon_age_sec\":" << mpc_horizon_freshness.age_sec << ","
+       << "\"mpc_horizon_points\":" << mpc_horizon_freshness.point_count
+       << ","
+       << "\"mpc_horizon_start_distance_m\":"
+       << mpc_horizon_freshness.start_distance_m << ","
+       << "\"mpc_horizon_arc_length_m\":"
+       << mpc_horizon_freshness.arc_length_m << ","
+       << "\"mpc_horizon_reject_reason\":\""
+       << mpc_horizon_freshness.reason << "\","
        << "\"nearest_trajectory_index\":" << nearest_traj_point_idx << ","
        << "\"target_speed_mps\":" << target_longitudinal_vel << ","
        << "\"current_speed_mps\":" << current_longitudinal_vel << ","

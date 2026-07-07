@@ -37,6 +37,44 @@ bool isFallbackCandidate(CandidateType type) {
          type == CandidateType::SIDE_BY_SIDE_KEEP;
 }
 
+bool isLateralStabilizationMode(BehaviorMode mode) {
+  return mode == BehaviorMode::ABORT_RECOVERY ||
+         mode == BehaviorMode::YIELD_BEHIND ||
+         mode == BehaviorMode::SAFE_STOP || mode == BehaviorMode::SPEED_GUARD;
+}
+
+bool hasLateralStabilizationRisk(const PlannerOutput &output) {
+  const auto &blocked = output.blocked_info;
+  return blocked.corner_side_by_side || blocked.future_yield_required ||
+         blocked.future_corner_side_by_side ||
+         blocked.future_outer_wall_risk ||
+         output.speed_only_fallback_active ||
+         output.wall_risk_speed_guard_active ||
+         output.mpc_health_speed_guard_active ||
+         output.recovery_speed_guard_active;
+}
+
+double highSpeedCurveHoldEnterCurvature(const PlannerConfig &config) {
+  if (config.corner_side_yield_curvature_m_inv > 0.0) {
+    return config.corner_side_yield_curvature_m_inv;
+  }
+  return std::max(0.0, config.straight_overtake_max_curvature_m_inv);
+}
+
+double highSpeedCurveHoldReleaseCurvature(const PlannerConfig &config) {
+  if (config.high_speed_curve_lateral_hold_release_curvature_m_inv >= 0.0) {
+    return config.high_speed_curve_lateral_hold_release_curvature_m_inv;
+  }
+  return highSpeedCurveHoldEnterCurvature(config) * 0.5;
+}
+
+double heldOffsetAt(const std::vector<double> &offsets, std::size_t index) {
+  if (offsets.empty()) {
+    return 0.0;
+  }
+  return offsets[std::min(index, offsets.size() - 1)];
+}
+
 bool hasFeasibleCandidate(const std::vector<CandidateTrajectory> &candidates,
                           bool (*predicate)(CandidateType)) {
   return std::any_of(candidates.begin(), candidates.end(),
@@ -97,9 +135,16 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     last_published_lateral_offsets_.clear();
     last_published_lateral_target_sec_ =
         std::numeric_limits<double>::quiet_NaN();
+    high_speed_curve_lateral_hold_active_ = false;
+    high_speed_curve_lateral_hold_offsets_.clear();
+    high_speed_curve_lateral_hold_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
     output.mode = mode_;
     output.reason = "disabled_or_invalid";
     return output;
+  }
+  if (!std::isfinite(first_valid_update_sec_)) {
+    first_valid_update_sec_ = now_sec;
   }
 
   const ActiveSectionSafety active_section = activeSectionSafety(ego.frenet.s);
@@ -139,6 +184,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     straight_overtake_start_allowed_ = true;
   }
   blocked.ego_lateral_offset_m = ego.frenet.d;
+  blocked.ego_speed_mps = ego.v;
   blocked.ego_wall_clearance_m = blocked_risk_.wallClearance(ego.frenet.d);
   blocked = future_side_risk_.evaluate(ego, blocked, opponents);
   if (active_section.force_outer_yield &&
@@ -247,8 +293,13 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
        blocked.future_yield_required || currentPassGapLost(mode_, blocked)) &&
       !blocked.can_pass_left && !blocked.can_pass_right && no_feasible_pass &&
       no_feasible_fallback;
+  const bool start_grace_active =
+      safe_stop_base_condition &&
+      shouldSuppressSafeStopForStartGrace(now_sec, ego, blocked);
+  const bool effective_safe_stop_base_condition =
+      safe_stop_base_condition && !start_grace_active;
 
-  if (safe_stop_base_condition) {
+  if (effective_safe_stop_base_condition) {
     ++safe_stop_trigger_count_;
   } else {
     safe_stop_trigger_count_ = 0;
@@ -258,15 +309,15 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       std::max(1, config_.safe_stop_trigger_cycles);
   SafeStopContext safe_stop_context;
   safe_stop_context.requested =
-      safe_stop_base_condition &&
+      effective_safe_stop_base_condition &&
       safe_stop_trigger_count_ >= safe_stop_trigger_cycles_required;
   safe_stop_context.trigger_count = safe_stop_trigger_count_;
   safe_stop_context.ego_speed_mps = ego.v;
-  const double safe_stop_target_d =
+  const double safe_stop_clamped_d =
       std::clamp(ego.frenet.d, config_.d_min_m + config_.min_wall_margin_m,
                  config_.d_max_m - config_.min_wall_margin_m);
   safe_stop_context.lateral_error_m =
-      std::abs(ego.frenet.d - safe_stop_target_d);
+      std::abs(safe_stop_clamped_d);
 
   bool safe_stop_candidate_infeasible = false;
   CandidateTrajectory safe_stop_candidate;
@@ -367,7 +418,12 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
           state_machine_.safeStopHoldCount(),
           state_machine_.safeStopReleaseCount(), wall_soft_margin,
           active_section, mpc_health});
+  output_built.start_grace_active = start_grace_active;
+  if (start_grace_active) {
+    output_built.reason = "start_grace_safe_stop_suppressed";
+  }
   applyLateralTargetRateLimit(now_sec, output_built);
+  applyHighSpeedCurveLateralHold(now_sec, ego, output_built);
   rememberPublishedLateralTarget(now_sec, output_built);
   return output_built;
 }
@@ -551,6 +607,29 @@ double OvertakePlannerCore::effectiveWallSoftMargin(
   return base * std::max(1.0, section.wall_margin_scale);
 }
 
+bool OvertakePlannerCore::shouldSuppressSafeStopForStartGrace(
+    double now_sec, const EgoState &ego, const BlockedInfo &blocked) const {
+  if (!config_.start_grace_safe_stop_enabled ||
+      config_.start_grace_duration_sec <= 0.0 ||
+      !std::isfinite(first_valid_update_sec_) ||
+      !std::isfinite(now_sec) || now_sec < first_valid_update_sec_) {
+    return false;
+  }
+  if (now_sec - first_valid_update_sec_ >
+      config_.start_grace_duration_sec) {
+    return false;
+  }
+  if (config_.start_grace_max_speed_mps >= 0.0 &&
+      ego.v > config_.start_grace_max_speed_mps) {
+    return false;
+  }
+  if (blocked.blocked) {
+    return false;
+  }
+  return blocked.side_by_side || blocked.parallel_side_candidate ||
+         blocked.future_side_by_side || blocked.future_yield_required;
+}
+
 bool OvertakePlannerCore::shouldYieldBehindSideBySide(
     const EgoState &ego, const BlockedInfo &blocked_info) const {
   if (blocked_info.future_yield_required) {
@@ -572,11 +651,74 @@ bool OvertakePlannerCore::shouldYieldBehindSideBySide(
   return opponent_not_clearly_behind || close_to_wall;
 }
 
+void OvertakePlannerCore::applyHighSpeedCurveLateralHold(
+    double now_sec, const EgoState &ego, PlannerOutput &output) {
+  output.lateral_target_hold_active = false;
+  output.lateral_target_hold_reason.clear();
+
+  if (!config_.high_speed_curve_lateral_hold_enabled) {
+    high_speed_curve_lateral_hold_active_ = false;
+    high_speed_curve_lateral_hold_offsets_.clear();
+    high_speed_curve_lateral_hold_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
+    return;
+  }
+
+  const bool usable_output =
+      output.active_override && !output.lateral_offsets.empty();
+  const bool stabilized_mode = isLateralStabilizationMode(output.mode);
+  const double curvature =
+      std::max(output.blocked_info.corner_abs_curvature,
+               output.blocked_info.future_abs_curvature);
+  const double enter_curvature = highSpeedCurveHoldEnterCurvature(config_);
+  const double release_curvature = highSpeedCurveHoldReleaseCurvature(config_);
+  const double enter_speed = std::max(
+      0.0, config_.high_speed_curve_lateral_hold_min_speed_mps);
+  const double release_speed =
+      config_.high_speed_curve_lateral_hold_release_speed_mps >= 0.0
+          ? config_.high_speed_curve_lateral_hold_release_speed_mps
+          : enter_speed;
+
+  if (high_speed_curve_lateral_hold_active_) {
+    const bool release = !usable_output || !stabilized_mode ||
+                         ego.v <= release_speed ||
+                         curvature <= release_curvature;
+    if (release) {
+      high_speed_curve_lateral_hold_active_ = false;
+      high_speed_curve_lateral_hold_offsets_.clear();
+      high_speed_curve_lateral_hold_sec_ =
+          std::numeric_limits<double>::quiet_NaN();
+    } else if (!high_speed_curve_lateral_hold_offsets_.empty()) {
+      for (std::size_t i = 0; i < output.lateral_offsets.size(); ++i) {
+        output.lateral_offsets[i] =
+            heldOffsetAt(high_speed_curve_lateral_hold_offsets_, i);
+      }
+      output.target_lateral_offset_m = output.lateral_offsets.back();
+      output.lateral_target_hold_active = true;
+      output.lateral_target_hold_reason = "high_speed_curve_hold";
+      return;
+    }
+  }
+
+  const bool should_enter =
+      usable_output && stabilized_mode &&
+      hasLateralStabilizationRisk(output) && ego.v >= enter_speed &&
+      curvature >= enter_curvature;
+  if (!should_enter) {
+    return;
+  }
+
+  high_speed_curve_lateral_hold_active_ = true;
+  high_speed_curve_lateral_hold_offsets_ = output.lateral_offsets;
+  high_speed_curve_lateral_hold_sec_ = now_sec;
+  output.lateral_target_hold_active = true;
+  output.lateral_target_hold_reason = "high_speed_curve_hold";
+}
+
 void OvertakePlannerCore::applyLateralTargetRateLimit(double now_sec,
                                                       PlannerOutput &output) {
   if (!output.active_override || output.lateral_offsets.empty() ||
       config_.lateral_target_max_step_m <= 0.0 ||
-      output.mode == BehaviorMode::SAFE_STOP ||
       last_published_lateral_offsets_.empty() ||
       !std::isfinite(last_published_lateral_target_sec_) ||
       now_sec - last_published_lateral_target_sec_ >

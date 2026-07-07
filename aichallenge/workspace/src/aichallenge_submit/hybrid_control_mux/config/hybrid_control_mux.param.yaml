@@ -15,3 +15,10 @@ hybrid_control_mux_node:
     use_pure_pursuit_on_mpc_cmd_timeout: true
     use_pure_pursuit_on_mpc_health_timeout: false
     debug_publish_period_sec: 0.25
+    enable_steering_rate_limit: true
+    max_steering_angle_rad: 0.5585053606381855
+    max_steering_rate_radps: 8.0
+    max_steering_delta_per_cycle: 0.0
+    steering_limiter_reset_dt_sec: 0.50
+    reset_steering_limiter_on_mode_change: false
+    steering_log_throttle_sec: 1.0

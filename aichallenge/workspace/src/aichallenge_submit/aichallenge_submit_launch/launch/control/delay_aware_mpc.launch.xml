@@ -18,6 +18,7 @@
   <arg name="debug_publish_period_sec" default="0.25"/>
   <arg name="output_control_cmd" default="/control/command/control_cmd"/>
   <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
+  <arg name="output_mpc_predicted_horizon" default="/mpc/predicted_horizon"/>
 
   <!-- localization odomを遅れ補償して、既存MPCが読む代替odomトピックを作る。 -->
   <node pkg="delay_aware_mpc_ros" exec="delay_compensated_odometry_node"
@@ -50,6 +51,7 @@
     <remap from="/localization/kinematic_state" to="/delay_aware_mpc/localization/kinematic_state"/>
     <remap from="/control/command/control_cmd" to="$(var output_control_cmd)"/>
     <remap from="/control/command/control_cmd_raw" to="$(var output_raw_control_cmd)"/>
+    <remap from="/mpc/predicted_horizon" to="$(var output_mpc_predicted_horizon)"/>
   </node>
 
   <group if="$(var use_overtake_planner)">
