@@ -17,8 +17,8 @@
   <log message="echo launch param use_sim_time: $(var use_sim_time) launch_vehicle_interface: $(var launch_vehicle_interface) sensor_model: $(var sensor_model)"/>
 
   <!-- Control method -->
-  <arg name="control_method" default="delay_aware_mpc"
-       description="Select control: mpc, delay_aware_mpc, hybrid_delay_aware_mpc, simple_delay_aware_control, pure_pursuit, tiny_lidar_net, pilot_net, joycon"/>
+  <arg name="control_method" default="hybrid_delay_aware_mpc"
+       description="Select control: mpc, delay_aware_mpc, hybrid_delay_aware_mpc, pure_pursuit, tiny_lidar_net, pilot_net, joycon"/>
 
   <!-- Global parameters -->
   <group scoped="false">
@@ -154,20 +154,6 @@
 
   <group if="$(eval &quot;'$(var control_method)' == 'hybrid_delay_aware_mpc'&quot;)">
     <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/hybrid_delay_aware_mpc.launch.xml">
-      <arg name="simulation" value="$(var simulation)"/>
-      <arg name="use_sim_time" value="$(var use_sim_time)"/>
-    </include>
-  </group>
-
-  <group if="$(eval &quot;'$(var control_method)' == 'simple_delay_aware_control'&quot;)">
-    <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/simple_delay_aware_control.launch.xml">
-      <arg name="simulation" value="$(var simulation)"/>
-      <arg name="use_sim_time" value="$(var use_sim_time)"/>
-    </include>
-  </group>
-
-  <group if="$(eval &quot;'$(var control_method)' == 'simple_dealay_aware_contorol'&quot;)">
-    <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/simple_delay_aware_control.launch.xml">
       <arg name="simulation" value="$(var simulation)"/>
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
     </include>

@@ -34,7 +34,6 @@
   <exec_depend>multi_purpose_mpc_ros</exec_depend>
   <exec_depend>hybrid_control_mux</exec_depend>
   <exec_depend>delay_aware_mpc_ros</exec_depend>
-  <exec_depend>simple_delay_aware_control</exec_depend>
   <exec_depend>overtake_planner</exec_depend>
 
   <exec_depend>tier4_planning_rviz_plugin</exec_depend>

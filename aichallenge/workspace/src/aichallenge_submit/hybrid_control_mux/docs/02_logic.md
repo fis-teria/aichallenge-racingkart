@@ -133,6 +133,8 @@ Pure Pursuit は現在位置に最も近い trajectory index を基準にして�
 - `external_target_vel` を使う場合でも、現在点の `speed_caps[0]` を目標速度の上限として使う
 - override が `overtake_override_timeout_sec` より古くなったら無効化する
 
+Pure Pursuit の lookahead は基本的に `lookahead_gain * max(target_speed, current_speed) + lookahead_min_distance` で決まります。`curvature_adaptive_lookahead_enabled=true` の場合は、override 適用後の trajectory の実際の `x/y` 点列から前方曲率を推定し、曲率が大きい区間だけ `curvature_lookahead_min_distance` まで lookahead を短くします。曲率推定の距離窓は base lookahead から決め、trajectory 点密度だけで変わりにくくしています。直線や低曲率区間では従来の速度ベース lookahead を維持し、lookahead の急変は `curvature_lookahead_smoothing_alpha` で平滑化します。
+
 これにより、Pure Pursuit fallback 中でも overtake planner の FOLLOW、YIELD、PASS 系の横オフセットと速度抑制が制御に乗ります。ただし、Pure Pursuit 自体が相手車両との制約を解くわけではありません。
 
 ## 停止指令の生成

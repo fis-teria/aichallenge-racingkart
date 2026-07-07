@@ -4,7 +4,7 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="use_obstacle_avoidance" default="true"/>
   <arg name="use_overtake_planner" default="true"/>
-  <arg name="fallback_speed_mps" default="2.0"/>
+  <arg name="fallback_speed_mps" default="9.5"/>
 
   <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/delay_aware_mpc.launch.xml">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
@@ -26,6 +26,13 @@
     <arg name="input_overtake_reference_override" value="/overtake/reference_override"/>
     <arg name="lookahead_gain" value="0.5"/>
     <arg name="lookahead_min_distance" value="3.5"/>
+    <arg name="curvature_adaptive_lookahead_enabled" value="true"/>
+    <arg name="curvature_lookahead_min_distance" value="3.5"/>
+    <arg name="curvature_lookahead_sensitivity" value="8.0"/>
+    <arg name="curvature_lookahead_window_ratio" value="2.0"/>
+    <arg name="curvature_lookahead_max_window_distance" value="10.0"/>
+    <arg name="curvature_lookahead_min_arc_length" value="1.0"/>
+    <arg name="curvature_lookahead_smoothing_alpha" value="0.35"/>
     <arg name="speed_proportional_gain" value="0.8"/>
   </include>
 

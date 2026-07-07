@@ -36,7 +36,21 @@ SimplePurePursuit::SimplePurePursuit()
       use_overtake_reference_override_(
           declare_parameter<bool>("use_overtake_reference_override", false)),
       overtake_override_timeout_sec_(
-          declare_parameter<float>("overtake_override_timeout_sec", 0.50)) {
+          declare_parameter<float>("overtake_override_timeout_sec", 0.50)),
+      curvature_adaptive_lookahead_enabled_(declare_parameter<bool>(
+          "curvature_adaptive_lookahead_enabled", true)),
+      curvature_lookahead_min_distance_(
+          declare_parameter<float>("curvature_lookahead_min_distance", 3.5)),
+      curvature_lookahead_sensitivity_(
+          declare_parameter<float>("curvature_lookahead_sensitivity", 8.0)),
+      curvature_lookahead_window_ratio_(
+          declare_parameter<float>("curvature_lookahead_window_ratio", 2.0)),
+      curvature_lookahead_max_window_distance_(declare_parameter<float>(
+          "curvature_lookahead_max_window_distance", 10.0)),
+      curvature_lookahead_min_arc_length_(
+          declare_parameter<float>("curvature_lookahead_min_arc_length", 1.0)),
+      curvature_lookahead_smoothing_alpha_(declare_parameter<float>(
+          "curvature_lookahead_smoothing_alpha", 0.35)) {
   pub_cmd_ = create_publisher<AckermannControlCommand>("output/control_cmd", 1);
   pub_raw_cmd_ =
       create_publisher<AckermannControlCommand>("output/raw_control_cmd", 1);
@@ -124,8 +138,43 @@ void SimplePurePursuit::onTimer() {
 
   // calc lateral control
   //// calc lookahead distance
-  double lookahead_distance =
-      lookahead_gain_ * target_longitudinal_vel + lookahead_min_distance_;
+  const LookaheadParams lookahead_params{
+      lookahead_gain_, lookahead_min_distance_,
+      curvature_adaptive_lookahead_enabled_, curvature_lookahead_min_distance_,
+      curvature_lookahead_sensitivity_};
+  const double base_lookahead_distance = speedBasedLookaheadDistance(
+      target_longitudinal_vel, current_longitudinal_vel, lookahead_params);
+  const double curvature_window_ratio =
+      std::isfinite(curvature_lookahead_window_ratio_)
+          ? std::max(1.0, curvature_lookahead_window_ratio_)
+          : 1.0;
+  const double curvature_min_arc_m =
+      std::isfinite(curvature_lookahead_min_arc_length_)
+          ? std::max(1.0e-3, curvature_lookahead_min_arc_length_)
+          : 1.0e-3;
+  const double curvature_window_max_m =
+      std::isfinite(curvature_lookahead_max_window_distance_)
+          ? std::max(curvature_min_arc_m,
+                     curvature_lookahead_max_window_distance_)
+          : base_lookahead_distance;
+  const double curvature_window_distance = std::min(
+      curvature_window_max_m, base_lookahead_distance * curvature_window_ratio);
+  const double path_curvature = estimateTrajectoryCurvature(
+      *trajectory_, closet_traj_point_idx, curvature_window_distance,
+      curvature_min_arc_m);
+  const double desired_lookahead_distance = adaptiveLookaheadDistance(
+      target_longitudinal_vel, current_longitudinal_vel, path_curvature,
+      lookahead_params);
+  double lookahead_distance = desired_lookahead_distance;
+  if (curvature_adaptive_lookahead_enabled_) {
+    lookahead_distance = smoothLookaheadDistance(
+        desired_lookahead_distance, smoothed_lookahead_distance_,
+        has_smoothed_lookahead_distance_, curvature_lookahead_smoothing_alpha_);
+    smoothed_lookahead_distance_ = lookahead_distance;
+    has_smoothed_lookahead_distance_ = true;
+  } else {
+    has_smoothed_lookahead_distance_ = false;
+  }
   //// calc center coordinate of rear wheel
   double rear_x = odometry_->pose.pose.position.x -
                   wheel_base_ / 2.0 * std::cos(current_yaw);
@@ -163,11 +212,12 @@ void SimplePurePursuit::onTimer() {
 
   publishDebug(cmd.stamp, *control_trajectory, closet_traj_point_idx,
                target_longitudinal_vel, current_longitudinal_vel,
-               cmd.longitudinal.acceleration, lookahead_distance,
-               lookahead_point_x, lookahead_point_y, rear_x, rear_y, alpha,
-               raw_steering_tire_angle, cmd.lateral.steering_tire_angle,
-               overtake_override_applied, overtakeLateralOffset(0),
-               overtake_speed_cap.value_or(0.0));
+               cmd.longitudinal.acceleration, base_lookahead_distance,
+               desired_lookahead_distance, lookahead_distance, path_curvature,
+               curvature_window_distance, lookahead_point_x, lookahead_point_y,
+               rear_x, rear_y, alpha, raw_steering_tire_angle,
+               cmd.lateral.steering_tire_angle, overtake_override_applied,
+               overtakeLateralOffset(0), overtake_speed_cap.value_or(0.0));
 
   pub_cmd_->publish(cmd);
   cmd.lateral.steering_tire_angle = raw_steering_tire_angle;
@@ -280,7 +330,8 @@ bool SimplePurePursuit::applyOvertakeOverride(
     const auto speed_cap = overtakeSpeedCap(i, now_sec);
     if (speed_cap.has_value()) {
       point.longitudinal_velocity_mps =
-          std::min(point.longitudinal_velocity_mps, speed_cap.value());
+          std::min(point.longitudinal_velocity_mps,
+                   static_cast<float>(speed_cap.value()));
     }
   }
   return count > 0;
@@ -314,7 +365,9 @@ void SimplePurePursuit::publishDebug(
     const rclcpp::Time &stamp, const Trajectory &control_trajectory,
     std::size_t nearest_traj_point_idx, double target_longitudinal_vel,
     double current_longitudinal_vel, double command_accel,
-    double lookahead_distance, double lookahead_point_x,
+    double base_lookahead_distance, double desired_lookahead_distance,
+    double lookahead_distance, double path_curvature,
+    double curvature_window_distance, double lookahead_point_x,
     double lookahead_point_y, double rear_x, double rear_y, double alpha,
     double raw_steering_tire_angle, double steering_tire_angle,
     bool overtake_override_applied, double overtake_lateral_offset_m,
@@ -350,7 +403,14 @@ void SimplePurePursuit::publishDebug(
        << "\"target_speed_mps\":" << target_longitudinal_vel << ","
        << "\"current_speed_mps\":" << current_longitudinal_vel << ","
        << "\"command_accel_mps2\":" << command_accel << ","
+       << "\"base_lookahead_distance_m\":" << base_lookahead_distance << ","
+       << "\"desired_lookahead_distance_m\":" << desired_lookahead_distance
+       << ","
        << "\"lookahead_distance_m\":" << lookahead_distance << ","
+       << "\"path_curvature_1pm\":" << path_curvature << ","
+       << "\"curvature_window_distance_m\":" << curvature_window_distance << ","
+       << "\"curvature_adaptive_lookahead_enabled\":"
+       << (curvature_adaptive_lookahead_enabled_ ? "true" : "false") << ","
        << "\"lookahead_point_x\":" << lookahead_point_x << ","
        << "\"lookahead_point_y\":" << lookahead_point_y << ","
        << "\"rear_x\":" << rear_x << ","

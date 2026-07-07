@@ -112,10 +112,17 @@ hybrid 起動では Pure Pursuit も `/overtake/reference_override` の速度 ca
 | `use_overtake_reference_override` | `false` | Pure Pursuit が `/overtake/reference_override` を読み、横オフセットと速度 cap を反映するか |
 | `input_overtake_reference_override` | `/overtake/reference_override` | Pure Pursuit が読む overtake planner の override topic |
 | `overtake_override_timeout_sec` | `0.50` | override を fresh とみなす最大時間 |
+| `curvature_adaptive_lookahead_enabled` | `true` | 曲率が大きい区間で Pure Pursuit の lookahead を短くするか |
+| `curvature_lookahead_min_distance` | `3.5` | 曲率適応後の lookahead 下限 [m]。`lookahead_min_distance` 未満にはならない |
+| `curvature_lookahead_sensitivity` | `8.0` | 曲率に対して lookahead を短くする強さ |
+| `curvature_lookahead_window_ratio` | `1.25` | 曲率推定に使う距離窓を base lookahead の何倍にするか |
+| `curvature_lookahead_max_window_distance` | `12.0` | 曲率推定に使う距離窓の上限 [m] |
+| `curvature_lookahead_min_arc_length` | `1.0` | 曲率推定に使う最小弧長 [m] |
+| `curvature_lookahead_smoothing_alpha` | `0.35` | lookahead 更新の平滑化係数。`1.0` に近いほど即応する |
 
 hybrid 起動時は、MPC fallback 用 Pure Pursuit に対して `use_overtake_reference_override=true` が渡されます。override が fresh な間、Pure Pursuit は現在位置から先の trajectory 点を横オフセット分だけずらし、速度 cap を目標速度の上限として使います。
 
-これにより、MPC が infeasible で Pure Pursuit に落ちている間も、overtake planner の FOLLOW、YIELD、PASS、SAFE_STOP 系の速度抑制と横方向目標が反映されます。ただし、Pure Pursuit はMPCのように制約付き最適化を解くわけではないため、fallback速度は安全側に抑える前提です。
+これにより、MPC が infeasible で Pure Pursuit に落ちている間も、overtake planner の FOLLOW、YIELD、PASS、SAFE_STOP 系の速度抑制と横方向目標が反映されます。Pure Pursuit は曲率が大きい区間では lookahead を短くし、直線や低曲率区間では速度ベースの lookahead をそのまま使います。ただし、Pure Pursuit はMPCのように制約付き最適化を解くわけではないため、fallback速度は安全側に抑える前提です。
 
 ### `fallback_accel_max_mps2`
 

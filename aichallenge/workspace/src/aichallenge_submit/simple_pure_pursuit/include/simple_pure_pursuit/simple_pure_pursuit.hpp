@@ -1,6 +1,8 @@
 #ifndef SIMPLE_PURE_PURSUIT_HPP_
 #define SIMPLE_PURE_PURSUIT_HPP_
 
+#include "simple_pure_pursuit/lookahead.hpp"
+
 #include <autoware_auto_control_msgs/msg/ackermann_control_command.hpp>
 #include <autoware_auto_planning_msgs/msg/trajectory.hpp>
 #include <autoware_auto_planning_msgs/msg/trajectory_point.hpp>
@@ -60,7 +62,16 @@ public:
   const double debug_publish_period_sec_;
   const bool use_overtake_reference_override_;
   const double overtake_override_timeout_sec_;
+  const bool curvature_adaptive_lookahead_enabled_;
+  const double curvature_lookahead_min_distance_;
+  const double curvature_lookahead_sensitivity_;
+  const double curvature_lookahead_window_ratio_;
+  const double curvature_lookahead_max_window_distance_;
+  const double curvature_lookahead_min_arc_length_;
+  const double curvature_lookahead_smoothing_alpha_;
   double last_debug_publish_sec_{-1.0e9};
+  bool has_smoothed_lookahead_distance_{false};
+  double smoothed_lookahead_distance_{0.0};
   bool overtake_override_active_{false};
   int overtake_mode_id_{0};
   double last_overtake_override_sec_{-1.0e9};
@@ -79,17 +90,18 @@ private:
   std::optional<double> overtakeSpeedCap(std::size_t horizon_index,
                                          double now_sec) const;
   double overtakeLateralOffset(std::size_t horizon_index) const;
-  void publishDebug(const rclcpp::Time &stamp,
-                    const Trajectory &control_trajectory,
-                    std::size_t nearest_traj_point_idx,
-                    double target_longitudinal_vel,
-                    double current_longitudinal_vel, double command_accel,
-                    double lookahead_distance, double lookahead_point_x,
-                    double lookahead_point_y, double rear_x, double rear_y,
-                    double alpha, double raw_steering_tire_angle,
-                    double steering_tire_angle, bool overtake_override_applied,
-                    double overtake_lateral_offset_m,
-                    double overtake_speed_cap_mps);
+  void
+  publishDebug(const rclcpp::Time &stamp, const Trajectory &control_trajectory,
+               std::size_t nearest_traj_point_idx,
+               double target_longitudinal_vel, double current_longitudinal_vel,
+               double command_accel, double base_lookahead_distance,
+               double desired_lookahead_distance, double lookahead_distance,
+               double path_curvature, double curvature_window_distance,
+               double lookahead_point_x, double lookahead_point_y,
+               double rear_x, double rear_y, double alpha,
+               double raw_steering_tire_angle, double steering_tire_angle,
+               bool overtake_override_applied, double overtake_lateral_offset_m,
+               double overtake_speed_cap_mps);
 };
 
 } // namespace simple_pure_pursuit
