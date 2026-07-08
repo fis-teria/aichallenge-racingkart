@@ -199,6 +199,7 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "overtake_planner_node.ros__parameters.yield_rejoin_gap_m": "譲り状態から追従へ戻る前方距離[m]です。",
     "overtake_planner_node.ros__parameters.left_offset_m": "左追い抜き時にMPCへ渡す横オフセット[m]です。",
     "overtake_planner_node.ros__parameters.right_offset_m": "右追い抜き時にMPCへ渡す横オフセット[m]です。",
+    "overtake_planner_node.ros__parameters.pass_horizon_publish_mode": "PREPARE中にPASS horizonをMPCへ出すかを決めます。overtake_onlyではOVERTAKEに入るまでFOLLOW horizonを出します。",
     "overtake_planner_node.ros__parameters.prepare_distance_m": "追い越し準備の横移動を始める距離[m]です。大きいほど早めにラインを作ります。",
     "overtake_planner_node.ros__parameters.merge_distance_m": "追い越し後に中心/基準ラインへ戻る距離[m]です。大きいほど戻りが緩やかです。",
     "overtake_planner_node.ros__parameters.follow_speed_margin_mps": "追従時に前走車速度から引く速度余裕[m/s]です。",
@@ -270,6 +271,84 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "hybrid_control_mux_node.ros__parameters.steering_log_throttle_sec": "ステア角/レート制限ログを再出力する最小間隔[s]です。小さいほど詳細にログが出ます。",
 }
 
+YAML_NAME_DESCRIPTION_DEFAULTS: dict[str, str] = {
+    "start_on_vehicle_state": "autostartを開始するAWSIM vehicle state名です。カンマ区切りで複数状態を指定できます。",
+    "stop_on_vehicle_state": "autostartを終了扱いにするAWSIM vehicle state名です。Finish検出後の後処理に使います。",
+    "enable_capture": "評価中の画面キャプチャ取得を切り替える設定です。",
+    "enable_rosbag": "autostart時にrosbag記録を開始するかどうかを切り替えます。",
+    "call_initial_pose": "起動時に初期位置サービスを呼ぶかどうかです。自己位置初期化の自動化に使います。",
+    "request_control_mode": "起動時にAutowareの制御モード要求を出すかどうかです。",
+    "initial_pose_service": "初期位置を投入するROS service名です。",
+    "initial_pose_service_timeout_sec": "初期位置service応答を待つ最大時間[s]です。",
+    "capture_service": "画面キャプチャを要求するROS service名です。",
+    "capture_stop_timeout_sec": "capture停止処理を待つ最大時間[s]です。",
+    "enable_debug_visualization": "debug可視化や補助表示を出すかどうかです。軽量化したい時はfalseにします。",
+    "rosbag_output": "rosbag保存ディレクトリ名です。output配下に作られる記録先を指定します。",
+    "rosbag_storage_id": "rosbagのstorage backendです。mcapやsqlite3などを指定します。",
+    "rosbag_compression_format": "rosbag圧縮形式です。空文字なら圧縮なし、zstdなどで圧縮できます。",
+    "rosbag_compression_mode": "rosbag圧縮モードです。file/message単位などstorage設定に合わせます。",
+    "enable_motion_analytics": "走行後にmotion analytics集計を実行するかどうかです。",
+    "motion_analytics_cmd": "走行後解析として実行するコマンドです。",
+    "motion_analytics_input_dir": "motion analyticsへ渡す入力ディレクトリです。空なら通常のrun出力から推定します。",
+    "exit_on_finish": "完走/終了検出後に関連プロセスを終了するかどうかです。",
+    "shutdown_grace_sec": "終了検出後、shutdown処理へ移るまで待つ猶予時間[s]です。",
+    "kill_wait_sec": "通常shutdown後にプロセス終了を待つ時間[s]です。超えた場合はkill対象になります。",
+    "shutdown_delay_sec": "AWSIM shutdown要求を出すまでの遅延時間[s]です。",
+    "request_launch_shutdown": "AWSIM終了時にlaunch全体へshutdownを要求するかどうかです。",
+    "awsim_kill_patterns": "強制終了対象にするAWSIM関連プロセス名のパターンです。",
+    "shutdown_on_exit": "管理プロセス終了時にAWSIMも停止するかどうかです。",
+    "admin_start_trigger_state": "管理用startを発火するAWSIM state名です。",
+    "admin_start_enabled": "AWSIM admin start操作を自動実行するかどうかです。",
+    "admin_start_once": "admin start操作を1回だけに制限するかどうかです。",
+    "overtake_lateral_profile_mode": "追い越し横オフセットの作り方です。legacyは従来距離ベース、localized_latchedは相手位置を基準にラッチします。",
+    "localized_avoidance_start_before_target_m": "localized_latchedで、相手位置の何m手前から横回避を始めるかです。",
+    "localized_avoidance_full_offset_before_target_m": "localized_latchedで、相手位置の何m手前までに最大横オフセットへ到達するかです。",
+    "localized_avoidance_hold_after_target_m": "localized_latchedで、相手を越えた後に横オフセットを保持する距離[m]です。",
+    "localized_avoidance_merge_distance_m": "localized_latchedで、保持後に中心へ戻るための距離[m]です。",
+    "maneuver_latch_min_hold_sec": "追い越し対象のラッチを最低保持する時間[s]です。対象切替のチャタリングを抑えます。",
+    "maneuver_latch_target_update_alpha": "ラッチ中の相手位置更新の平滑化係数です。0で固定、1に近いほど新しい観測へ追従します。",
+    "log_interval_sec": "状態ログを出力する間隔[s]です。小さいほど詳細ですがログ量が増えます。",
+    "input_dim": "モデルへ入力する特徴量の次元数です。学習済み重みと一致させます。",
+    "output_dim": "モデルが出力する制御値の次元数です。通常は速度/操舵などの出力数に合わせます。",
+    "architecture": "使用するニューラルネットワーク構造名です。学習済みckptと合わせます。",
+    "ckpt_path": "学習済み重みファイルのパスです。提出環境で存在するパッケージ内パスを指定します。",
+    "max_range": "LiDAR/仮想scanで使う最大検出距離[m]です。遠方を切り捨てる上限になります。",
+    "control_mode": "コントローラ出力の作り方です。fixedなら固定加速度などの簡易制御になります。",
+    "acceleration": "固定制御時に使う加速度指令[m/s^2]です。",
+    "debug": "debug出力や追加ログを出すかどうかです。通常走行ではfalse寄りが軽量です。",
+    "timer_hz": "ノードの更新周期[Hz]です。高いほど細かくpublishしますがCPU負荷が増えます。",
+    "csv_path": "参照するCSVファイルのパスです。mapや走行ラインの入力に使います。",
+    "lidar_frame_id": "LaserScanのframe_idです。TF上のLiDAR座標系と合わせます。",
+    "fov_deg": "仮想LaserScanの視野角[deg]です。",
+    "num_rays": "仮想LaserScanで生成するray本数です。多いほど細かいscanになります。",
+    "range_min": "LaserScanの最小有効距離[m]です。近すぎる値を無効扱いにします。",
+    "map_frame_id": "map座標系のframe_idです。自己位置やmapデータと合わせます。",
+    "image_height": "モデル入力画像の高さ[pixel]です。学習済みモデルの入力サイズと合わせます。",
+    "image_width": "モデル入力画像の幅[pixel]です。学習済みモデルの入力サイズと合わせます。",
+    "color_space": "モデル入力へ変換する色空間です。学習時の前処理と合わせます。",
+    "crop_top_ratio": "入力画像の上側をcropする割合です。空や遠景を落とす調整に使います。",
+    "crop_bottom_ratio": "入力画像の下側をcropする割合です。車体映り込みなどを落とす調整に使います。",
+    "speed_scale": "Joy入力を速度指令へ変換する倍率です。大きいほど速度操作が強くなります。",
+    "steer_scale": "Joy入力を操舵指令へ変換する倍率です。大きいほど操舵操作が強くなります。",
+    "joy_timeout_sec": "Joy入力を新鮮とみなす最大時間[s]です。超えると安全側の挙動になります。",
+    "joy_button_index": "操作に使うJoyボタンのindexです。デバイス割り当てに合わせます。",
+    "ack_button_index": "Ackermann制御切替に使うJoyボタンindexです。",
+    "awsim_button_index": "AWSIM操作に使うJoyボタンindexです。",
+    "reset_button_index": "リセット操作に使うJoyボタンindexです。",
+    "start_button_index": "開始操作に使うJoyボタンindexです。",
+    "stop_button_index": "停止操作に使うJoyボタンindexです。",
+    "dpad_lr_axis_index": "D-pad左右入力に対応するJoy axis indexです。",
+    "dpad_ud_axis_index": "D-pad上下入力に対応するJoy axis indexです。",
+    "reset_frame_id": "リセットposeを表すframe_idです。通常はmapです。",
+    "reset_pos_x": "リセットposeのx座標[m]です。",
+    "reset_pos_y": "リセットposeのy座標[m]です。",
+    "reset_pos_z": "リセットposeのz座標[m]です。",
+    "reset_ori_x": "リセットpose姿勢quaternionのx成分です。",
+    "reset_ori_y": "リセットpose姿勢quaternionのy成分です。",
+    "reset_ori_z": "リセットpose姿勢quaternionのz成分です。",
+    "reset_ori_w": "リセットpose姿勢quaternionのw成分です。",
+}
+
 GENERIC_DESCRIPTION_DEFAULTS = {
     "launch引数です。defaultを変更すると、このlaunch内で使われる既定値が変わります。",
     "ROSパラメータ設定です。nameとvalueでノードへ渡す値を指定します。",
@@ -338,6 +417,70 @@ DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
     "curvature_lookahead_smoothing_alpha": "lookahead変化の平滑化係数です。1.0に近いほど即応、0.0に近いほど滑らかです。",
     "speed_proportional_gain": "Pure Pursuitの速度追従ゲインです。大きいほど目標速度へ強く合わせます。",
     "steering_tire_angle_gain": "Pure Pursuitで計算した操舵角へ掛けるゲインです。大きいほど曲がりますが角度/rate limitに当たりやすくなります。",
+}
+
+XML_NAME_DESCRIPTION_DEFAULTS: dict[str, str] = {
+    "simulation": "simulation環境向けの起動設定にするかどうかです。AWSIM/dev/evalでは通常trueです。",
+    "run_rviz": "RVizを同時起動するかどうかです。軽量化したい評価時はfalseにします。",
+    "sensor_model": "使用するセンサ構成名です。racing_kart_sensor_kitなど車両構成と合わせます。",
+    "vehicle_model": "使用する車両モデル名です。AI Challengeのracing_kart設定と合わせます。",
+    "launch_vehicle_interface": "vehicle interfaceを起動するかどうかです。simulationでは通常false側になります。",
+    "capture": "画面キャプチャ取得を有効にするlaunch引数です。",
+    "rosbag": "rosbag記録を有効にするlaunch引数です。",
+    "domain_id": "ROS_DOMAIN_IDです。複数台実行時は車両ごとに分けます。",
+    "rviz_config": "RViz設定ファイルの指定です。表示内容を変えたい時に編集します。",
+    "sim_mode": "AWSIM/evalの実行モードです。dev/evalなど起動シナリオを切り替えます。",
+    "log_dir": "評価ログやAWSIMログを書き出すディレクトリです。",
+    "launch_awsim": "AWSIM本体を起動するかどうかです。既存AWSIMへ接続する時はfalseにします。",
+    "launch_awsim_state_manager": "AWSIM state managerを起動するかどうかです。",
+    "awsim_vehicles": "AWSIMで同時に起動する車両台数です。",
+    "awsim_laps": "AWSIM評価で走行する周回数です。",
+    "awsim_timeout": "AWSIM評価の最大待ち時間[s]です。",
+    "awsim_start_mode": "AWSIMのstart方式です。syncでは同期開始を使います。",
+    "awsim_start_count_seconds": "AWSIM start前のカウントダウン秒数です。",
+    "awsim_extra_args": "AWSIM起動へ追加で渡すCLI引数です。headless等の調査用に使います。",
+    "awsim_prime_render_offload": "NVIDIA PRIME offload用の環境設定です。GPU描画環境に合わせます。",
+    "awsim_vk_layer_optimus": "Vulkan Optimus layerの選択です。NVIDIA GPU利用時の描画設定です。",
+    "awsim_vk_icd_filenames": "Vulkan ICD定義ファイルのパスです。GPU driver環境に合わせます。",
+    "vehicle_id": "車両固有IDです。複数台実行時の識別に使います。",
+    "lanelet2_map_file": "読み込むLanelet2 mapファイル名です。",
+    "pointcloud_map_file": "読み込む点群mapファイル名です。",
+    "model_file": "車両URDF/xacroファイルのパスです。",
+    "config_dir": "車両/センサdescriptionの設定ディレクトリです。",
+    "robot_description": "xacroから生成したrobot_descriptionです。TF/車両モデルに使います。",
+    "enable_yaw_bias_estimation": "yaw bias推定を有効にするかどうかです。",
+    "tf_rate": "TF publish周期[Hz]です。",
+    "twist_smoothing_steps": "twist推定の平滑化step数です。大きいほど滑らかになります。",
+    "pose_smoothing_steps": "pose推定の平滑化step数です。大きいほど滑らかになります。",
+    "pose_additional_delay": "poseに追加で見込む遅延時間です。timestamp整合の調整に使います。",
+    "extend_state_step": "state推定を延長するstep数です。大きいほど先まで外挿します。",
+    "proc_stddev_vx_c": "twist推定で使う前後速度のプロセスノイズ標準偏差です。大きいほど速度変化を許します。",
+    "proc_stddev_wz_c": "twist推定で使うyaw rateのプロセスノイズ標準偏差です。大きいほど旋回変化を許します。",
+    "accel_lowpass_gain": "加速度のlow-pass係数です。小さいほど滑らかになります。",
+    "use_odom": "odometryを入力として使うかどうかです。",
+    "z": "生成trajectoryやposeに使う高さz[m]です。",
+    "map_frame": "map座標系のframe名です。",
+    "viewer_frame": "viewer用のframe名です。",
+    "csv_path_accel_map": "accel command変換に使うaccel map CSVのパスです。",
+    "csv_path_brake_map": "brake command変換に使うbrake map CSVのパスです。",
+    "max_throttle": "actuation変換で許す最大throttleです。",
+    "max_brake": "actuation変換で許す最大brakeです。",
+    "convert_accel_cmd": "accel commandをactuation commandへ変換するかどうかです。",
+    "convert_brake_cmd": "brake commandをactuation commandへ変換するかどうかです。",
+    "convert_steer_cmd": "steer commandをactuation commandへ変換するかどうかです。",
+    "input_control_cmd_raw": "MPCのraw control command topicです。muxやdebugでraw出力を確認するために使います。",
+    "input_control_cmd_raw_topic": "delay-aware MPCへ渡すraw control command topic名です。",
+    "input_steering_status": "Pure Pursuitや遅延補償で参照するsteering_status topicです。",
+    "pp_control_delay_sec": "Pure Pursuitで見込む制御遅延時間[s]です。操舵遅れ補償の予測に使います。",
+    "pp_prediction_dt_sec": "Pure Pursuit遅延補償の予測刻み幅[s]です。小さいほど精細ですが負荷が増えます。",
+    "min_velocity_for_delay_compensation_mps": "Pure Pursuit遅延補償を有効にする最低速度[m/s]です。",
+    "horizon_curvature_feedforward_gain": "MPC horizon曲率からPure Pursuit操舵へ足すfeedforwardゲインです。",
+    "horizon_curvature_feedforward_max_rad": "horizon曲率feedforwardで足せる最大操舵角[rad]です。",
+    "vscan_mode": "Tiny LiDAR Netへ仮想scanを使うかどうかです。",
+    "model_type": "使用する推論モデル種別です。学習済み重みと合わせます。",
+    "tiny_lidar_net_node_param": "Tiny LiDAR Net nodeへ読み込ませるYAMLパラメータファイルです。",
+    "laserscan_generator_param": "仮想LaserScan generatorへ読み込ませるYAMLパラメータファイルです。",
+    "pilot_net_node_param": "PilotNet nodeへ読み込ませるYAMLパラメータファイルです。",
 }
 
 CONTROL_DEFAULT_XMLS = [
@@ -1027,6 +1170,10 @@ def default_description(kind: str, row: dict[str, Any]) -> str:
         value_type = str(row.get("type") or "value")
         if path in DESCRIPTION_DEFAULTS:
             return DESCRIPTION_DEFAULTS[path]
+        if re.match(r"^/\*\*\.ros__parameters\.rosbag_topics\[\d+\]$", path):
+            return "rosbagへ記録するROS topic名です。走行後レポートやデバッグで見たいtopicを指定します。"
+        if name in YAML_NAME_DESCRIPTION_DEFAULTS:
+            return YAML_NAME_DESCRIPTION_DEFAULTS[name]
         if re.match(r"ref_vel_configulator\.[^.]+\.ref_vel$", path):
             return "この区間の目標速度[km/h]です。コーナー前で下げると手前から減速しやすくなります。"
         if re.match(r"ref_vel_configulator\.[^.]+\.wp_id$", path):
@@ -1037,6 +1184,16 @@ def default_description(kind: str, row: dict[str, Any]) -> str:
             return "TF frame名です。センサ、車体、地図座標系の接続先を指定します。"
         if name in {"use_sim_time", "simulation"}:
             return "シミュレーション時刻を使うかどうかのフラグです。AWSIM評価では通常trueです。"
+        if name.endswith("_sec"):
+            return f"{name} の時間設定[s]です。長くすると待ちや保持が粘る方向になります。"
+        if name.endswith("_hz"):
+            return f"{name} の周期設定[Hz]です。高いほど頻繁に処理しますが負荷が増えます。"
+        if name.endswith("_path") or name.endswith("_file") or name.endswith("_dir"):
+            return f"{name} のファイル/ディレクトリ指定です。提出環境で存在するパスに合わせます。"
+        if name.endswith("_index"):
+            return f"{name} の入力デバイス割り当てindexです。使用するJoyデバイスに合わせます。"
+        if name.startswith("enable_") or name.endswith("_enabled") or name.startswith("request_"):
+            return f"{name} の動作を切り替える設定です。"
         if value_type == "bool":
             return f"{name} を有効/無効にするフラグです。"
         if value_type in {"int", "float"}:
@@ -1050,6 +1207,30 @@ def default_description(kind: str, row: dict[str, Any]) -> str:
             return "外部YAMLパラメータファイルを読み込む設定です。fromの参照先を変えると読み込む設定一式が変わります。"
         if name in DELAY_AWARE_XML_DEFAULTS:
             return DELAY_AWARE_XML_DEFAULTS[name]
+        if name in XML_NAME_DESCRIPTION_DEFAULTS:
+            return XML_NAME_DESCRIPTION_DEFAULTS[name]
+        if name in YAML_NAME_DESCRIPTION_DEFAULTS:
+            return YAML_NAME_DESCRIPTION_DEFAULTS[name]
+        if name.endswith("_topic") or name.startswith("input_") or name.startswith("output_"):
+            return f"{name} のROS topic名です。接続するpublish/subscribe先を指定します。"
+        if (
+            name.endswith("_path")
+            or name.endswith("_file")
+            or name.endswith("_dir")
+            or name.endswith("_param")
+        ):
+            return f"{name} のファイル/ディレクトリ指定です。launchから読み込む設定やデータを切り替えます。"
+        if name.endswith("_sec") or name.endswith("_seconds") or name.endswith("_timeout"):
+            return f"{name} の時間設定[s]です。起動待ちやtimeoutの粘りを調整します。"
+        if name.endswith("_rate"):
+            return f"{name} の周期/レート設定です。大きいほど頻繁に処理します。"
+        if (
+            name.startswith("launch_")
+            or name.startswith("enable_")
+            or name.startswith("convert_")
+            or name.startswith("use_")
+        ):
+            return f"{name} の動作を切り替えるlaunch設定です。"
         if tag == "arg":
             if name == "control_method":
                 return "使用する制御方式です。mpc、pure_pursuit、tiny_lidar_netなどを切り替えます。"
