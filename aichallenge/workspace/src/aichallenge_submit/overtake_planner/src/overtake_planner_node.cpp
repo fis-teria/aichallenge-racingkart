@@ -283,6 +283,23 @@ public:
         declare_parameter<double>("yield_rejoin_gap_m", 3.0);
     config.left_offset_m = declare_parameter<double>("left_offset_m", 0.80);
     config.right_offset_m = declare_parameter<double>("right_offset_m", -0.80);
+    config.overtake_lateral_profile_mode = declare_parameter<std::string>(
+        "overtake_lateral_profile_mode", "legacy");
+    config.localized_avoidance_start_before_target_m =
+        declare_parameter<double>("localized_avoidance_start_before_target_m",
+                                  6.0);
+    config.localized_avoidance_full_offset_before_target_m =
+        declare_parameter<double>(
+            "localized_avoidance_full_offset_before_target_m", 2.0);
+    config.localized_avoidance_hold_after_target_m =
+        declare_parameter<double>("localized_avoidance_hold_after_target_m",
+                                  5.0);
+    config.localized_avoidance_merge_distance_m =
+        declare_parameter<double>("localized_avoidance_merge_distance_m", 8.0);
+    config.maneuver_latch_min_hold_sec =
+        declare_parameter<double>("maneuver_latch_min_hold_sec", 1.0);
+    config.maneuver_latch_target_update_alpha =
+        declare_parameter<double>("maneuver_latch_target_update_alpha", 0.0);
     config.prepare_distance_m =
         declare_parameter<double>("prepare_distance_m", 8.0);
     config.merge_distance_m =
@@ -969,6 +986,22 @@ private:
         << (output.lateral_target_hold_active ? "true" : "false") << ","
         << "\"lateral_target_hold_reason\":\""
         << output.lateral_target_hold_reason << "\","
+        << "\"lateral_profile_mode\":\"" << output.lateral_profile_mode
+        << "\","
+        << "\"maneuver_latch_active\":"
+        << (output.maneuver_latch_active ? "true" : "false") << ","
+        << "\"maneuver_latch_target_id\":\""
+        << output.maneuver_latch_target_id << "\","
+        << "\"maneuver_latch_target_s\":"
+        << jsonNumber(output.maneuver_latch_target_s_m) << ","
+        << "\"maneuver_latch_avoid_start_s\":"
+        << jsonNumber(output.maneuver_latch_avoid_start_s_m) << ","
+        << "\"maneuver_latch_full_offset_start_s\":"
+        << jsonNumber(output.maneuver_latch_full_offset_start_s_m) << ","
+        << "\"maneuver_latch_full_offset_end_s\":"
+        << jsonNumber(output.maneuver_latch_full_offset_end_s_m) << ","
+        << "\"maneuver_latch_merge_end_s\":"
+        << jsonNumber(output.maneuver_latch_merge_end_s_m) << ","
         << "\"speed_cap_reason\":\"" << output.speed_cap_reason << "\","
         << "\"applied_speed_cap_mps\":"
         << jsonNumber(output.applied_speed_cap_mps) << ","

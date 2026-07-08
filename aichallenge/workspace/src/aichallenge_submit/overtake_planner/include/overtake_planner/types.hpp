@@ -104,6 +104,22 @@ struct CandidateTrajectory {
   std::string reject_reason{};
 };
 
+struct LocalizedLateralProfile {
+  // PASS候補の横オフセットを、相手車両のs位置に紐づいた局所プロファイルとして固定する。
+  bool active{false};
+  CandidateType pass_type{CandidateType::FASTEST};
+  std::string target_id{};
+  double created_time_sec{std::numeric_limits<double>::quiet_NaN()};
+  double anchor_s_m{std::numeric_limits<double>::quiet_NaN()};
+  double target_s_m{std::numeric_limits<double>::quiet_NaN()};
+  double avoid_start_s_m{std::numeric_limits<double>::quiet_NaN()};
+  double full_offset_start_s_m{std::numeric_limits<double>::quiet_NaN()};
+  double full_offset_end_s_m{std::numeric_limits<double>::quiet_NaN()};
+  double merge_end_s_m{std::numeric_limits<double>::quiet_NaN()};
+  double start_d_m{0.0};
+  double target_d_m{0.0};
+};
+
 struct BlockedInfo {
   // 前方の遅い車両や横並び状態をまとめた、追い越し開始/継続判断の入力。
   bool blocked{false};
@@ -275,6 +291,13 @@ struct PlannerConfig {
   double yield_rejoin_gap_m{3.0};
   double left_offset_m{0.80};
   double right_offset_m{-0.80};
+  std::string overtake_lateral_profile_mode{"legacy"};
+  double localized_avoidance_start_before_target_m{6.0};
+  double localized_avoidance_full_offset_before_target_m{2.0};
+  double localized_avoidance_hold_after_target_m{5.0};
+  double localized_avoidance_merge_distance_m{8.0};
+  double maneuver_latch_min_hold_sec{1.0};
+  double maneuver_latch_target_update_alpha{0.0};
   double prepare_distance_m{8.0};
   double pass_distance_m{20.0};
   double merge_distance_m{12.0};
@@ -355,6 +378,18 @@ struct PlannerOutput {
   bool recovery_speed_guard_active{false};
   bool lateral_target_hold_active{false};
   std::string lateral_target_hold_reason{};
+  std::string lateral_profile_mode{"legacy"};
+  bool maneuver_latch_active{false};
+  std::string maneuver_latch_target_id{};
+  double maneuver_latch_target_s_m{std::numeric_limits<double>::quiet_NaN()};
+  double maneuver_latch_avoid_start_s_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  double maneuver_latch_full_offset_start_s_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  double maneuver_latch_full_offset_end_s_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  double maneuver_latch_merge_end_s_m{
+      std::numeric_limits<double>::quiet_NaN()};
   double applied_speed_cap_mps{std::numeric_limits<double>::quiet_NaN()};
   std::string speed_cap_reason{};
   double wall_soft_margin_m{std::numeric_limits<double>::quiet_NaN()};

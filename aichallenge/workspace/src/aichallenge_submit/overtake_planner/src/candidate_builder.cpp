@@ -12,6 +12,10 @@ double smoothstep(double z) {
   return z * z * (3.0 - 2.0 * z);
 }
 
+double interpolate(double a, double b, double ratio) {
+  return a + (b - a) * smoothstep(ratio);
+}
+
 double finitePositiveOr(double value, double fallback) {
   return std::isfinite(value) && value > 0.0 ? value : fallback;
 }
@@ -36,7 +40,8 @@ CandidateBuilder::CandidateBuilder(const FrenetFrame &frame,
 CandidateTrajectory CandidateBuilder::makeCandidate(
     CandidateType type, const EgoState &ego,
     const BlockedInfo &blocked_info,
-    const std::vector<OpponentState> &opponents) const {
+    const std::vector<OpponentState> &opponents,
+    const LocalizedLateralProfile *localized_profile) const {
   // 候補ごとに目標横オフセットと速度上限を決め、Frenet上で滑らかに接続する。
   CandidateTrajectory candidate;
   candidate.type = type;
@@ -121,6 +126,11 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     shift_distance =
         std::max(config_.merge_distance_m, config_.prepare_distance_m);
   }
+  const bool use_localized_profile =
+      localized_profile != nullptr && localized_profile->active &&
+      (type == CandidateType::PASS_LEFT || type == CandidateType::PASS_RIGHT) &&
+      localized_profile->pass_type == type &&
+      config_.overtake_lateral_profile_mode == "localized_latched";
 
   double speed_cap = config_.v_passthrough_mps;
   const double yield_min_speed_cap =
@@ -215,7 +225,10 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
           ratio,
           smoothstep(t / config_.outside_corridor_recovery_centering_time_sec));
     }
-    const double d = start_d + (target_d - start_d) * ratio;
+    const double d =
+        use_localized_profile
+            ? localizedProfileD(*localized_profile, ego, s, ds)
+            : start_d + (target_d - start_d) * ratio;
     const auto p = frame_.frenetToCartesian(s, d);
     candidate.t.push_back(t);
     candidate.s.push_back(s);
@@ -227,6 +240,52 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
   }
 
   return candidate;
+}
+
+double CandidateBuilder::localizedProfileD(
+    const LocalizedLateralProfile &profile, const EgoState &ego, double s,
+    double ds) const {
+  const double nominal_current = nominalLocalizedProfileD(profile, ego.frenet.s);
+  const double nominal = nominalLocalizedProfileD(profile, s);
+  const double correction_distance =
+      std::max(1.0, config_.localized_avoidance_start_before_target_m);
+  const double correction_ratio = smoothstep(ds / correction_distance);
+  const double correction = (ego.frenet.d - nominal_current) *
+                            (1.0 - correction_ratio);
+  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
+  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
+  return std::clamp(nominal + correction, lower_d, upper_d);
+}
+
+double CandidateBuilder::nominalLocalizedProfileD(
+    const LocalizedLateralProfile &profile, double s) const {
+  if (!profile.active || !std::isfinite(profile.anchor_s_m)) {
+    return 0.0;
+  }
+
+  const double unwrapped_s =
+      profile.anchor_s_m + frame_.deltaS(profile.anchor_s_m, s);
+  const double start_d = profile.start_d_m;
+  const double target_d = profile.target_d_m;
+  if (unwrapped_s <= profile.avoid_start_s_m) {
+    return start_d;
+  }
+  if (unwrapped_s <= profile.full_offset_start_s_m) {
+    const double distance = std::max(
+        1.0e-3, profile.full_offset_start_s_m - profile.avoid_start_s_m);
+    return interpolate(start_d, target_d,
+                       (unwrapped_s - profile.avoid_start_s_m) / distance);
+  }
+  if (unwrapped_s <= profile.full_offset_end_s_m) {
+    return target_d;
+  }
+  if (unwrapped_s <= profile.merge_end_s_m) {
+    const double distance = std::max(
+        1.0e-3, profile.merge_end_s_m - profile.full_offset_end_s_m);
+    return interpolate(target_d, 0.0,
+                       (unwrapped_s - profile.full_offset_end_s_m) / distance);
+  }
+  return 0.0;
 }
 
 double CandidateBuilder::wallClearance(double d) const {

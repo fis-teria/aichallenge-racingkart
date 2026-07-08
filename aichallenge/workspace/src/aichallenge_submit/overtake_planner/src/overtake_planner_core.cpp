@@ -140,6 +140,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     high_speed_curve_lateral_hold_offsets_.clear();
     high_speed_curve_lateral_hold_sec_ =
         std::numeric_limits<double>::quiet_NaN();
+    clearLocalizedLateralProfile();
     output.mode = mode_;
     output.reason = "disabled_or_invalid";
     return output;
@@ -258,6 +259,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       blocked.pass_gap_reason = "large_lateral_error";
     }
   }
+  updateLocalizedLateralProfile(now_sec, ego, blocked, opponents);
 
   // まず全状況でFASTEST候補を作り、閉塞時だけ追従/左右追い越し候補を増やす。
   std::vector<CandidateTrajectory> candidates;
@@ -463,6 +465,22 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
           state_machine_.safeStopReleaseCount(), wall_soft_margin,
           active_section, mpc_health});
   output_built.start_grace_active = start_grace_active;
+  output_built.lateral_profile_mode = config_.overtake_lateral_profile_mode;
+  output_built.maneuver_latch_active = localized_lateral_profile_.active;
+  if (localized_lateral_profile_.active) {
+    output_built.maneuver_latch_target_id =
+        localized_lateral_profile_.target_id;
+    output_built.maneuver_latch_target_s_m =
+        localized_lateral_profile_.target_s_m;
+    output_built.maneuver_latch_avoid_start_s_m =
+        localized_lateral_profile_.avoid_start_s_m;
+    output_built.maneuver_latch_full_offset_start_s_m =
+        localized_lateral_profile_.full_offset_start_s_m;
+    output_built.maneuver_latch_full_offset_end_s_m =
+        localized_lateral_profile_.full_offset_end_s_m;
+    output_built.maneuver_latch_merge_end_s_m =
+        localized_lateral_profile_.merge_end_s_m;
+  }
   if (start_grace_active) {
     output_built.reason = "start_grace_safe_stop_suppressed";
   }
@@ -503,7 +521,10 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
     CandidateType type, const EgoState &ego, const BlockedInfo &blocked_info,
     const std::vector<OpponentState> &opponents) const {
   return CandidateBuilder(frame_, config_)
-      .makeCandidate(type, ego, blocked_info, opponents);
+      .makeCandidate(type, ego, blocked_info, opponents,
+                     localized_lateral_profile_.active
+                         ? &localized_lateral_profile_
+                         : nullptr);
 }
 
 double
@@ -745,6 +766,143 @@ bool OvertakePlannerCore::shouldSuppressSafeStopForStartGrace(
   }
   return blocked.side_by_side || blocked.parallel_side_candidate ||
          blocked.future_side_by_side || blocked.future_yield_required;
+}
+
+bool OvertakePlannerCore::localizedLateralProfileEnabled() const {
+  return config_.overtake_lateral_profile_mode == "localized_latched";
+}
+
+CandidateType
+OvertakePlannerCore::preferredPassType(const BlockedInfo &blocked) const {
+  if (isLeftPassMode(mode_)) {
+    return CandidateType::PASS_LEFT;
+  }
+  if (isRightPassMode(mode_)) {
+    return CandidateType::PASS_RIGHT;
+  }
+  if (blocked.can_pass_left) {
+    return CandidateType::PASS_LEFT;
+  }
+  if (blocked.can_pass_right) {
+    return CandidateType::PASS_RIGHT;
+  }
+  return CandidateType::FASTEST;
+}
+
+int OvertakePlannerCore::localizedProfileTargetIndex(
+    const BlockedInfo &blocked) const {
+  if (blocked.nearest_index >= 0) {
+    return blocked.nearest_index;
+  }
+  if (blocked.side_index >= 0) {
+    return blocked.side_index;
+  }
+  return blocked.parallel_side_index;
+}
+
+void OvertakePlannerCore::updateLocalizedLateralProfile(
+    double now_sec, const EgoState &ego, const BlockedInfo &blocked,
+    const std::vector<OpponentState> &opponents) {
+  if (!localizedLateralProfileEnabled()) {
+    clearLocalizedLateralProfile();
+    return;
+  }
+
+  const CandidateType pass_type = preferredPassType(blocked);
+  const int target_index = localizedProfileTargetIndex(blocked);
+  const bool target_valid =
+      target_index >= 0 &&
+      static_cast<std::size_t>(target_index) < opponents.size();
+  const bool pass_context =
+      pass_type == CandidateType::PASS_LEFT ||
+      pass_type == CandidateType::PASS_RIGHT || isPassMode(mode_);
+  const bool profile_min_hold_active =
+      localized_lateral_profile_.active &&
+      std::isfinite(localized_lateral_profile_.created_time_sec) &&
+      now_sec - localized_lateral_profile_.created_time_sec <
+          std::max(0.0, config_.maneuver_latch_min_hold_sec);
+
+  if (!target_valid || (!pass_context && !profile_min_hold_active)) {
+    clearLocalizedLateralProfile();
+    return;
+  }
+
+  const auto &target = opponents[static_cast<std::size_t>(target_index)];
+  if (localized_lateral_profile_.active) {
+    const bool same_target =
+        target.id == localized_lateral_profile_.target_id;
+    const bool same_direction =
+        pass_type == localized_lateral_profile_.pass_type ||
+        pass_type == CandidateType::FASTEST;
+    if ((!same_target || !same_direction) && !profile_min_hold_active) {
+      clearLocalizedLateralProfile();
+    }
+  }
+
+  if (!localized_lateral_profile_.active) {
+    if (pass_type != CandidateType::PASS_LEFT &&
+        pass_type != CandidateType::PASS_RIGHT) {
+      return;
+    }
+    localized_lateral_profile_.active = true;
+    localized_lateral_profile_.pass_type = pass_type;
+    localized_lateral_profile_.target_id = target.id;
+    localized_lateral_profile_.created_time_sec = now_sec;
+    localized_lateral_profile_.anchor_s_m = ego.frenet.s;
+    localized_lateral_profile_.start_d_m = ego.frenet.d;
+    localized_lateral_profile_.target_d_m = targetOffsetForPass(pass_type);
+    const double target_s_m =
+        localized_lateral_profile_.anchor_s_m +
+        frame_.deltaS(localized_lateral_profile_.anchor_s_m, target.frenet.s);
+    setLocalizedProfileMarkers(target_s_m);
+    return;
+  }
+
+  const double alpha =
+      std::clamp(config_.maneuver_latch_target_update_alpha, 0.0, 1.0);
+  if (alpha <= 0.0 || target.id != localized_lateral_profile_.target_id) {
+    return;
+  }
+  const double measured_target_s_m =
+      localized_lateral_profile_.anchor_s_m +
+      frame_.deltaS(localized_lateral_profile_.anchor_s_m, target.frenet.s);
+  const double updated_target_s_m =
+      localized_lateral_profile_.target_s_m * (1.0 - alpha) +
+      measured_target_s_m * alpha;
+  setLocalizedProfileMarkers(updated_target_s_m);
+}
+
+void OvertakePlannerCore::clearLocalizedLateralProfile() {
+  localized_lateral_profile_ = LocalizedLateralProfile{};
+}
+
+void OvertakePlannerCore::setLocalizedProfileMarkers(double target_s_m) {
+  localized_lateral_profile_.target_s_m = target_s_m;
+  const double start_before =
+      std::max(0.0, config_.localized_avoidance_start_before_target_m);
+  const double full_before =
+      std::max(0.0, config_.localized_avoidance_full_offset_before_target_m);
+  const double hold_after =
+      std::max(0.0, config_.localized_avoidance_hold_after_target_m);
+  const double merge_distance =
+      std::max(1.0, config_.localized_avoidance_merge_distance_m);
+  localized_lateral_profile_.avoid_start_s_m =
+      target_s_m - std::max(start_before, full_before);
+  localized_lateral_profile_.full_offset_start_s_m =
+      target_s_m - std::min(start_before, full_before);
+  localized_lateral_profile_.full_offset_end_s_m = target_s_m + hold_after;
+  localized_lateral_profile_.merge_end_s_m =
+      localized_lateral_profile_.full_offset_end_s_m + merge_distance;
+}
+
+double OvertakePlannerCore::targetOffsetForPass(CandidateType pass_type) const {
+  if (pass_type == CandidateType::PASS_LEFT) {
+    return config_.left_offset_m;
+  }
+  if (pass_type == CandidateType::PASS_RIGHT) {
+    return config_.right_offset_m;
+  }
+  return 0.0;
 }
 
 bool OvertakePlannerCore::shouldYieldBehindSideBySide(

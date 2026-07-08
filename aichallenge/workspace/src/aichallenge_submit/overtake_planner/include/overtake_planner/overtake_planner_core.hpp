@@ -52,6 +52,15 @@ private:
   bool shouldSuppressSafeStopForStartGrace(double now_sec,
                                            const EgoState &ego,
                                            const BlockedInfo &blocked) const;
+  bool localizedLateralProfileEnabled() const;
+  CandidateType preferredPassType(const BlockedInfo &blocked) const;
+  int localizedProfileTargetIndex(const BlockedInfo &blocked) const;
+  void updateLocalizedLateralProfile(double now_sec, const EgoState &ego,
+                                     const BlockedInfo &blocked,
+                                     const std::vector<OpponentState> &opponents);
+  void clearLocalizedLateralProfile();
+  void setLocalizedProfileMarkers(double target_s_m);
+  double targetOffsetForPass(CandidateType pass_type) const;
   // 横並びで相手が縦方向に前へ出ている場合は、無理に並走せず後ろへ譲る。
   bool shouldYieldBehindSideBySide(const EgoState &ego,
                                    const BlockedInfo &blocked_info) const;
@@ -75,6 +84,7 @@ private:
   std::vector<double> last_published_lateral_offsets_;
   double last_published_lateral_target_sec_{
       std::numeric_limits<double>::quiet_NaN()};
+  LocalizedLateralProfile localized_lateral_profile_{};
   bool high_speed_curve_lateral_hold_active_{false};
   std::vector<double> high_speed_curve_lateral_hold_offsets_;
   double high_speed_curve_lateral_hold_sec_{

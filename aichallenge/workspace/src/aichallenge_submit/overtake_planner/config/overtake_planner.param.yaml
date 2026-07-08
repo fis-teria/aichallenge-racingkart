@@ -62,6 +62,13 @@ overtake_planner_node:
     yield_rejoin_gap_m: 3.0
     left_offset_m: 0.80
     right_offset_m: -0.80
+    overtake_lateral_profile_mode: "legacy"  # legacy / localized_latched
+    localized_avoidance_start_before_target_m: 6.0
+    localized_avoidance_full_offset_before_target_m: 2.0
+    localized_avoidance_hold_after_target_m: 5.0
+    localized_avoidance_merge_distance_m: 8.0
+    maneuver_latch_min_hold_sec: 1.0
+    maneuver_latch_target_update_alpha: 0.0
     prepare_distance_m: 8.0
     merge_distance_m: 12.0
     follow_speed_margin_mps: 0.20

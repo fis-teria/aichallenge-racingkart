@@ -1755,7 +1755,7 @@ TEST(OvertakePlannerCore, WidePassGapsReasonIsOk) {
   overtake_planner::OvertakePlannerCore core(frame, config);
 
   const auto ego = makeEgo(frame, 5.0, 0.0);
-  const auto opponent = makeOpponent(frame, 13.0, 0.0);
+  const auto opponent = makeOpponent(frame, 13.0, -0.6);
 
   const auto output = core.update(0.1, ego, {opponent});
 
@@ -1763,6 +1763,60 @@ TEST(OvertakePlannerCore, WidePassGapsReasonIsOk) {
   EXPECT_TRUE(output.blocked_info.can_pass_left);
   EXPECT_TRUE(output.blocked_info.can_pass_right);
   EXPECT_EQ(output.blocked_info.pass_gap_reason, "ok");
+}
+
+TEST(OvertakePlannerCore, LocalizedLatchedPassKeepsNearEgoOffsetsStable) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.min_pass_gap_m = 0.2;
+  config.safety_ellipse_b_m = 0.1;
+  config.overtake_lateral_profile_mode = "localized_latched";
+  config.localized_avoidance_start_before_target_m = 6.0;
+  config.localized_avoidance_full_offset_before_target_m = 2.0;
+  config.localized_avoidance_hold_after_target_m = 4.0;
+  config.localized_avoidance_merge_distance_m = 6.0;
+  config.maneuver_latch_min_hold_sec = 1.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent = makeOpponent(frame, 13.0, -0.6);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  ASSERT_FALSE(output.lateral_offsets.empty());
+  EXPECT_EQ(output.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::PASS_LEFT);
+  EXPECT_TRUE(output.maneuver_latch_active);
+  EXPECT_EQ(output.maneuver_latch_target_id, "npc");
+  EXPECT_EQ(output.lateral_profile_mode, "localized_latched");
+  EXPECT_NEAR(output.maneuver_latch_target_s_m, 13.0, 1.0e-9);
+  EXPECT_NEAR(output.maneuver_latch_avoid_start_s_m, 7.0, 1.0e-9);
+  EXPECT_NEAR(output.lateral_offsets.front(), ego.frenet.d, 1.0e-9);
+  EXPECT_NEAR(output.lateral_offsets[1], ego.frenet.d, 1.0e-9);
+  EXPECT_GT(output.lateral_offsets.back(), 0.0);
+  EXPECT_LT(output.lateral_offsets.back(), config.left_offset_m);
+}
+
+TEST(OvertakePlannerCore, LegacyPassStillStartsShiftingFromEgo) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.min_pass_gap_m = 0.2;
+  config.safety_ellipse_b_m = 0.1;
+  config.overtake_lateral_profile_mode = "legacy";
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent = makeOpponent(frame, 13.0, -0.6);
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  ASSERT_GT(output.lateral_offsets.size(), 1U);
+  EXPECT_EQ(output.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+  EXPECT_FALSE(output.maneuver_latch_active);
+  EXPECT_EQ(output.lateral_profile_mode, "legacy");
+  EXPECT_GT(output.lateral_offsets[1], ego.frenet.d);
 }
 
 TEST(OvertakePlannerCore, FutureNarrowGapPreventsTransientLeftPass) {

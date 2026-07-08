@@ -14,9 +14,14 @@ public:
   CandidateTrajectory
   makeCandidate(CandidateType type, const EgoState &ego,
                 const BlockedInfo &blocked_info,
-                const std::vector<OpponentState> &opponents) const;
+                const std::vector<OpponentState> &opponents,
+                const LocalizedLateralProfile *localized_profile = nullptr) const;
 
 private:
+  double localizedProfileD(const LocalizedLateralProfile &profile,
+                           const EgoState &ego, double s, double ds) const;
+  double nominalLocalizedProfileD(const LocalizedLateralProfile &profile,
+                                  double s) const;
   double wallClearance(double d) const;
 
   const FrenetFrame &frame_;
