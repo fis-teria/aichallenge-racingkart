@@ -70,8 +70,11 @@ ROS parameterを集約した設定です。
 特に経路生成に効く値:
 
 - `left_offset_m`, `right_offset_m`
+- `pass_horizon_publish_mode`
 - `prepare_distance_m`, `merge_distance_m`
 - `side_by_side_target_gap_m`, `side_by_side_shift_distance_m`
 - `recovery_v_max_mps`, `wall_margin_recovery_v_max_mps`
 - `outside_corridor_recovery_centering_time_sec`
 
+`pass_horizon_publish_mode` は、内部のPASS候補評価とMPCへpublishするhorizonを分けるための設定です。
+`overtake_only` では `PREPARE_OVERTAKE_*` 中に `FOLLOW` horizonを出し、`OVERTAKE_*` に入ってから `PASS_LEFT/RIGHT` horizonを出します。

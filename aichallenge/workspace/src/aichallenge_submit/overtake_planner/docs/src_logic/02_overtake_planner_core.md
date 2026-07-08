@@ -53,7 +53,9 @@ plannerの中核です。
 11. SAFE_STOP条件を判定する。
 12. `selectCandidate()` で暫定候補を選ぶ。
 13. `BehaviorStateMachine::update()` でmodeを安定化する。
-14. modeに合わせて候補を再生成する。
+14. modeに合わせてpublish用候補を再生成する。
+    - `pass_horizon_publish_mode=overtake_only` では、`PREPARE_OVERTAKE_*` 中だけpublish用候補を `FOLLOW` に差し替える。
+    - 内部候補の `PASS_LEFT/RIGHT` は状態機械へ渡しているため、PASS安全周期の蓄積は止まらない。
 15. `PlannerOutputBuilder::build()` でpublish用出力に整形する。
 16. `applyLateralTargetRateLimit()` で横オフセットの急変を抑える。
 17. `rememberPublishedLateralTarget()` で次周期用に記憶する。

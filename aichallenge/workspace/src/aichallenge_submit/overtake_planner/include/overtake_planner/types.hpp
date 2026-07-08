@@ -292,6 +292,7 @@ struct PlannerConfig {
   double left_offset_m{0.80};
   double right_offset_m{-0.80};
   std::string overtake_lateral_profile_mode{"legacy"};
+  std::string pass_horizon_publish_mode{"prepare_and_overtake"};
   double localized_avoidance_start_before_target_m{6.0};
   double localized_avoidance_full_offset_before_target_m{2.0};
   double localized_avoidance_hold_after_target_m{5.0};

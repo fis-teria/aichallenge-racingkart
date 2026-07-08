@@ -256,6 +256,8 @@ MPCへ渡す候補軌道です。
 選ばれた候補、`BlockedInfo`、safe stop文脈、section profile、MPC healthを `PlannerOutput` へ詰めます。
 速度ガードやMPC override契約はここで集約します。
 そのため、risk判定側は `SPEED_GUARD` の出力形式を知らなくてよい構造です。
+`pass_horizon_publish_mode=overtake_only` では、`BehaviorStateMachine` へ渡す内部候補は `PASS_LEFT/RIGHT` のまま維持しますが、`PREPARE_OVERTAKE_*` 中に `PlannerOutputBuilder` へ渡すpublish用候補だけ `FOLLOW` へ差し替えます。
+これにより `pass_safe_required_cycles` は従来どおり貯まり、MPCへ追い越し横オフセットを出すのは `OVERTAKE_LEFT/RIGHT` に入った周期からになります。
 速度だけを落とす `SPEED_GUARD` では、横オフセットを中心線 `d=0` へ0埋めせず、現在の横位置を保持します。
 その後、`OvertakePlannerCore` が前回publishした横オフセット列との差分を `lateral_target_max_step_m` で制限します。
 高速カーブ中の `YIELD_BEHIND`, `ABORT_RECOVERY`, `SAFE_STOP`, `SPEED_GUARD` では、rate limit後の横オフセット列を `high_speed_curve_lateral_hold_*` 条件でholdし、低速化またはカーブ脱出まで短周期の再選択を抑えます。

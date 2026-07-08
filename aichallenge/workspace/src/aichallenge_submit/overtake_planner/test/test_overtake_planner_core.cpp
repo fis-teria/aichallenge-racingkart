@@ -1579,6 +1579,34 @@ TEST(OvertakePlannerCore, OpponentOnRightOnlyAllowsLeftPass) {
   EXPECT_GT(output.target_lateral_offset_m, 0.0);
 }
 
+TEST(OvertakePlannerCore, OvertakeOnlyPublishModeHoldsFollowDuringPrepare) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.pass_safe_required_cycles = 2.0;
+  config.pass_horizon_publish_mode = "overtake_only";
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto opponent = makeOpponent(frame, 13.0, -0.6);
+
+  const auto first = core.update(0.1, ego, {opponent});
+  EXPECT_EQ(first.mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+  EXPECT_EQ(first.selected, overtake_planner::CandidateType::FOLLOW);
+  EXPECT_TRUE(first.blocked_info.can_pass_left);
+
+  const auto prepare = core.update(0.2, ego, {opponent});
+  EXPECT_EQ(prepare.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+  EXPECT_EQ(prepare.selected, overtake_planner::CandidateType::FOLLOW);
+  EXPECT_NEAR(prepare.target_lateral_offset_m, 0.0, 1.0e-9);
+  EXPECT_TRUE(prepare.active_override);
+
+  const auto overtake = core.update(0.3, ego, {opponent});
+  EXPECT_EQ(overtake.mode, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
+  EXPECT_EQ(overtake.selected, overtake_planner::CandidateType::PASS_LEFT);
+  EXPECT_GT(overtake.target_lateral_offset_m, 0.0);
+}
+
 TEST(OvertakePlannerCore, CurvedRoadStraightOnlyGatePreventsPassStart) {
   const auto frame = makeCurvedFrame();
   auto config = makeConfig();

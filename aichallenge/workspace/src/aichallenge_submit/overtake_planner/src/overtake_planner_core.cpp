@@ -99,6 +99,15 @@ bool isFeasibleReleaseCandidate(const CandidateTrajectory &selected,
          selected.type == CandidateType::RECOVERY;
 }
 
+bool isPrepareOvertakeMode(BehaviorMode mode) {
+  return mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
+         mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT;
+}
+
+bool publishPassHorizonInPrepare(const PlannerConfig &config) {
+  return config.pass_horizon_publish_mode != "overtake_only";
+}
+
 bool hasFeasibleReleaseCandidate(
     const std::vector<CandidateTrajectory> &candidates,
     const BlockedInfo &blocked_info) {
@@ -422,45 +431,64 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
              blocked.yield_reason.empty()) {
     blocked.yield_reason = "yield_lateral_error_hold";
   }
+  CandidateTrajectory output_selected = selected;
   if (mode_ == BehaviorMode::SAFE_STOP) {
-    selected = makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
-    safety_.evaluate(selected, predictions);
+    output_selected =
+        makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
+    safety_.evaluate(output_selected, predictions);
   } else if (mode_ == BehaviorMode::ABORT_RECOVERY) {
     // 中止時は必ず中心線へ戻す候補を再生成し、最新予測で安全評価する。
-    selected = makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
-    safety_.evaluate(selected, predictions);
+    output_selected =
+        makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
+    safety_.evaluate(output_selected, predictions);
   } else if (mode_ == BehaviorMode::MERGE_BACK) {
-    selected = makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
-    safety_.evaluate(selected, predictions);
+    output_selected =
+        makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
+    safety_.evaluate(output_selected, predictions);
   } else if (mode_ == BehaviorMode::SIDE_BY_SIDE_KEEP) {
-    selected = makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego, blocked,
-                             opponents);
-    safety_.evaluate(selected, predictions);
+    output_selected = makeCandidate(CandidateType::SIDE_BY_SIDE_KEEP, ego,
+                                    blocked, opponents);
+    safety_.evaluate(output_selected, predictions);
   } else if (mode_ == BehaviorMode::YIELD_BEHIND) {
-    selected =
+    output_selected =
         makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents);
-    safety_.evaluate(selected, predictions);
+    safety_.evaluate(output_selected, predictions);
   } else if (mode_ == BehaviorMode::FOLLOW_BLOCKED &&
-             selected.type != CandidateType::FOLLOW) {
+             output_selected.type != CandidateType::FOLLOW) {
     // 追従モードでは速度上限だけを落とすFOLLOW候補を優先する。
-    selected = makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents);
-    safety_.evaluate(selected, predictions);
-    if (!selected.feasible) {
-      selected =
+    output_selected =
+        makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents);
+    safety_.evaluate(output_selected, predictions);
+    if (!output_selected.feasible) {
+      output_selected =
           makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
-      safety_.evaluate(selected, predictions);
+      safety_.evaluate(output_selected, predictions);
+    }
+  } else if (isPrepareOvertakeMode(mode_) &&
+             !publishPassHorizonInPrepare(config_)) {
+    // PASS候補は内部状態遷移に使うが、PREPARE中はMPCへ追い越しhorizonを
+    // 出さず、OVERTAKEに入った周期から横オフセットをpublishする。
+    output_selected =
+        makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents);
+    safety_.evaluate(output_selected, predictions);
+    if (!output_selected.feasible) {
+      output_selected =
+          makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
+      safety_.evaluate(output_selected, predictions);
     }
   } else if (mode_ == BehaviorMode::FREE_RUN) {
-    selected = makeCandidate(CandidateType::FASTEST, ego, blocked, opponents);
-    safety_.evaluate(selected, predictions);
+    output_selected =
+        makeCandidate(CandidateType::FASTEST, ego, blocked, opponents);
+    safety_.evaluate(output_selected, predictions);
   }
 
   // ROSノードがMPC overrideとdebug
   // JSONを作れるよう、選択結果を平坦な出力に詰める。
   auto output_built =
       PlannerOutputBuilder(config_).build(PlannerOutputBuildInput{
-          mode_, ego, selected, blocked, safe_stop_context, safe_stop_candidate,
-          safe_stop_candidate_infeasible, safe_stop_trigger_count_,
+          mode_, ego, output_selected, blocked, safe_stop_context,
+          safe_stop_candidate, safe_stop_candidate_infeasible,
+          safe_stop_trigger_count_,
           state_machine_.safeStopHoldCount(),
           state_machine_.safeStopReleaseCount(), wall_soft_margin,
           active_section, mpc_health});

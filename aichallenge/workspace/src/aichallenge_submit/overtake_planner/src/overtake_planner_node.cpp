@@ -285,6 +285,8 @@ public:
     config.right_offset_m = declare_parameter<double>("right_offset_m", -0.80);
     config.overtake_lateral_profile_mode = declare_parameter<std::string>(
         "overtake_lateral_profile_mode", "legacy");
+    config.pass_horizon_publish_mode = declare_parameter<std::string>(
+        "pass_horizon_publish_mode", "prepare_and_overtake");
     config.localized_avoidance_start_before_target_m =
         declare_parameter<double>("localized_avoidance_start_before_target_m",
                                   6.0);

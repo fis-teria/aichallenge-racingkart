@@ -202,6 +202,7 @@ s9,335,1,true
 |---|---:|---:|---|
 | `left_offset_m` | `0.80` | `0.80` | 左追い越し時の目標d。 |
 | `right_offset_m` | `-0.80` | `-0.80` | 右追い越し時の目標d。 |
+| `pass_horizon_publish_mode` | `overtake_only` | `prepare_and_overtake` | `overtake_only` では `PREPARE_OVERTAKE_*` 中に内部PASS判定だけ進め、MPCへはFOLLOW horizonを出す。 |
 | `prepare_distance_m` | `8.0` | `8.0` | PASS目標dへ移る距離。上げると横移動が穏やか。 |
 | `merge_distance_m` | `12.0` | `12.0` | 中心線へ戻る距離。 |
 | `side_by_side_target_gap_m` | `0.75` | `0.75` | 横並び時に相手から確保したい横距離。 |
@@ -249,6 +250,8 @@ upper_d = d_max_m - min_wall_margin_m
 ## BehaviorStateMachine
 
 `BehaviorStateMachine` は、候補選択結果をそのままモードにせず、切替を安定化します。
+`pass_horizon_publish_mode=overtake_only` の場合でも、PASS候補は内部評価と安全周期の蓄積に使います。
+変わるのはMPCへpublishする候補だけで、`PREPARE_OVERTAKE_*` 中は `FOLLOW` horizon を出し、`OVERTAKE_*` に入ってから `PASS_LEFT/RIGHT` horizon を出します。
 
 | パラメータ | 現在値 | fallback | 変更すると何が変わるか |
 |---|---:|---:|---|
