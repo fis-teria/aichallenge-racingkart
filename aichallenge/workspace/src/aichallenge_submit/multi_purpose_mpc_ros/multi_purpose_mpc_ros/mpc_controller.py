@@ -10,6 +10,7 @@ import numpy as np
 import copy
 import os
 import shutil
+import threading
 from datetime import datetime
 from time import perf_counter
 
@@ -63,6 +64,14 @@ RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
 YELLOW = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
 CYAN = ColorRGBA(r=0.0, g=156.0 / 255.0, b=209.0 / 255.0, a=1.0)
 GRAVITY_MPS2 = 9.80665
+OVERTAKE_LEFT_MODE_ID = 4
+OVERTAKE_RIGHT_MODE_ID = 5
+MERGE_BACK_MODE_ID = 6
+OVERTAKE_HORIZON_MODE_IDS = {
+    OVERTAKE_LEFT_MODE_ID,
+    OVERTAKE_RIGHT_MODE_ID,
+    MERGE_BACK_MODE_ID,
+}
 
 def array_to_ackermann_control_command(stamp, u: np.ndarray, acc: float) -> AckermannControlCommand:
     msg = AckermannControlCommand()
@@ -143,6 +152,7 @@ class MPCConfig:
     use_curvature_speed_profile: bool
     use_ref_vel_as_speed_cap: bool
     speed_profile_debug_publish_period_sec: float
+    neutral_horizon_publish_period_sec: float
     use_grade_accel_feedforward: bool
     grade_ff_gain: float
     grade_ff_max_accel_mps2: float
@@ -517,6 +527,7 @@ class MPCController(Node):
                 cfg_bool(cfg_mpc, "use_curvature_speed_profile", True),
                 cfg_bool(cfg_mpc, "use_ref_vel_as_speed_cap", True),
                 cfg_float(cfg_mpc, "speed_profile_debug_publish_period_sec", 0.25),
+                cfg_float(cfg_mpc, "neutral_horizon_publish_period_sec", 0.05),
                 cfg_bool(cfg_mpc, "use_grade_accel_feedforward", False),
                 cfg_float(cfg_mpc, "grade_ff_gain", 1.0),
                 cfg_float(cfg_mpc, "grade_ff_max_accel_mps2", 0.35),
@@ -578,6 +589,11 @@ class MPCController(Node):
         self._last_mpc_solve_time_ms = 0.0
         self._last_mpc_status = "unknown"
         self._last_mpc_infeasible_count = 0
+        self._last_mpc_predicted_horizon_source = "none"
+        self._neutral_horizon_cache_lock = threading.Lock()
+        self._latest_neutral_horizon: Optional[Trajectory] = None
+        self._last_neutral_horizon_cache_sec = -1.0e9
+        self._neutral_horizon_timer = None
         self._reset_grade_estimator()
         compute_speed_profile(self._car, self._mpc_cfg)
         self._curvature_speed_profile_mps = self._read_reference_speed_profile()
@@ -709,6 +725,12 @@ class MPCController(Node):
                 "mpc_status": self._last_mpc_status,
                 "mpc_solve_time_ms": self._last_mpc_solve_time_ms,
                 "mpc_infeasible_count": self._last_mpc_infeasible_count,
+                "mpc_predicted_horizon_source": self._last_mpc_predicted_horizon_source,
+                "neutral_horizon_publish_period_sec": self._mpc_cfg.neutral_horizon_publish_period_sec,
+                "neutral_horizon_cache_age_sec": (
+                    t - self._last_neutral_horizon_cache_sec
+                    if self._latest_neutral_horizon is not None else None
+                ),
                 "overtake_mode_id": getattr(self._mpc, "overtake_mode_id", 0),
                 "overtake_override_active": bool(getattr(self._mpc, "overtake_lateral_offsets", None) is not None),
             },
@@ -1069,11 +1091,25 @@ class MPCController(Node):
         self._mpc_pred_pub_dummy.publish(pred_marker_array)
 
     def _publish_mpc_predicted_horizon(self, stamp) -> None:
-        predicted = getattr(self._mpc, "current_prediction_trajectory", None)
         trajectory = Trajectory()
         trajectory.header.stamp = stamp.to_msg()
         trajectory.header.frame_id = "map"
+
+        if not self._should_publish_overtake_prediction_horizon():
+            if self._fixed_neutral_horizon_enabled():
+                return
+            neutral_trajectory = self._build_neutral_predicted_horizon(stamp)
+            if len(neutral_trajectory.points) >= 2:
+                self._last_mpc_predicted_horizon_source = "neutral_reference"
+                self._mpc_pred_trajectory_pub.publish(neutral_trajectory)
+                return
+            self._last_mpc_predicted_horizon_source = "empty"
+            self._mpc_pred_trajectory_pub.publish(trajectory)
+            return
+
+        predicted = getattr(self._mpc, "current_prediction_trajectory", None)
         if self._last_mpc_status != "solved" or not self._enable_control or not predicted:
+            self._last_mpc_predicted_horizon_source = "empty"
             self._mpc_pred_trajectory_pub.publish(trajectory)
             return
 
@@ -1092,11 +1128,136 @@ class MPCController(Node):
             trajectory.points.append(point)
 
         if len(trajectory.points) >= 2:
+            self._last_mpc_predicted_horizon_source = "solver_prediction"
             self._mpc_pred_trajectory_pub.publish(trajectory)
         else:
             empty_trajectory = Trajectory()
             empty_trajectory.header = trajectory.header
+            self._last_mpc_predicted_horizon_source = "empty"
             self._mpc_pred_trajectory_pub.publish(empty_trajectory)
+
+    def _should_publish_overtake_prediction_horizon(self) -> bool:
+        mode_id = int(getattr(self._mpc, "overtake_mode_id", 0) or 0)
+        return mode_id in OVERTAKE_HORIZON_MODE_IDS
+
+    def _fixed_neutral_horizon_enabled(self) -> bool:
+        return self._mpc_cfg.neutral_horizon_publish_period_sec > 0.0
+
+    def _start_fixed_neutral_horizon_timer(self) -> None:
+        period = self._mpc_cfg.neutral_horizon_publish_period_sec
+        if period <= 0.0 or self._neutral_horizon_timer is not None:
+            return
+        self._neutral_horizon_timer = self.create_timer(
+            period, self._publish_fixed_neutral_horizon)
+        self.get_logger().info(
+            f"fixed neutral MPC horizon publish period: {period:.3f}s")
+
+    def _refresh_neutral_horizon_cache(self, stamp) -> None:
+        if not self._fixed_neutral_horizon_enabled():
+            return
+        neutral_trajectory = self._build_neutral_predicted_horizon(stamp)
+        if len(neutral_trajectory.points) < 2:
+            return
+        with self._neutral_horizon_cache_lock:
+            self._latest_neutral_horizon = neutral_trajectory
+            self._last_neutral_horizon_cache_sec = stamp.nanoseconds / 1e9
+
+    def _publish_fixed_neutral_horizon(self) -> None:
+        if not self._fixed_neutral_horizon_enabled():
+            return
+        if self._should_publish_overtake_prediction_horizon():
+            return
+
+        now = self.get_clock().now()
+        with self._neutral_horizon_cache_lock:
+            cached = copy.deepcopy(self._latest_neutral_horizon)
+
+        if cached is None:
+            cached = Trajectory()
+            cached.header.frame_id = "map"
+            self._last_mpc_predicted_horizon_source = "fixed_neutral_empty"
+        else:
+            self._last_mpc_predicted_horizon_source = "fixed_neutral_reference"
+        cached.header.stamp = now.to_msg()
+        self._mpc_pred_trajectory_pub.publish(cached)
+
+    def _build_neutral_predicted_horizon(self, stamp) -> Trajectory:
+        trajectory = Trajectory()
+        trajectory.header.stamp = stamp.to_msg()
+        trajectory.header.frame_id = "map"
+
+        model = getattr(self._mpc, "model", None)
+        reference_path = getattr(model, "reference_path", None)
+        if model is None or reference_path is None or reference_path.n_waypoints <= 0:
+            return trajectory
+
+        if self._odom is not None:
+            pose = odom_to_pose_2d(self._odom)
+            self._append_horizon_point(
+                trajectory,
+                pose.x,
+                pose.y,
+                pose.theta,
+                max(0.0, float(self._odom.twist.twist.linear.x)),
+            )
+
+        point_count = max(0, int(getattr(self._mpc, "N", 0)))
+        lateral_reference = self._neutral_lateral_reference(point_count)
+        first_reference_offset = 1 if trajectory.points else 0
+        for n in range(point_count):
+            waypoint = reference_path.get_waypoint(
+                int(model.wp_id) + n + first_reference_offset)
+            lateral_offset = (
+                float(lateral_reference[n])
+                if n < len(lateral_reference) and np.isfinite(lateral_reference[n])
+                else 0.0
+            )
+            x = waypoint.x - lateral_offset * np.sin(waypoint.psi)
+            y = waypoint.y + lateral_offset * np.cos(waypoint.psi)
+            speed_mps = float(waypoint.v_ref) if waypoint.v_ref is not None else 0.0
+            if not np.isfinite(speed_mps) or speed_mps < 0.0:
+                speed_mps = 0.0
+            self._append_horizon_point(trajectory, x, y, waypoint.psi, speed_mps)
+
+        return trajectory
+
+    def _neutral_lateral_reference(self, point_count: int) -> np.ndarray:
+        if point_count <= 0:
+            return np.zeros(0, dtype=float)
+        model = getattr(self._mpc, "model", None)
+        reference_path = getattr(model, "reference_path", None)
+        try:
+            upper_bounds = reference_path.path_constraints[0]
+            lower_bounds = reference_path.path_constraints[1]
+            if len(upper_bounds) == 0 or len(lower_bounds) == 0:
+                return np.zeros(point_count, dtype=float)
+            ref_wp_id = (int(model.wp_id) + 1) % len(upper_bounds)
+            ub = np.asarray(upper_bounds[ref_wp_id], dtype=float)
+            lb = np.asarray(lower_bounds[ref_wp_id], dtype=float)
+            ub, lb = self._mpc._apply_wall_margin(ub, lb)
+            lateral_reference = np.asarray(
+                self._mpc._lateral_reference(ub, lb), dtype=float)
+            if lateral_reference.size >= point_count:
+                return lateral_reference[:point_count]
+        except (AttributeError, IndexError, TypeError, ValueError):
+            pass
+        return np.zeros(point_count, dtype=float)
+
+    def _append_horizon_point(
+            self, trajectory: Trajectory, x: float, y: float, yaw: float,
+            speed_mps: float) -> None:
+        if not np.isfinite([x, y, yaw, speed_mps]).all():
+            return
+        point = TrajectoryPoint()
+        point.pose.position.x = float(x)
+        point.pose.position.y = float(y)
+        point.pose.position.z = 0.0
+        point.pose.orientation = quaternion_from_yaw(float(yaw))
+        point.longitudinal_velocity_mps = float(max(0.0, speed_mps))
+        point.lateral_velocity_mps = 0.0
+        point.acceleration_mps2 = 0.0
+        point.heading_rate_rps = 0.0
+        trajectory.points.append(point)
 
     def _publish_ref_path_marker(self, ref_path: ReferencePath):
         WP_SPHERE_ENABLED = False
@@ -1203,6 +1364,7 @@ class MPCController(Node):
         self._car.get_current_waypoint()
         self._apply_speed_profile(self._car.wp_id)
         self._clear_stale_overtake_override(now)
+        self._refresh_neutral_horizon_cache(now)
 
         with self._stats.time_block("control"):
             solve_started = perf_counter()
@@ -1312,6 +1474,7 @@ class MPCController(Node):
         self._reset_grade_estimator()
         self._t_start = self.get_clock().now()
         self._last_t = self._t_start
+        self._start_fixed_neutral_horizon_timer()
 
         self.get_logger().info("----------------------")
         self.get_logger().info("START!")

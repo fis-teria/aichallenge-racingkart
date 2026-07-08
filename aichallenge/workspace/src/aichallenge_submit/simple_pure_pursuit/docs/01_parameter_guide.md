@@ -76,6 +76,13 @@ horizon は以下を満たす時だけ使われます。
 - 弧長が `min_mpc_horizon_arc_length_m` 以上
 - ego 最近傍 index が先頭から大きくズレていない
 
+MPC側の `/mpc/predicted_horizon` は、`OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK` 中だけ solver の予測結果をpublishします。
+それ以外の通常走行、追従、追い越し準備中は、現在poseとMPC参照pathから作る neutral horizon をpublishします。
+`neutral_horizon_publish_period_sec > 0` の場合、neutral horizon はMPC solve loopから分離され、固定周期のtimerで `fixed_neutral_reference` としてpublishされます。
+これにより、MPC solverが一時的に重くなっても PP fallback が horizon を stale 扱いしにくくなります。
+`neutral_reference` を生成できない場合は、追い越し込み solver horizon へ戻さず empty horizon をpublishします。
+これにより、PP fallbackが通常走行中に古い追い越し横オフセットを追い続けることを避けます。
+
 ## 曲率適応lookahead
 
 | パラメータ | 役割 | 調整の目安 |
@@ -131,4 +138,9 @@ MPC horizon が usable な時は、horizon を優先するため通常 trajector
 - `control_pose_shifted`, `control_pose_x/y/yaw_rad`, `steering_source`, `steering_age_sec`
 - `pure_pursuit_steering_tire_angle_rad`, `curvature_feedforward_steering_rad`, `signed_path_curvature_1pm`
 
-MPC が遅い場面で horizon を使わせたい時は、まず `mpc_horizon_reject_reason` が `stale` かどうかを確認し、`stale` なら `max_mpc_horizon_age_sec` を広げます。
+`/mpc/speed_profile_debug` の `mpc_predicted_horizon_source` では、MPCがpublishしたhorizonの種類を確認できます。
+通常時は `fixed_neutral_reference` または `neutral_reference`、実追い越し/merge中は `solver_prediction`、MPC未解決時またはneutral生成不可時は `empty` / `fixed_neutral_empty` になります。
+`neutral_horizon_cache_age_sec` は固定周期publishで再利用しているneutral horizon形状の経過時間です。
+
+MPC が遅い場面で horizon を使わせたい時は、まず `mpc_horizon_reject_reason` が `stale` かどうかを確認します。
+`stale` が多い場合はMPC側の `neutral_horizon_publish_period_sec` を有効にし、それでも残る場合だけ `max_mpc_horizon_age_sec` を広げます。
