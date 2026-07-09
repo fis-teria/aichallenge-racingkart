@@ -10,10 +10,16 @@ namespace overtake_planner {
 
 namespace {
 
+// 入力: 候補値valueと、使えない場合のfallback。
+// 出力: valueが有限かつ正ならvalue、それ以外はfallback。
+// 処理概要: 速度上限の計算でNaN/0を伝播させないための小さなガード。
 double finitePositiveOr(double value, double fallback) {
   return std::isfinite(value) && value > 0.0 ? value : fallback;
 }
 
+// 入力: 候補軌道とfallback速度[m/s]。
+// 出力: 候補内で最も低い有効速度上限。無ければfallback。
+// 処理概要: 不安全候補から速度だけfallbackする時に、元候補の速度意図をできるだけ残す。
 double candidateSpeedCapOr(const CandidateTrajectory &candidate,
                            double fallback) {
   double out = fallback;
@@ -25,6 +31,9 @@ double candidateSpeedCapOr(const CandidateTrajectory &candidate,
   return out;
 }
 
+// 入力: 既存の速度列と適用したい一様速度上限。
+// 出力: なし。speed_capsを上限以下へ直接更新する。
+// 処理概要: 既に横overrideがある候補に、速度ガードだけを重ねる。
 void applyUniformSpeedCap(std::vector<double> &speed_caps, double cap) {
   if (!std::isfinite(cap) || cap <= 0.0) {
     return;
@@ -40,15 +49,24 @@ void applyUniformSpeedCap(std::vector<double> &speed_caps, double cap) {
   }
 }
 
+// 入力: 要素数countと値value。
+// 出力: 少なくとも1要素を持つ一様配列。
+// 処理概要: 速度だけguardする時でもMPC overrideプロトコルに必要な配列長を確保する。
 std::vector<double> uniformVector(std::size_t count, double value) {
   return std::vector<double>(std::max<std::size_t>(1, count), value);
 }
 
+// 入力: 現在modeとpublish対象候補。
+// 出力: 復帰系速度ガードを適用する文脈ならtrue。
+// 処理概要: ABORT_RECOVERYまたはRECOVERY候補では、壁/health/lateral errorに応じて速度を落とす。
 bool isRecoverySpeedGuardMode(BehaviorMode mode, CandidateType selected) {
   return mode == BehaviorMode::ABORT_RECOVERY ||
          selected == CandidateType::RECOVERY;
 }
 
+// 入力: PlannerConfigと自車状態。
+// 出力: 安全コリドー内にクランプした現在横位置d。
+// 処理概要: 速度だけのguardで横参照を新規生成する時、急に中心線へ飛ばさず現在位置を保持する。
 double clampedCurrentLateralOffset(const PlannerConfig &config,
                                    const EgoState &ego) {
   const double lower_d = config.d_min_m + config.min_wall_margin_m;
@@ -61,9 +79,15 @@ double clampedCurrentLateralOffset(const PlannerConfig &config,
 
 } // namespace
 
+// 入力: planner設定。
+// 出力: PlannerOutput生成器のインスタンス。
+// 処理概要: 候補選択結果に速度ガードやsafe stop情報を重ねるための設定を保持する。
 PlannerOutputBuilder::PlannerOutputBuilder(const PlannerConfig &config)
     : config_(config) {}
 
+// 入力: mode、選択候補、安全停止文脈、section profile、MPC healthなどの集約入力。
+// 出力: ROS nodeがpublishしやすい平坦なPlannerOutput。
+// 処理概要: 候補評価結果にsafe stop理由と速度ガードを重ね、最終override配列とdebug指標を作る。
 PlannerOutput
 PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   const auto &selected = input.selected;
@@ -85,6 +109,8 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   output.safe_stop_trigger_count = input.safe_stop_trigger_count;
   output.safe_stop_hold_count = input.safe_stop_hold_count;
   output.safe_stop_release_count = input.safe_stop_release_count;
+  // 処理ブロック: safe stopの状態理由を出力へ転記する。
+  // 設計意図: plannerが止まった理由をdebug JSONとログで即座に追えるようにする。
   if (input.mode == BehaviorMode::SAFE_STOP) {
     if (!selected.feasible) {
       output.safe_stop_reason = "safe_stop_infeasible";
@@ -111,6 +137,8 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   const double selected_target_d =
       selected.d.empty() ? input.ego.frenet.d : selected.d.back();
   bool selected_override_active = false;
+  // 処理ブロック: 選択候補自体が横/速度overrideを持つかを決める。
+  // 設計意図: FASTESTは通常走行なのでoverrideしないが、SAFE_STOPだけは停止候補として明示的に出す。
   if (selected.type == CandidateType::SAFE_STOP) {
     selected_override_active = selected.feasible;
   } else {
@@ -126,6 +154,8 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   bool mpc_health_guard = false;
   bool recovery_speed_guard = false;
   const bool allow_speed_guard = true;
+  // 処理ブロック: 複数の速度制限要求から最も低い上限だけを採用する。
+  // 設計意図: 壁リスク、MPC health、fallbackが同時に出ても、より安全側の速度を1つに集約する。
   const auto requestSpeedCap = [&](double cap_mps, const std::string &reason) {
     if (!std::isfinite(cap_mps) || cap_mps <= 0.0) {
       return;
@@ -225,6 +255,8 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
     requested_speed_cap = scaledSpeedCap(requested_speed_cap, active_section);
   }
 
+  // 処理ブロック: 選択候補をPlannerOutputへコピーし、必要なら速度ガードを重ねる。
+  // 設計意図: 横overrideがある場合は横列を維持し、速度だけのguardでは現在横位置保持の一様列を作る。
   output.active_override = selected_override_active;
   output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected_target_d;
   output.min_cbf_h = selected.min_safety_margin;
@@ -262,6 +294,9 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   return output;
 }
 
+// 入力: 速度上限[m/s]と有効section safety profile。
+// 出力: sectionのscaleを掛けた速度上限[m/s]。
+// 処理概要: コース区間ごとの安全プロファイルを、最終速度guardにも反映する。
 double
 PlannerOutputBuilder::scaledSpeedCap(double speed_cap_mps,
                                      const ActiveSectionSafety &section) const {

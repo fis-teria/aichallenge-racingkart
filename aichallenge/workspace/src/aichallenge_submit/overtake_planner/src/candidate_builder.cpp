@@ -7,23 +7,38 @@ namespace overtake_planner {
 
 namespace {
 
+// 入力: 0から1へ進む正規化値z。
+// 出力: 端点の傾きが0になる補間率。
+// 処理概要: 横移動の開始/終了で急な速度変化を作らないための3次補間を返す。
 double smoothstep(double z) {
   z = std::clamp(z, 0.0, 1.0);
   return z * z * (3.0 - 2.0 * z);
 }
 
+// 入力: 始点a、終点b、正規化された補間率ratio。
+// 出力: smoothstepを通したaからbへの補間値。
+// 処理概要: 局所回避プロファイルの横オフセットを滑らかにつなぐ。
 double interpolate(double a, double b, double ratio) {
   return a + (b - a) * smoothstep(ratio);
 }
 
+// 入力: 候補値valueと、valueが使えない場合のfallback。
+// 出力: valueが有限かつ正ならvalue、それ以外はfallback。
+// 処理概要: 距離や速度の設定値が0/NaNでも安全側の既定値で処理を続ける。
 double finitePositiveOr(double value, double fallback) {
   return std::isfinite(value) && value > 0.0 ? value : fallback;
 }
 
+// 入力: BlockedInfo。横並び車両と広めの並走候補のindexを含む。
+// 出力: 横方向リスクとして使う相手index。無ければ-1。
+// 処理概要: 通常のside_indexを優先し、無い場合だけparallel_side_indexへフォールバックする。
 int sideRiskIndex(const BlockedInfo &info) {
   return info.side_index >= 0 ? info.side_index : info.parallel_side_index;
 }
 
+// 入力: BlockedInfo。前方車両、横並び車両、並走候補のindexを含む。
+// 出力: YIELD_BEHINDの追従対象index。無ければ-1。
+// 処理概要: 前方閉塞車両を最優先し、横並び/並走リスクが残る場合はそれを譲り対象にする。
 int yieldTargetIndex(const BlockedInfo &info) {
   return info.nearest_index >= 0 ? info.nearest_index : sideRiskIndex(info);
 }
@@ -33,10 +48,16 @@ constexpr double kOutsideCorridorRecoveryShiftScale = 0.5;
 
 } // namespace
 
+// 入力: Frenet変換器とplanner設定。
+// 出力: 候補軌道生成器のインスタンス。
+// 処理概要: 参照線とパラメータを保持し、各CandidateTypeを同じ設定で軌道化できるようにする。
 CandidateBuilder::CandidateBuilder(const FrenetFrame &frame,
                                    const PlannerConfig &config)
     : frame_(frame), config_(config) {}
 
+// 入力: 候補種別、自車状態、閉塞判定、相手車一覧、任意の局所横プロファイル。
+// 出力: Frenet/Cartesianのhorizon点と速度上限を持つCandidateTrajectory。
+// 処理概要: modeそのものはここで決めず、候補種別ごとの「もしこの行動を取るなら」の軌道を作る。
 CandidateTrajectory CandidateBuilder::makeCandidate(
     CandidateType type, const EgoState &ego,
     const BlockedInfo &blocked_info,
@@ -59,6 +80,8 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
   const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
   const bool outside_safe_corridor =
       ego.frenet.d < lower_d || ego.frenet.d > upper_d;
+  // 処理ブロック: 候補種別から横方向の目標dと遷移距離を決める。
+  // 設計意図: 状態機械は候補を比較するだけにし、軌道形状の責務をここへ閉じ込める。
   if (type == CandidateType::PASS_LEFT) {
     // 左右PASSは中心線から一定量オフセットした仮想参照をMPCへ渡す。
     target_d = config_.left_offset_m;
@@ -99,6 +122,8 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
       target_d = std::clamp(target_d, lower_d, upper_d);
     }
   } else if (type == CandidateType::YIELD_BEHIND) {
+    // 処理ブロック: 譲り時は相手の後ろに戻りやすい横位置を選ぶ。
+    // 設計意図: コーナー譲りでは壁余裕を優先して中心へ、それ以外は相手のdへ寄せて後方追従へ入る。
     const int target_index = yieldTargetIndex(blocked_info);
     const bool corner_yield = blocked_info.corner_side_by_side ||
                               blocked_info.future_corner_side_by_side ||
@@ -132,6 +157,8 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
       localized_profile->pass_type == type &&
       config_.overtake_lateral_profile_mode == "localized_latched";
 
+  // 処理ブロック: 候補種別ごとの速度上限を決める。
+  // 設計意図: 横参照だけでなく速度参照も同時に作り、MPCが危険な候補を速く走らないようにする。
   double speed_cap = config_.v_passthrough_mps;
   const double yield_min_speed_cap =
       finitePositiveOr(config_.yield_min_speed_cap_mps, 0.5);
@@ -175,6 +202,8 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     speed_cap = std::max(1.0e-3, config_.safe_stop_v_mps);
   }
 
+  // 処理ブロック: 復帰系候補に追加の速度ガードを重ねる。
+  // 設計意図: 横位置が危ない時は横軌道だけでなく速度も抑え、MPCが無理な回避を解かないようにする。
   const bool recovery_like = type == CandidateType::RECOVERY ||
                              type == CandidateType::YIELD_BEHIND ||
                              type == CandidateType::SIDE_BY_SIDE_KEEP;
@@ -188,6 +217,8 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     speed_cap = std::min(speed_cap, config_.large_lateral_error_v_max_mps);
   }
 
+  // 処理ブロック: 時間horizonごとのs,d,x,y,yaw,v_refを生成する。
+  // 設計意図: MPC入力は固定長配列なので、候補評価とpublishで同じhorizon列を再利用できる形にする。
   for (std::size_t i = 0; i < config_.horizon_points; ++i) {
     // 候補ごとの速度想定でs列を作り、smoothstepで横方向を急変させない。
     const double t = static_cast<double>(i) * config_.horizon_dt_sec;
@@ -242,6 +273,9 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
   return candidate;
 }
 
+// 入力: ラッチ済み局所回避プロファイル、自車状態、評価対象s、現在からの距離ds。
+// 出力: 壁マージン内にクランプした横オフセットd。
+// 処理概要: 固定された局所プロファイルに、現在自車dへ連続接続する補正を短距離だけ重ねる。
 double CandidateBuilder::localizedProfileD(
     const LocalizedLateralProfile &profile, const EgoState &ego, double s,
     double ds) const {
@@ -257,6 +291,9 @@ double CandidateBuilder::localizedProfileD(
   return std::clamp(nominal + correction, lower_d, upper_d);
 }
 
+// 入力: ラッチ済み局所回避プロファイルと評価対象s。
+// 出力: 補正前の名目横オフセットd。
+// 処理概要: 回避開始、最大オフセット保持、マージ終了の4区間でpiecewiseにdを返す。
 double CandidateBuilder::nominalLocalizedProfileD(
     const LocalizedLateralProfile &profile, double s) const {
   if (!profile.active || !std::isfinite(profile.anchor_s_m)) {
@@ -288,6 +325,9 @@ double CandidateBuilder::nominalLocalizedProfileD(
   return 0.0;
 }
 
+// 入力: Frenet横位置d。
+// 出力: 左右壁マージンのうち小さい方の余裕[m]。負なら安全コリドー外。
+// 処理概要: 候補や現在位置が壁側へ寄りすぎていないかを1値で扱えるようにする。
 double CandidateBuilder::wallClearance(double d) const {
   const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
   const double upper_d = config_.d_max_m - config_.min_wall_margin_m;

@@ -11,6 +11,9 @@ namespace overtake_planner {
 
 namespace {
 
+// 入力: CSVの1行。
+// 出力: カンマ区切りで分割した文字列配列。
+// 処理概要: 参照CSVを軽量に読むため、引用符処理を持たない単純分割を行う。
 std::vector<std::string> splitCsvLine(const std::string &line) {
   std::vector<std::string> out;
   std::stringstream ss(line);
@@ -21,6 +24,9 @@ std::vector<std::string> splitCsvLine(const std::string &line) {
   return out;
 }
 
+// 入力: CSV行、ヘッダ名から列番号へのmap、読みたい列名、fallback値。
+// 出力: 指定列をdouble化した値。列が無い/空ならfallback。
+// 処理概要: 参照CSVの任意列を安全に読むため、列存在チェックを共通化する。
 double readCell(const std::vector<std::string> &row,
                 const std::unordered_map<std::string, std::size_t> &header,
                 const std::string &name, double fallback = 0.0) {
@@ -34,6 +40,9 @@ double readCell(const std::vector<std::string> &row,
 
 } // namespace
 
+// 入力: BehaviorMode enum。
+// 出力: debug JSONやログへ出す固定文字列。
+// 処理概要: modeの可読化を1箇所に集約し、ログとテストの表記揺れを避ける。
 const char *toString(BehaviorMode mode) {
   switch (mode) {
   case BehaviorMode::FREE_RUN:
@@ -64,6 +73,9 @@ const char *toString(BehaviorMode mode) {
   return "UNKNOWN";
 }
 
+// 入力: CandidateType enum。
+// 出力: debug JSONやログへ出す固定文字列。
+// 処理概要: 候補種別の可読化を1箇所に集約する。
 const char *toString(CandidateType type) {
   switch (type) {
   case CandidateType::FASTEST:
@@ -86,6 +98,9 @@ const char *toString(CandidateType type) {
   return "UNKNOWN";
 }
 
+// 入力: 現在のBehaviorMode。
+// 出力: 追い越し準備/実行中ならtrue。
+// 処理概要: PREPAREとOVERTAKEをまとめて「追い越し文脈」として扱う。
 bool isPassMode(BehaviorMode mode) {
   return mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
          mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
@@ -93,6 +108,9 @@ bool isPassMode(BehaviorMode mode) {
          mode == BehaviorMode::OVERTAKE_RIGHT;
 }
 
+// 入力: 任意の角度[rad]。
+// 出力: (-pi, pi]へ正規化した角度[rad]。
+// 処理概要: yaw差分や補間結果を連続的に扱いやすい範囲へ折り返す。
 double normalizeAngle(double angle) {
   while (angle > M_PI) {
     angle -= 2.0 * M_PI;
@@ -103,6 +121,9 @@ double normalizeAngle(double angle) {
   return angle;
 }
 
+// 入力: 参照CSVパスと、失敗時に理由を書き込む任意のerrorポインタ。
+// 出力: 読み込み成功ならtrue。失敗時はfalse。
+// 処理概要: MPC参照CSVからFrenetFrameの中心線を構築する。
 bool FrenetFrame::loadCsv(const std::string &path, std::string *error) {
   // MPCと同じ参照CSVを読み、追い越し判断で使う中心線を構築する。
   std::ifstream ifs(path);
@@ -121,12 +142,16 @@ bool FrenetFrame::loadCsv(const std::string &path, std::string *error) {
     return false;
   }
 
+  // 処理ブロック: ヘッダ行を列名mapへ変換する。
+  // 設計意図: CSV列順が変わっても、必要な名前の列だけを読めるようにする。
   const auto names = splitCsvLine(line);
   std::unordered_map<std::string, std::size_t> header;
   for (std::size_t i = 0; i < names.size(); ++i) {
     header[names[i]] = i;
   }
 
+  // 処理ブロック: 各行をReferencePointへ変換する。
+  // 設計意図: 参照線のs/x/y/yaw/kappa/vを同じ構造体にまとめ、候補生成で再利用する。
   std::vector<ReferencePoint> ref;
   while (std::getline(ifs, line)) {
     if (line.empty()) {
@@ -154,6 +179,9 @@ bool FrenetFrame::loadCsv(const std::string &path, std::string *error) {
   return true;
 }
 
+// 入力: 参照点列。sがNaNの点を含んでいてもよい。
+// 出力: 内部reference_とtrack_length_を更新する。
+// 処理概要: 欠損sを距離累積で補い、閉ループコースとして全長を計算する。
 void FrenetFrame::setReference(std::vector<ReferencePoint> reference) {
   // CSVにs_mが無い/NaNの点は、隣接点距離から累積sを補完する。
   reference_ = std::move(reference);
@@ -179,6 +207,9 @@ void FrenetFrame::setReference(std::vector<ReferencePoint> reference) {
   }
 }
 
+// 入力: 任意のs座標[m]。
+// 出力: コース長で折り返したs座標[m]。
+// 処理概要: 周回コースで負値や1周超えを同じ基準へ正規化する。
 double FrenetFrame::wrapS(double s) const {
   // 参照線の長さでsを折り返し、周回コース上の位置として扱う。
   if (track_length_ <= 0.0) {
@@ -191,6 +222,9 @@ double FrenetFrame::wrapS(double s) const {
   return s;
 }
 
+// 入力: 始点from_sと目標to_s。
+// 出力: 周回を考慮した前方距離[m]。
+// 処理概要: to_sが次周に回った場合も、負距離ではなく前方距離として扱う。
 double FrenetFrame::deltaS(double from_s, double to_s) const {
   // to_sが次周にある場合も、前方距離として正の値を返す。
   double delta = wrapS(to_s) - wrapS(from_s);
@@ -200,6 +234,9 @@ double FrenetFrame::deltaS(double from_s, double to_s) const {
   return delta;
 }
 
+// 入力: map座標系のx,y,yaw。
+// 出力: 最近傍参照点に基づくFrenetPose。
+// 処理概要: 最近傍参照点を探し、参照接線に対する横ずれdとyaw誤差を計算する。
 FrenetPose FrenetFrame::cartesianToFrenet(double x, double y,
                                           double yaw) const {
   // 最近傍の参照点を探し、その接線方向に対する横ずれdを計算する簡易変換。
@@ -227,6 +264,9 @@ FrenetPose FrenetFrame::cartesianToFrenet(double x, double y,
   return pose;
 }
 
+// 入力: 参照線上のs座標[m]。
+// 出力: sを囲む参照点を線形補間したReferencePoint。
+// 処理概要: 候補horizonの任意sで中心線姿勢と曲率を取得できるようにする。
 ReferencePoint FrenetFrame::interpolate(double s) const {
   // 指定sを囲む2点を線形補間し、候補軌道を滑らかに生成できるようにする。
   if (reference_.empty()) {
@@ -256,6 +296,9 @@ ReferencePoint FrenetFrame::interpolate(double s) const {
   return out;
 }
 
+// 入力: Frenet座標s,d。
+// 出力: 中心線から法線方向にdだけずらしたCartesianのReferencePoint。
+// 処理概要: MPCへ渡す横オフセット付き参照点をmap座標へ戻す。
 ReferencePoint FrenetFrame::frenetToCartesian(double s, double d) const {
   // 中心線上の点から法線方向にdだけずらして、MPCへ渡すCartesian点へ戻す。
   ReferencePoint out = interpolate(s);

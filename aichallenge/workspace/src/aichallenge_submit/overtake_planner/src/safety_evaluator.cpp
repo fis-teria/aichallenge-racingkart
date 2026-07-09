@@ -7,8 +7,14 @@
 namespace overtake_planner
 {
 
+// 入力: PlannerConfig。壁マージン、安全楕円サイズ、許容安全余裕を含む。
+// 出力: SafetyEvaluatorインスタンス。以後の候補評価で同じ設定を使う。
+// 処理概要: 設定を値で保持し、評価中に外部パラメータが変わらないようにする。
 SafetyEvaluator::SafetyEvaluator(PlannerConfig config) : config_(config) {}
 
+// 入力: 候補軌道上の自車位置/姿勢と、同じ時刻の相手車位置。
+// 出力: 安全楕円の余裕h。0より大きいほど楕円外側、負値は衝突領域内。
+// 処理概要: 相対位置を自車body座標へ回し、前後/左右で別半径の楕円制約に変換する。
 double SafetyEvaluator::ellipseMargin(
   double ego_x, double ego_y, double ego_yaw,
   double opp_x, double opp_y) const
@@ -27,6 +33,9 @@ double SafetyEvaluator::ellipseMargin(
   return h;
 }
 
+// 入力: 評価対象の候補軌道と、相手車の予測軌道リスト。
+// 出力: 候補が安全ならtrue。不安全ならfalseを返し、candidate内に理由と余裕を記録する。
+// 処理概要: まず壁マージンで早期rejectし、その後に各時刻の他車楕円制約を評価する。
 bool SafetyEvaluator::evaluate(
   CandidateTrajectory & candidate,
   const std::vector<PredictedOpponent> & predictions) const
@@ -38,6 +47,8 @@ bool SafetyEvaluator::evaluate(
   candidate.active_safety_constraint_count = 0;
   candidate.reject_reason.clear();
 
+  // 処理ブロック: 壁との安全余裕を先に確認する。
+  // 設計意図: 壁違反は相手車有無に関係なく危険なので、計算量の大きい相手車評価より前に落とす。
   for (double d : candidate.d) {
     // 横オフセットが壁マージンを割る候補は、他車を見る前に即rejectする。
     if (d < config_.d_min_m + config_.min_wall_margin_m ||
@@ -48,6 +59,8 @@ bool SafetyEvaluator::evaluate(
     }
   }
 
+  // 処理ブロック: 相手車予測と候補軌道を同じhorizon indexで比較する。
+  // 設計意図: MPCへ渡す各点が将来の相手車位置と干渉しないことを候補単位で保証する。
   for (const auto & pred : predictions) {
     // 他車予測と候補軌道を同じhorizon indexで突き合わせ、安全楕円の余裕を調べる。
     const std::size_t n = std::min(candidate.x.size(), pred.x.size());

@@ -12,37 +12,58 @@ namespace overtake_planner {
 
 namespace {
 
+// 入力: 現在mode。
+// 出力: 左追い越し準備/実行中ならtrue。
+// 処理概要: 左側pass gapの喪失判定や優先候補維持に使う。
 bool isLeftPassMode(BehaviorMode mode) {
   return mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
          mode == BehaviorMode::OVERTAKE_LEFT;
 }
 
+// 入力: 現在mode。
+// 出力: 右追い越し準備/実行中ならtrue。
+// 処理概要: 右側pass gapの喪失判定や優先候補維持に使う。
 bool isRightPassMode(BehaviorMode mode) {
   return mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
          mode == BehaviorMode::OVERTAKE_RIGHT;
 }
 
+// 入力: 現在modeと左右pass可否を含むBlockedInfo。
+// 出力: 現在走っている側のpass gapが失われたならtrue。
+// 処理概要: 追い越し中に走行中の側が塞がれた場合、YIELD/復帰候補を追加するトリガにする。
 bool currentPassGapLost(BehaviorMode mode, const BlockedInfo &blocked_info) {
   return (isLeftPassMode(mode) && !blocked_info.can_pass_left) ||
          (isRightPassMode(mode) && !blocked_info.can_pass_right);
 }
 
+// 入力: CandidateType。
+// 出力: 左右PASS候補ならtrue。
+// 処理概要: safe stop判定や候補集合の有無チェックでPASSだけを抽出する。
 bool isPassCandidate(CandidateType type) {
   return type == CandidateType::PASS_LEFT || type == CandidateType::PASS_RIGHT;
 }
 
+// 入力: CandidateType。
+// 出力: PASS以外の通常回避/追従候補ならtrue。
+// 処理概要: PASSが使えない時に安全な代替候補があるかを調べる。
 bool isFallbackCandidate(CandidateType type) {
   return type == CandidateType::FOLLOW || type == CandidateType::YIELD_BEHIND ||
          type == CandidateType::RECOVERY ||
          type == CandidateType::SIDE_BY_SIDE_KEEP;
 }
 
+// 入力: BehaviorMode。
+// 出力: 横位置を安定化すべきmodeならtrue。
+// 処理概要: YIELD/RECOVERY/SAFE_STOP/SPEED_GUARD中の横参照hold対象をまとめる。
 bool isLateralStabilizationMode(BehaviorMode mode) {
   return mode == BehaviorMode::ABORT_RECOVERY ||
          mode == BehaviorMode::YIELD_BEHIND ||
          mode == BehaviorMode::SAFE_STOP || mode == BehaviorMode::SPEED_GUARD;
 }
 
+// 入力: 最終PlannerOutput。
+// 出力: 横参照holdを発動するほどの危険文脈があるならtrue。
+// 処理概要: コーナー横並び、未来譲り、速度ガードなど短周期で横目標を動かしたくない状態を集約する。
 bool hasLateralStabilizationRisk(const PlannerOutput &output) {
   const auto &blocked = output.blocked_info;
   return blocked.corner_side_by_side || blocked.future_yield_required ||
@@ -54,6 +75,9 @@ bool hasLateralStabilizationRisk(const PlannerOutput &output) {
          output.recovery_speed_guard_active;
 }
 
+// 入力: PlannerConfig。
+// 出力: 高速カーブ横参照holdへ入る曲率しきい値[1/m]。
+// 処理概要: コーナー譲り設定を優先し、無ければ直線追い越しgateの曲率を使う。
 double highSpeedCurveHoldEnterCurvature(const PlannerConfig &config) {
   if (config.corner_side_yield_curvature_m_inv > 0.0) {
     return config.corner_side_yield_curvature_m_inv;
@@ -61,6 +85,9 @@ double highSpeedCurveHoldEnterCurvature(const PlannerConfig &config) {
   return std::max(0.0, config.straight_overtake_max_curvature_m_inv);
 }
 
+// 入力: PlannerConfig。
+// 出力: 高速カーブ横参照holdを解除する曲率しきい値[1/m]。
+// 処理概要: 明示解除しきい値が無い場合、入場曲率の半分をヒステリシスとして使う。
 double highSpeedCurveHoldReleaseCurvature(const PlannerConfig &config) {
   if (config.high_speed_curve_lateral_hold_release_curvature_m_inv >= 0.0) {
     return config.high_speed_curve_lateral_hold_release_curvature_m_inv;
@@ -68,6 +95,9 @@ double highSpeedCurveHoldReleaseCurvature(const PlannerConfig &config) {
   return highSpeedCurveHoldEnterCurvature(config) * 0.5;
 }
 
+// 入力: 保持済みoffset配列と参照index。
+// 出力: indexに対応する保持offset。範囲外は最後の値。
+// 処理概要: 新しいhorizon長が変わっても保持中の横参照を安全に再利用する。
 double heldOffsetAt(const std::vector<double> &offsets, std::size_t index) {
   if (offsets.empty()) {
     return 0.0;
@@ -75,6 +105,9 @@ double heldOffsetAt(const std::vector<double> &offsets, std::size_t index) {
   return offsets[std::min(index, offsets.size() - 1)];
 }
 
+// 入力: 候補集合と候補種別predicate。
+// 出力: predicateに合うfeasible候補が1つでもあればtrue。
+// 処理概要: safe stopへ落とす前に、PASSやfallback候補の有無を確認する。
 bool hasFeasibleCandidate(const std::vector<CandidateTrajectory> &candidates,
                           bool (*predicate)(CandidateType)) {
   return std::any_of(candidates.begin(), candidates.end(),
@@ -83,6 +116,9 @@ bool hasFeasibleCandidate(const std::vector<CandidateTrajectory> &candidates,
                      });
 }
 
+// 入力: 選択候補とBlockedInfo。
+// 出力: SAFE_STOP解除時に通常復帰へ使える候補ならtrue。
+// 処理概要: 停止解除後に危険候補へ飛ばないよう、解放に使える候補種別を制限する。
 bool isFeasibleReleaseCandidate(const CandidateTrajectory &selected,
                                 const BlockedInfo &blocked_info) {
   if (!selected.feasible || selected.type == CandidateType::SAFE_STOP) {
@@ -99,15 +135,24 @@ bool isFeasibleReleaseCandidate(const CandidateTrajectory &selected,
          selected.type == CandidateType::RECOVERY;
 }
 
+// 入力: BehaviorMode。
+// 出力: PREPARE_OVERTAKE_*ならtrue。
+// 処理概要: PREPARE中だけPASS horizon publishを抑制する設定に使う。
 bool isPrepareOvertakeMode(BehaviorMode mode) {
   return mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
          mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT;
 }
 
+// 入力: PlannerConfig。
+// 出力: PREPARE中にもPASS horizonをpublishする設定ならtrue。
+// 処理概要: 内部PASS評価とMPCへ出すhorizonを分離するための切替を読む。
 bool publishPassHorizonInPrepare(const PlannerConfig &config) {
   return config.pass_horizon_publish_mode != "overtake_only";
 }
 
+// 入力: 候補集合とBlockedInfo。
+// 出力: SAFE_STOP解除時に使える候補が1つでもあればtrue。
+// 処理概要: SAFE_STOP release_readyの判定を候補集合全体に広げる。
 bool hasFeasibleReleaseCandidate(
     const std::vector<CandidateTrajectory> &candidates,
     const BlockedInfo &blocked_info) {
@@ -122,12 +167,18 @@ constexpr double kPublishedLateralTargetMemorySec = 0.5;
 
 } // namespace
 
+// 入力: Frenet参照線とplanner設定。
+// 出力: overtake planner coreのインスタンス。
+// 処理概要: リスク解析、候補生成、安全評価、状態機械を同じ参照線/設定で動かすために初期化する。
 OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame,
                                          PlannerConfig config)
     : frame_(std::move(frame)), config_(config), blocked_risk_(frame_, config_),
       future_side_risk_(frame_, config_, blocked_risk_), safety_(config),
       state_machine_(config) {}
 
+// 入力: 現在時刻、自車状態、相手車一覧、MPC health。
+// 出力: MPC overrideとdebug情報を含むPlannerOutput。
+// 処理概要: リスク判定、候補生成、安全評価、状態機械、publish用候補整形を1周期分実行する。
 PlannerOutput
 OvertakePlannerCore::update(double now_sec, const EgoState &ego,
                             const std::vector<OpponentState> &opponents,
@@ -158,6 +209,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     first_valid_update_sec_ = now_sec;
   }
 
+  // 処理ブロック: コース区間設定、追い越し許可、現在相手車リスクを集約する。
+  // 設計意図: 候補生成前に「今どの制約が有効か」をBlockedInfoへ一度まとめる。
   const ActiveSectionSafety active_section = activeSectionSafety(ego.frenet.s);
   const ActiveOvertakePermission active_overtake_permission =
       activeOvertakePermission(ego.frenet.s);
@@ -194,6 +247,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       blocked.slow_front_exception_active) {
     blocked.overtake_permission_reason = "slow_front_exception";
   }
+  // 処理ブロック: 追い越し開始gateとコーナー横並びリスクを判定する。
+  // 設計意図: コーナー入口で新規追い越しを始めない一方、既に横並びなら譲りや維持へ誘導する。
   blocked.corner_abs_curvature =
       maxAbsCurvatureAhead(ego.frenet.s, config_.corner_side_yield_lookahead_m);
   blocked.corner_side_by_side =
@@ -240,6 +295,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   blocked.ego_lateral_offset_m = ego.frenet.d;
   blocked.ego_speed_mps = ego.v;
   blocked.ego_wall_clearance_m = blocked_risk_.wallClearance(ego.frenet.d);
+  // 処理ブロック: 未来横並びとsection safetyを重ねて、事前譲りが必要かを決める。
+  // 設計意図: 現在は接触していなくても、コーナーで外側車両が壁へ寄る場面を先に抑える。
   blocked = future_side_risk_.evaluate(ego, blocked, opponents);
   if (active_section.force_outer_yield &&
       (blocked.side_by_side || blocked.parallel_side_candidate ||
@@ -268,8 +325,12 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       blocked.pass_gap_reason = "large_lateral_error";
     }
   }
+  // 処理ブロック: 局所回避プロファイルのラッチ状態を更新する。
+  // 設計意図: PASS候補の横ラインが相手位置の短周期変動で揺れないよう、対象sと回避区間を保持する。
   updateLocalizedLateralProfile(now_sec, ego, blocked, opponents);
 
+  // 処理ブロック: 状況に応じた候補集合を作る。
+  // 設計意図: PASS候補は内部評価へ残しつつ、FOLLOW/YIELD/RECOVERY/SAFE_STOPの代替候補も同時に安全評価する。
   // まず全状況でFASTEST候補を作り、閉塞時だけ追従/左右追い越し候補を増やす。
   std::vector<CandidateTrajectory> candidates;
   candidates.push_back(
@@ -328,6 +389,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
         makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
   }
 
+  // 処理ブロック: 全候補を安全評価してscoreを付ける。
+  // 設計意図: 先にfeasibleを確定し、その後で追い越し意欲やfallback優先度を比較する。
   for (auto &candidate : candidates) {
     // 壁/他車との安全余裕を見てから、目的に応じたスコアを付ける。
     safety_.evaluate(candidate, predictions);
@@ -354,6 +417,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   const bool effective_safe_stop_base_condition =
       safe_stop_base_condition && !start_grace_active;
 
+  // 処理ブロック: 回避不能状態が連続した時だけSAFE_STOP要求を作る。
+  // 設計意図: 一瞬のinfeasibleで停止に入ると走行が固まるため、trigger_cyclesで確定させる。
   if (effective_safe_stop_base_condition) {
     ++safe_stop_trigger_count_;
   } else {
@@ -393,6 +458,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     }
   }
 
+  // 処理ブロック: 内部候補を選び、状態機械で運転modeを安定化する。
+  // 設計意図: score上の最良候補をそのままpublishせず、保持時間や連続安全回数を通してmodeを決める。
   CandidateTrajectory selected = selectCandidate(candidates);
   const bool release_front_gap_ready =
       blocked.nearest_index < 0 ||
@@ -431,6 +498,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
              blocked.yield_reason.empty()) {
     blocked.yield_reason = "yield_lateral_error_hold";
   }
+  // 処理ブロック: modeに合わせてpublish用候補を再生成する。
+  // 設計意図: 内部PASS評価は状態遷移へ使いつつ、FOLLOW中やPREPARE中のMPC horizonは設定に応じて安全側へ差し替える。
   CandidateTrajectory output_selected = selected;
   if (mode_ == BehaviorMode::SAFE_STOP) {
     output_selected =
@@ -484,6 +553,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
 
   // ROSノードがMPC overrideとdebug
   // JSONを作れるよう、選択結果を平坦な出力に詰める。
+  // 処理ブロック: 出力形式へ変換し、rate limitと高速カーブholdを最後に適用する。
+  // 設計意図: 候補生成後の急な横参照変化をpublish直前で抑え、MPCへの入力を安定させる。
   auto output_built =
       PlannerOutputBuilder(config_).build(PlannerOutputBuildInput{
           mode_, ego, output_selected, blocked, safe_stop_context,
@@ -518,6 +589,9 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   return output_built;
 }
 
+// 入力: 相手車一覧と現在時刻。
+// 出力: 各相手車の等速予測軌道。
+// 処理概要: V2X速度推定を使い、planner horizon上の相手位置をFrenet/Cartesianで並べる。
 std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
     const std::vector<OpponentState> &opponents, double now_sec) const {
   // V2X位置から推定した速度を使い、短いhorizonでは等速直線運動として予測する。
@@ -545,6 +619,9 @@ std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
   return out;
 }
 
+// 入力: 候補種別、自車状態、BlockedInfo、相手車一覧。
+// 出力: CandidateBuilderで生成した候補軌道。
+// 処理概要: core側で保持している局所横プロファイルを必要に応じて候補生成へ渡す。
 CandidateTrajectory OvertakePlannerCore::makeCandidate(
     CandidateType type, const EgoState &ego, const BlockedInfo &blocked_info,
     const std::vector<OpponentState> &opponents) const {
@@ -555,6 +632,9 @@ CandidateTrajectory OvertakePlannerCore::makeCandidate(
                          : nullptr);
 }
 
+// 入力: 安全評価済み候補とBlockedInfo。
+// 出力: 小さいほど優先されるscore。
+// 処理概要: 安全性を最優先にしつつ、状況に応じてPASS/FOLLOW/YIELD/RECOVERYの優先度を調整する。
 double
 OvertakePlannerCore::candidateScore(const CandidateTrajectory &candidate,
                                     const BlockedInfo &blocked_info) const {
@@ -577,6 +657,8 @@ OvertakePlannerCore::candidateScore(const CandidateTrajectory &candidate,
     return 1.0e9;
   }
   double score = 0.0;
+  // 処理ブロック: feasible候補の基本優先度を種別ごとに決める。
+  // 設計意図: 通常はPASSを取りに行くが、横並びや未来譲りではYIELD/KEEPを優先できるようにする。
   switch (candidate.type) {
   case CandidateType::FASTEST:
     score = blocked_info.blocked ? 50.0 : 0.0;
@@ -641,6 +723,9 @@ OvertakePlannerCore::candidateScore(const CandidateTrajectory &candidate,
   return score;
 }
 
+// 入力: 開始sとlookahead距離[m]。
+// 出力: 区間内の最大絶対曲率[1/m]。
+// 処理概要: 追い越し開始gateや横並びコーナー判定のため、参照線曲率を粗くサンプリングする。
 double OvertakePlannerCore::maxAbsCurvatureAhead(double s,
                                                  double lookahead_m) const {
   if (frame_.empty() || lookahead_m <= 0.0) {
@@ -656,6 +741,9 @@ double OvertakePlannerCore::maxAbsCurvatureAhead(double s,
   return max_abs_kappa;
 }
 
+// 入力: 現在s。
+// 出力: 現在有効なsection safety設定。
+// 処理概要: YAMLから読み込んだ区間ルールを探し、壁マージン/速度/外側譲りのスケールを返す。
 ActiveSectionSafety OvertakePlannerCore::activeSectionSafety(double s) const {
   ActiveSectionSafety active;
   if (!config_.section_safety_profile_enabled) {
@@ -686,6 +774,9 @@ ActiveSectionSafety OvertakePlannerCore::activeSectionSafety(double s) const {
   return active;
 }
 
+// 入力: 現在s。
+// 出力: lookaheadも考慮した追い越し許可状態。
+// 処理概要: 現在地点と前方区間を見て、近い将来の禁止区間へ入る前に追い越し開始を止める。
 ActiveOvertakePermission
 OvertakePlannerCore::activeOvertakePermission(double s) const {
   ActiveOvertakePermission current = overtakePermissionAtS(s);
@@ -707,6 +798,9 @@ OvertakePlannerCore::activeOvertakePermission(double s) const {
   return current;
 }
 
+// 入力: 評価対象s。
+// 出力: そのs地点単体の追い越し許可状態。
+// 処理概要: 許可CSVから該当区間を探し、見つからなければdefault設定を返す。
 ActiveOvertakePermission
 OvertakePlannerCore::overtakePermissionAtS(double s) const {
   ActiveOvertakePermission active;
@@ -727,6 +821,9 @@ OvertakePlannerCore::overtakePermissionAtS(double s) const {
   return active;
 }
 
+// 入力: section safety ruleと評価対象s。
+// 出力: sがrule区間内ならtrue。
+// 処理概要: 周回境界をまたぐ区間にも対応して、wrap済みsで包含判定する。
 bool OvertakePlannerCore::sectionContainsS(const SectionSafetyRule &rule,
                                            double s) const {
   if (frame_.empty()) {
@@ -741,6 +838,9 @@ bool OvertakePlannerCore::sectionContainsS(const SectionSafetyRule &rule,
   return wrapped_s >= start || wrapped_s <= end;
 }
 
+// 入力: overtake permission ruleと評価対象s。
+// 出力: sがrule区間内ならtrue。
+// 処理概要: sectionContainsSと同じ閉ループ区間判定を追い越し許可CSVにも使う。
 bool OvertakePlannerCore::permissionRuleContainsS(
     const OvertakePermissionRule &rule, double s) const {
   if (frame_.empty()) {
@@ -755,12 +855,18 @@ bool OvertakePlannerCore::permissionRuleContainsS(
   return wrapped_s >= start || wrapped_s <= end;
 }
 
+// 入力: 現在有効なsection safety設定。
+// 出力: section scaleを反映したsoft wall margin[m]。
+// 処理概要: コーナー厳格区間などで壁に寄る判断を早めに危険扱いする。
 double OvertakePlannerCore::effectiveWallSoftMargin(
     const ActiveSectionSafety &section) const {
   const double base = std::max(0.0, config_.wall_soft_margin_m);
   return base * std::max(1.0, section.wall_margin_scale);
 }
 
+// 入力: 現在のBlockedInfo。
+// 出力: 低速前走車例外が有効になったならtrue。
+// 処理概要: 追い越し禁止区間でも、前走車が低速で一定周期続いた時だけ開始許可へ戻す。
 bool OvertakePlannerCore::updateSlowFrontException(
     const BlockedInfo &blocked) {
   if (!config_.slow_front_exception_enabled || !blocked.front_vehicle_low_speed) {
@@ -773,6 +879,9 @@ bool OvertakePlannerCore::updateSlowFrontException(
   return slow_front_exception_count_ >= required_cycles;
 }
 
+// 入力: 現在時刻、自車状態、BlockedInfo。
+// 出力: スタート直後のsafe stopを抑制するならtrue。
+// 処理概要: 低速スタート直後の横並び/未来譲りで、すぐ停止に落ちるのを短時間だけ避ける。
 bool OvertakePlannerCore::shouldSuppressSafeStopForStartGrace(
     double now_sec, const EgoState &ego, const BlockedInfo &blocked) const {
   if (!config_.start_grace_safe_stop_enabled ||
@@ -796,10 +905,16 @@ bool OvertakePlannerCore::shouldSuppressSafeStopForStartGrace(
          blocked.future_side_by_side || blocked.future_yield_required;
 }
 
+// 入力: なし。
+// 出力: 局所横プロファイルモードが有効ならtrue。
+// 処理概要: legacyとlocalized_latchedを切り替え、実験機能をパラメータで隔離する。
 bool OvertakePlannerCore::localizedLateralProfileEnabled() const {
   return config_.overtake_lateral_profile_mode == "localized_latched";
 }
 
+// 入力: 現在のBlockedInfo。
+// 出力: 優先するPASS候補種別。使えない場合はFASTEST。
+// 処理概要: 既に追い越し中の方向を優先し、未開始なら通れる側を選ぶ。
 CandidateType
 OvertakePlannerCore::preferredPassType(const BlockedInfo &blocked) const {
   if (isLeftPassMode(mode_)) {
@@ -817,6 +932,9 @@ OvertakePlannerCore::preferredPassType(const BlockedInfo &blocked) const {
   return CandidateType::FASTEST;
 }
 
+// 入力: 現在のBlockedInfo。
+// 出力: 局所回避プロファイルの対象相手index。無ければ-1。
+// 処理概要: 前方閉塞車両、横並び車両、並走候補の順で対象を選ぶ。
 int OvertakePlannerCore::localizedProfileTargetIndex(
     const BlockedInfo &blocked) const {
   if (blocked.nearest_index >= 0) {
@@ -828,6 +946,9 @@ int OvertakePlannerCore::localizedProfileTargetIndex(
   return blocked.parallel_side_index;
 }
 
+// 入力: 現在時刻、自車状態、BlockedInfo、相手車一覧。
+// 出力: なし。localized_lateral_profile_を更新またはクリアする。
+// 処理概要: PASS文脈で対象車両と目標sをラッチし、短周期の相手位置揺れで横ラインが揺れないようにする。
 void OvertakePlannerCore::updateLocalizedLateralProfile(
     double now_sec, const EgoState &ego, const BlockedInfo &blocked,
     const std::vector<OpponentState> &opponents) {
@@ -868,6 +989,8 @@ void OvertakePlannerCore::updateLocalizedLateralProfile(
   }
 
   if (!localized_lateral_profile_.active) {
+    // 処理ブロック: 新規ラッチを作る。
+    // 設計意図: 開始時の自車dと対象sを基準にし、以後の候補生成で同じ回避区間を使う。
     if (pass_type != CandidateType::PASS_LEFT &&
         pass_type != CandidateType::PASS_RIGHT) {
       return;
@@ -891,6 +1014,8 @@ void OvertakePlannerCore::updateLocalizedLateralProfile(
   if (alpha <= 0.0 || target.id != localized_lateral_profile_.target_id) {
     return;
   }
+  // 処理ブロック: 任意設定時だけ対象sを低域更新する。
+  // 設計意図: 完全固定が強すぎる場合でも、急変ではなくalphaで滑らかに追従させる。
   const double measured_target_s_m =
       localized_lateral_profile_.anchor_s_m +
       frame_.deltaS(localized_lateral_profile_.anchor_s_m, target.frenet.s);
@@ -900,10 +1025,16 @@ void OvertakePlannerCore::updateLocalizedLateralProfile(
   setLocalizedProfileMarkers(updated_target_s_m);
 }
 
+// 入力: なし。
+// 出力: なし。局所横プロファイルを無効状態へ戻す。
+// 処理概要: PASS文脈が切れた時に、古い対象車両の回避区間を次回へ持ち越さない。
 void OvertakePlannerCore::clearLocalizedLateralProfile() {
   localized_lateral_profile_ = LocalizedLateralProfile{};
 }
 
+// 入力: ラッチ対象のunwrapped target_s。
+// 出力: なし。局所プロファイルの開始/保持/マージmarkerを更新する。
+// 処理概要: 対象車両の前から避け始め、通過後に一定距離保持してから中心へ戻す区間を作る。
 void OvertakePlannerCore::setLocalizedProfileMarkers(double target_s_m) {
   localized_lateral_profile_.target_s_m = target_s_m;
   const double start_before =
@@ -923,6 +1054,9 @@ void OvertakePlannerCore::setLocalizedProfileMarkers(double target_s_m) {
       localized_lateral_profile_.full_offset_end_s_m + merge_distance;
 }
 
+// 入力: PASS_LEFT/PASS_RIGHT。
+// 出力: そのPASS方向の目標横オフセットd。
+// 処理概要: CandidateBuilder以外でもPASS方向から目標dを参照できるようにする。
 double OvertakePlannerCore::targetOffsetForPass(CandidateType pass_type) const {
   if (pass_type == CandidateType::PASS_LEFT) {
     return config_.left_offset_m;
@@ -933,6 +1067,9 @@ double OvertakePlannerCore::targetOffsetForPass(CandidateType pass_type) const {
   return 0.0;
 }
 
+// 入力: 自車状態とBlockedInfo。
+// 出力: 横並び時に後方へ譲るべきならtrue。
+// 処理概要: 未来譲り、相手が前寄り、コーナー壁余裕不足をまとめてYIELD_BEHINDへ誘導する。
 bool OvertakePlannerCore::shouldYieldBehindSideBySide(
     const EgoState &ego, const BlockedInfo &blocked_info) const {
   if (blocked_info.future_yield_required) {
@@ -954,6 +1091,9 @@ bool OvertakePlannerCore::shouldYieldBehindSideBySide(
   return opponent_not_clearly_behind || close_to_wall;
 }
 
+// 入力: 現在時刻、自車状態、最終PlannerOutput。
+// 出力: なし。必要ならoutput.lateral_offsetsを保持済み値へ置き換える。
+// 処理概要: 高速カーブ中の復帰/譲り/速度guardで横参照が毎周期揺れないようにholdする。
 void OvertakePlannerCore::applyHighSpeedCurveLateralHold(
     double now_sec, const EgoState &ego, PlannerOutput &output) {
   output.lateral_target_hold_active = false;
@@ -983,6 +1123,8 @@ void OvertakePlannerCore::applyHighSpeedCurveLateralHold(
           : enter_speed;
 
   if (high_speed_curve_lateral_hold_active_) {
+    // 処理ブロック: hold中は解除条件を満たすまで前回offset列を再利用する。
+    // 設計意図: 横参照の再計算でMPC入力が急に変わることを避ける。
     const bool release = !usable_output || !stabilized_mode ||
                          ego.v <= release_speed ||
                          curvature <= release_curvature;
@@ -1011,6 +1153,8 @@ void OvertakePlannerCore::applyHighSpeedCurveLateralHold(
     return;
   }
 
+  // 処理ブロック: holdへ入る瞬間のoffset列を保存する。
+  // 設計意図: 以後の周期ではこの列を基準にし、高速カーブが落ち着くまで横目標を固定する。
   high_speed_curve_lateral_hold_active_ = true;
   high_speed_curve_lateral_hold_offsets_ = output.lateral_offsets;
   high_speed_curve_lateral_hold_sec_ = now_sec;
@@ -1018,6 +1162,9 @@ void OvertakePlannerCore::applyHighSpeedCurveLateralHold(
   output.lateral_target_hold_reason = "high_speed_curve_hold";
 }
 
+// 入力: 現在時刻とPlannerOutput。
+// 出力: なし。横オフセット列を前回publish値からの最大変化量以内に制限する。
+// 処理概要: publish周期ごとのtarget d急変を抑え、MPCへ滑らかな参照を渡す。
 void OvertakePlannerCore::applyLateralTargetRateLimit(double now_sec,
                                                       PlannerOutput &output) {
   if (!output.active_override || output.lateral_offsets.empty() ||
@@ -1043,6 +1190,9 @@ void OvertakePlannerCore::applyLateralTargetRateLimit(double now_sec,
   output.target_lateral_offset_m = output.lateral_offsets.back();
 }
 
+// 入力: 現在時刻とPlannerOutput。
+// 出力: なし。次周期のrate limit/hold用に最後の横オフセット列を記憶する。
+// 処理概要: overrideが途切れて一定時間経ったら古い記憶を破棄し、無関係な制限を残さない。
 void OvertakePlannerCore::rememberPublishedLateralTarget(
     double now_sec, const PlannerOutput &output) {
   if (output.active_override && !output.lateral_offsets.empty()) {
@@ -1059,6 +1209,9 @@ void OvertakePlannerCore::rememberPublishedLateralTarget(
   }
 }
 
+// 入力: scoreとfeasibleが設定済みの候補集合。
+// 出力: publish/状態機械へ渡す暫定選択候補。
+// 処理概要: feasible候補を最優先し、全候補unsafeの場合だけ最小scoreのunsafe候補を診断用に返す。
 CandidateTrajectory OvertakePlannerCore::selectCandidate(
     std::vector<CandidateTrajectory> &candidates) const {
   // feasible候補があるなら必ずそれを優先する。unsafe候補は全候補がunsafeの時だけ診断用に返す。

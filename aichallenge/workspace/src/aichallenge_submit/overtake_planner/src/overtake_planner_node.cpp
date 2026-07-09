@@ -29,12 +29,18 @@ namespace overtake_planner {
 
 namespace {
 
+// 入力: ROS geometry_msgsのQuaternion。
+// 出力: yaw角[rad]。
+// 処理概要: 2D走行で使うz軸周りの姿勢だけを取り出す。
 double yawFromQuaternion(const geometry_msgs::msg::Quaternion &q) {
   const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
   const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
   return std::atan2(siny_cosp, cosy_cosp);
 }
 
+// 入力: パッケージ名とCSVパス。
+// 出力: 絶対パス。csv_pathが絶対パスならそのまま返す。
+// 処理概要: launch/configでは短い相対パスを書けるよう、package share配下へ解決する。
 std::string resolveReferencePath(const std::string &package_name,
                                  const std::string &csv_path) {
   // 相対パスならパッケージshare配下として解決し、configから短いパスで指定できるようにする。
@@ -45,6 +51,9 @@ std::string resolveReferencePath(const std::string &package_name,
          csv_path;
 }
 
+// 入力: 文字列。
+// 出力: 前後の空白を除いた文字列。
+// 処理概要: CSV列やbool文字列を読む前に不要な空白を落とす。
 std::string trim(std::string value) {
   const auto begin = value.find_first_not_of(" \t\r\n");
   if (begin == std::string::npos) {
@@ -54,6 +63,9 @@ std::string trim(std::string value) {
   return value.substr(begin, end - begin + 1);
 }
 
+// 入力: CSVの1行。
+// 出力: trim済みの列文字列配列。
+// 処理概要: 許可CSVを読むための単純なカンマ分割を行う。
 std::vector<std::string> splitCsvLine(const std::string &line) {
   std::vector<std::string> columns;
   std::stringstream ss(line);
@@ -64,6 +76,9 @@ std::vector<std::string> splitCsvLine(const std::string &line) {
   return columns;
 }
 
+// 入力: 整数文字列。
+// 出力: 変換できたint64。失敗時はnullopt。
+// 処理概要: 許可CSVのwaypoint idを安全に数値化する。
 std::optional<std::int64_t> parseInt64(const std::string &value) {
   errno = 0;
   char *end = nullptr;
@@ -74,6 +89,9 @@ std::optional<std::int64_t> parseInt64(const std::string &value) {
   return static_cast<std::int64_t>(parsed);
 }
 
+// 入力: true/false相当の文字列。
+// 出力: bool値。未対応文字列ならnullopt。
+// 処理概要: CSVでallow/denyなども使えるよう表記揺れを吸収する。
 std::optional<bool> parseBool(const std::string &value) {
   std::string lowered;
   lowered.reserve(value.size());
@@ -92,6 +110,9 @@ std::optional<bool> parseBool(const std::string &value) {
   return std::nullopt;
 }
 
+// 入力: debug JSONへ出したいdouble。
+// 出力: JSON数値文字列。NaN/Infならnull。
+// 処理概要: 非有限値をJSONとして壊さず、後段解析で欠損として扱えるようにする。
 std::string jsonNumber(double value) {
   if (!std::isfinite(value)) {
     return "null";
@@ -99,6 +120,9 @@ std::string jsonNumber(double value) {
   return std::to_string(value);
 }
 
+// 入力: 簡易JSON文字列と数値field名。
+// 出力: field値をdouble化したもの。無い/不正ならnullopt。
+// 処理概要: MPC health debugから必要な数値だけを軽量に抜き出す。
 std::optional<double> jsonNumberField(const std::string &json,
                                       const std::string &field) {
   const std::string key = "\"" + field + "\":";
@@ -124,6 +148,9 @@ std::optional<double> jsonNumberField(const std::string &json,
   return value;
 }
 
+// 入力: ROS_DOMAIN_ID文字列。
+// 出力: 対応するV2X vehicle_id(dN)。変換できなければnullopt。
+// 処理概要: 複数台評価でdomain_idと車両IDを揃え、自車を相手車リストから除外する。
 std::optional<std::string> vehicleIdFromRosDomainId(const char *raw_domain_id) {
   // AI Challengeのdomain番号とV2X vehicle_id(d1,d2,...)を対応させる。
   if (raw_domain_id == nullptr || raw_domain_id[0] == '\0') {
@@ -140,6 +167,9 @@ std::optional<std::string> vehicleIdFromRosDomainId(const char *raw_domain_id) {
   return "d" + std::to_string(domain_id);
 }
 
+// 入力: パラメータで指定された自車IDとlogger。
+// 出力: 実際に使う自車vehicle_id。
+// 処理概要: 明示IDを優先し、auto時はROS_DOMAIN_IDから推定、失敗時はd1へフォールバックする。
 std::string resolveOwnVehicleId(const std::string &configured_id,
                                 const rclcpp::Logger &logger) {
   // own_vehicle_id=autoならROS_DOMAIN_IDから自車IDを推定し、V2X上の自車を除外する。
@@ -164,6 +194,9 @@ std::string resolveOwnVehicleId(const std::string &configured_id,
 
 class OvertakePlannerNode : public rclcpp::Node {
 public:
+  // 入力: ROS parameter、参照CSV、V2X/odom/MPC health topic。
+  // 出力: publisher/subscriber/timerを持つROS node。
+  // 処理概要: PlannerConfigとFrenetFrameを初期化し、周期timerでcoreを更新する実行環境を作る。
   OvertakePlannerNode() : Node("overtake_planner_node") {
     // 参照線、V2Xフィルタ、候補生成/安全評価のしきい値をROSパラメータから読む。
     const auto reference_package = declare_parameter<std::string>(
@@ -512,11 +545,17 @@ private:
     double mpc_solve_time_ms{std::numeric_limits<double>::quiet_NaN()};
   };
 
+  // 入力: ROS builtin_interfaces::msg::Time。
+  // 出力: 秒単位のdouble時刻。
+  // 処理概要: odom/V2X stampの鮮度判定で扱いやすい形式へ変換する。
   double stampToSec(const builtin_interfaces::msg::Time &stamp) const {
     return static_cast<double>(stamp.sec) +
            static_cast<double>(stamp.nanosec) * 1.0e-9;
   }
 
+  // 入力: FrenetFrameとwaypoint id。
+  // 出力: waypointに対応するs[m]。範囲外ならnullopt。
+  // 処理概要: section設定をwp番号で書いた場合に、参照線のsへ変換する。
   std::optional<double> sectionSFromWp(const FrenetFrame &frame,
                                        std::int64_t wp_id) const {
     if (frame.reference().empty() || wp_id < 0) {
@@ -529,6 +568,9 @@ private:
     return frame.reference()[index].s;
   }
 
+  // 入力: 参照線frameとROS parameter群。
+  // 出力: section safety rule配列。
+  // 処理概要: YAMLの区間安全設定を読み、wp指定またはs指定を統一したs区間へ変換する。
   std::vector<SectionSafetyRule>
   readSectionSafetyRules(const FrenetFrame &frame) {
     const auto names = declare_parameter<std::vector<std::string>>(
@@ -546,6 +588,8 @@ private:
     const auto end_wp = declare_parameter<std::vector<std::int64_t>>(
         "section_safety_end_wp", std::vector<std::int64_t>{});
 
+    // 処理ブロック: 複数parameter配列の最大長を基準にrule候補を走査する。
+    // 設計意図: 一部の配列だけ短い設定でも、欠損を警告しながら有効なruleだけ採用する。
     const std::size_t n = std::max(
         {names.size(), profiles.size(), role_policies.size(), start_s.size(),
          end_s.size(), start_wp.size(), end_wp.size()});
@@ -588,6 +632,9 @@ private:
     return rules;
   }
 
+  // 入力: 参照線frame、CSVのパッケージ名、CSVパス。
+  // 出力: 追い越し許可区間rule配列。
+  // 処理概要: name,start_wp,end_wp,allow_overtake形式のCSVを読み、wp範囲をs範囲へ変換する。
   std::vector<OvertakePermissionRule>
   readOvertakePermissionRules(const FrenetFrame &frame,
                               const std::string &package_name,
@@ -608,6 +655,8 @@ private:
 
     std::string line;
     std::size_t line_number = 0;
+    // 処理ブロック: CSVを1行ずつ検証してrule化する。
+    // 設計意図: 1行が壊れていてもnode全体は止めず、残りの有効な区間設定で走れるようにする。
     while (std::getline(file, line)) {
       ++line_number;
       line = trim(line);
@@ -663,6 +712,9 @@ private:
     return rules;
   }
 
+  // 入力: /mpc/speed_profile_debug のJSON文字列。
+  // 出力: なし。内部mpc_health_と受信時刻を更新する。
+  // 処理概要: MPC infeasible回数とsolve timeを抜き出し、planner側の速度guardへ渡す。
   void updateMpcHealth(const std_msgs::msg::String &msg) {
     MpcHealthStatus health;
     const auto infeasible_count =
@@ -684,6 +736,9 @@ private:
     last_mpc_health_sec_ = now().seconds();
   }
 
+  // 入力: 現在時刻[sec]。
+  // 出力: age_secを更新したMpcHealthStatus。
+  // 処理概要: health情報が無い場合はinvalidにし、古さはcore側のguard条件で判断できるようにする。
   MpcHealthStatus currentMpcHealth(double now_sec) const {
     auto health = mpc_health_;
     if (!health.valid || !last_mpc_health_sec_.has_value()) {
@@ -694,6 +749,9 @@ private:
     return health;
   }
 
+  // 入力: V2X車両位置配列。
+  // 出力: なし。車両IDごとの最新位置と推定速度をsamples_へ保存する。
+  // 処理概要: 位置差分からvx/vyを推定し、ジャンプが大きい時は速度を0として外れ値を抑える。
   void updateOpponents(const v2x_msgs::msg::V2XVehiclePositionArray &msg) {
     // 各車両の最新位置を保持し、ジャンプが小さい時だけ速度推定を更新する。
     for (const auto &vehicle : msg.vehicles) {
@@ -720,6 +778,9 @@ private:
     }
   }
 
+  // 入力: 現在の自車状態と時刻。
+  // 出力: coreへ渡すOpponentState配列。
+  // 処理概要: 自車ID、近すぎる点、無効な自車状態を除外し、相手車をFrenet座標つきへ変換する。
   std::vector<OpponentState> collectOpponents(const EgoState &ego,
                                               double now_sec) const {
     // 自車IDと近すぎる点を除外し、Frenet座標つきの他車リストへ変換する。
@@ -752,6 +813,9 @@ private:
     return opponents;
   }
 
+  // 入力: coreが返したPlannerOutput。
+  // 出力: /overtake/reference_override へFloat32MultiArrayをpublishする。
+  // 処理概要: MPC側の簡易プロトコルに合わせ、mode、点数、横offset列、速度列を1配列に詰める。
   void publishOverride(const PlannerOutput &output) {
     // Float32MultiArrayの簡易プロトコル: [valid, mode_id, n, d[0..n),
     // v_ref[0..n)]。
@@ -774,6 +838,9 @@ private:
     override_pub_->publish(msg);
   }
 
+  // 入力: 今周期のBehaviorMode。
+  // 出力: debugで使うattempt_id。追い越し試行外なら0。
+  // 処理概要: PREPARE/OVERTAKE開始から復帰/譲り完了まで同じIDを維持する。
   std::uint64_t updateAttemptId(BehaviorMode mode) {
     // evalwrapでattemptを追跡できるよう、追い越し準備開始から復帰完了まで同じIDを出す。
     const bool starts_attempt = mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
@@ -806,6 +873,9 @@ private:
     return publish_id;
   }
 
+  // 入力: PlannerOutput、自車状態、attempt_id。
+  // 出力: /debug/overtake/mode と /debug/overtake/metrics をpublishする。
+  // 処理概要: 軽量mode文字列と、eval/report向けの詳細JSONを分けて出す。
   void publishDebug(const PlannerOutput &output, const EgoState &ego,
                     std::uint64_t attempt_id) {
     // modeだけの軽量トピックと、解析用の詳細JSONを分けてpublishする。
@@ -1037,6 +1107,9 @@ private:
     metrics_pub_->publish(metrics_msg);
   }
 
+  // 入力: planner coreが返したPlannerOutput。
+  // 出力: ログ変化検出用に主要フィールドだけを抜き出したDecisionLogSnapshot。
+  // 処理概要: 巨大な出力全体ではなく、判断の変化に効く値だけを比較できる形に詰め替える。
   DecisionLogSnapshot
   makeDecisionLogSnapshot(const PlannerOutput &output) const {
     DecisionLogSnapshot snapshot;
@@ -1112,6 +1185,9 @@ private:
     return snapshot;
   }
 
+  // 入力: 1周期分のDecisionLogSnapshot。
+  // 出力: autoware.logへ残す価値がある判断イベントならtrue。
+  // 処理概要: FREE_RUN/FASTESTだけの平常周期を抑制し、閉塞/横並び/safe stopなどの文脈を抽出する。
   bool isInterestingDecisionEvent(const DecisionLogSnapshot &snapshot) const {
     const bool has_pass_gap_context = !snapshot.pass_gap_reason.empty() &&
                                       snapshot.pass_gap_reason != "no_target";
@@ -1138,6 +1214,9 @@ private:
            !snapshot.reason.empty();
   }
 
+  // 入力: 現在周期のDecisionLogSnapshot。
+  // 出力: 前回との差分としてログ出力すべきならtrue。
+  // 処理概要: 数値は小さな揺れを無視し、状態・理由・対象車両が変わった時だけ記録する。
   bool shouldLogDecisionEvent(const DecisionLogSnapshot &current) const {
     if (!has_decision_log_snapshot_) {
       return isInterestingDecisionEvent(current);
@@ -1225,6 +1304,9 @@ private:
                        isInterestingDecisionEvent(previous));
   }
 
+  // 入力: planner出力、自車状態、追い越し試行ID。
+  // 出力: なし。必要な時だけRCLCPP_INFOで判断ログを出す。
+  // 処理概要: debug topicを見返せない環境でも、mode遷移やsafe stop理由をautoware.logから追えるようにする。
   void logDecisionEvent(const PlannerOutput &output, const EgoState &ego,
                         std::uint64_t attempt_id) {
     // 毎周期ではなく、判断入力や出力が変わった時だけautoware.logへ要約を残す。
@@ -1309,6 +1391,9 @@ private:
         output.reason.c_str());
   }
 
+  // 入力: ROS timer周期。
+  // 出力: override topic、mode topic、debug metrics、必要に応じた判断ログ。
+  // 処理概要: odomをFrenet自車状態へ変換し、相手車収集からcore更新、publishまでを1周期で実行する。
   void onTimer() {
     // 最新odomを自車状態へ変換し、他車収集 -> コア更新 -> override/debug
     // publishを1周期で行う。
@@ -1367,6 +1452,9 @@ private:
 
 } // namespace overtake_planner
 
+// 入力: ROS 2プロセス引数。
+// 出力: 終了コード。正常終了時は0。
+// 処理概要: OvertakePlannerNodeを生成してspinし、シャットダウン時にrclcppを閉じる。
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<overtake_planner::OvertakePlannerNode>());

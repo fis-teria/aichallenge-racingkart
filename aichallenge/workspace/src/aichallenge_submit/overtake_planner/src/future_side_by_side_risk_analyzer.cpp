@@ -10,11 +10,17 @@ namespace {
 
 constexpr double kSideDirectionEpsilon = 0.05;
 
+// 入力: 0から1へ進む正規化値z。
+// 出力: 端点の傾きが0になる補間率。
+// 処理概要: 横方向へ離れる予測dを急変させないために使う。
 double smoothstep(double z) {
   z = std::clamp(z, 0.0, 1.0);
   return z * z * (3.0 - 2.0 * z);
 }
 
+// 入力: 自車s、相手s、コース長。
+// 出力: 周回を考慮した符号付きs差分。正は相手が前方、負は後方。
+// 処理概要: 将来の横並び判定で、周回境界をまたいでも前後関係が破綻しないようにする。
 double signedDeltaS(double ego_s, double other_s, double track_length) {
   double signed_delta_s = other_s - ego_s;
   if (track_length > 0.0) {
@@ -30,15 +36,23 @@ double signedDeltaS(double ego_s, double other_s, double track_length) {
 
 } // namespace
 
+// 入力: Frenet変換器、planner設定、現在リスク解析器。
+// 出力: 将来横並びリスク解析器のインスタンス。
+// 処理概要: 現在の壁余裕計算を再利用しながら、相手車の未来位置を評価できるよう依存を保持する。
 FutureSideBySideRiskAnalyzer::FutureSideBySideRiskAnalyzer(
     const FrenetFrame &frame, const PlannerConfig &config,
     const BlockedRiskAnalyzer &blocked_risk)
     : frame_(frame), config_(config), blocked_risk_(blocked_risk) {}
 
+// 入力: 自車状態、現在のBlockedInfo、相手車一覧。
+// 出力: 将来横並び/コーナー/外壁リスクを反映したBlockedInfo。
+// 処理概要: 横並びまたは並走候補の未来位置を等速予測し、コーナーで譲るべき状況を先読みする。
 BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
     const EgoState &ego, const BlockedInfo &blocked_info,
     const std::vector<OpponentState> &opponents) const {
   BlockedInfo out = blocked_info;
+  // 処理ブロック: 未来予測の対象車両を選ぶ。
+  // 設計意図: 横並び候補がない時は通常の前方閉塞判断に任せ、不要な譲りを作らない。
   const int target_index = sideRiskIndex(out);
   if (!config_.future_side_prediction_enabled || target_index < 0 ||
       static_cast<std::size_t>(target_index) >= opponents.size()) {
@@ -56,6 +70,8 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
   if (direction_known && !same_direction) {
     return out;
   }
+  // 処理ブロック: 自車が相手から離れる方向と横目標を仮定する。
+  // 設計意図: SIDE_BY_SIDE_KEEP候補が選ばれた場合の将来dを近似し、壁余裕を先に評価する。
   const double target_delta_d =
       exact_side_target ? out.side_delta_d : out.parallel_side_delta_d;
   const double target_s_dot =
@@ -97,6 +113,8 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
   bool found_future_corner = false;
   bool found_outer_wall_risk = false;
 
+  // 処理ブロック: 未来時刻を離散サンプリングして、横並びと壁余裕を評価する。
+  // 設計意図: MPC horizonより軽い近似で、コーナー進入前に譲り判断を立てる。
   for (double t = dt_sec; t <= horizon_sec + 1.0e-9; t += dt_sec) {
     const double ego_s = frame_.wrapS(ego.frenet.s + ego_speed * t);
     const double opp_s = frame_.wrapS(opp.frenet.s + s_dot * t);
@@ -124,6 +142,8 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
         effective_clearance < config_.future_side_yield_wall_clearance_m;
 
     if (future_side) {
+      // 処理ブロック: 最も壁余裕が小さかった未来状態をdebug用に保持する。
+      // 設計意図: なぜ譲りになったかをログ/レポートで後から追えるようにする。
       found_future_side = true;
       if (future_corner) {
         found_future_corner = true;
@@ -182,11 +202,17 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
   return out;
 }
 
+// 入力: BlockedInfo。
+// 出力: 未来横並び予測の対象index。無ければ-1。
+// 処理概要: 現在横並び車両を優先し、なければ並走候補を使う。
 int FutureSideBySideRiskAnalyzer::sideRiskIndex(
     const BlockedInfo &info) const {
   return info.side_index >= 0 ? info.side_index : info.parallel_side_index;
 }
 
+// 入力: 評価開始sとlookahead距離[m]。
+// 出力: lookahead区間内の最大絶対曲率[1/m]。
+// 処理概要: 将来横並びが直線ではなくコーナーで起きるかを軽量に判定する。
 double FutureSideBySideRiskAnalyzer::maxAbsCurvatureAhead(
     double s, double lookahead_m) const {
   if (frame_.empty() || lookahead_m <= 0.0) {
