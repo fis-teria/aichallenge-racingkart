@@ -22,6 +22,53 @@ def test_uses_mpc_when_healthy():
     assert not decision.fallback_active
 
 
+def test_pure_pursuit_primary_uses_pure_pursuit_even_when_mpc_is_healthy():
+    core = HybridMuxCore(HybridMuxConfig(primary_source="pure_pursuit"))
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+    )
+
+    assert decision.source == "pure_pursuit"
+    assert not decision.fallback_active
+    assert decision.reason == "primary_pure_pursuit"
+
+
+def test_pure_pursuit_primary_stops_when_pure_pursuit_command_times_out():
+    core = HybridMuxCore(HybridMuxConfig(primary_source="pure_pursuit"))
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=False,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+    )
+
+    assert decision.source == "stop"
+    assert decision.fallback_active
+    assert decision.reason == "pure_pursuit_cmd_timeout"
+
+
+def test_pure_pursuit_primary_can_use_mpc_when_pure_pursuit_command_times_out():
+    core = HybridMuxCore(
+        HybridMuxConfig(
+            primary_source="pure_pursuit",
+            use_mpc_on_pure_pursuit_cmd_timeout=True,
+        )
+    )
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=False,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+    )
+
+    assert decision.source == "mpc"
+    assert decision.fallback_active
+    assert decision.reason == "pure_pursuit_cmd_timeout"
+
+
 def test_switches_to_pure_pursuit_after_infeasible_threshold():
     core = HybridMuxCore(HybridMuxConfig(fallback_trigger_infeasible_count=2))
     decision = core.update(

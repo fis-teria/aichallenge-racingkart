@@ -56,10 +56,14 @@ MPC_CONFIG_PATH = MPC_ROOT / "config/config.yaml"
 DELAY_AWARE_MPC_CONFIG_PATH = Path(
     "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_aware_config.yaml"
 )
+PURE_PURSUIT_MPC_HORIZON_CONFIG_PATH = Path(
+    "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/pure_pursuit_mpc_horizon_config.yaml"
+)
 REFERENCE_CONFIG_PATHS = {
     "mpc": MPC_CONFIG_PATH,
     "delay_aware_mpc": DELAY_AWARE_MPC_CONFIG_PATH,
     "hybrid_delay_aware_mpc": DELAY_AWARE_MPC_CONFIG_PATH,
+    "pure_pursuit_mpc_horizon": PURE_PURSUIT_MPC_HORIZON_CONFIG_PATH,
 }
 
 DESCRIPTION_DEFAULTS: dict[str, str] = {
@@ -96,6 +100,8 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "mpc.use_curvature_speed_profile": "参照パス曲率からwaypointごとの速度プロファイルを作るかどうかです。trueでコーナー速度が曲率に応じて下がります。",
     "mpc.use_ref_vel_as_speed_cap": "ref_vel.yamlの区間速度を目標速度の上限として使うかどうかです。trueでも曲率速度は保持され、低い方が採用されます。",
     "mpc.speed_profile_debug_publish_period_sec": "/mpc/speed_profile_debugをpublishする周期[s]です。0以下で停止します。",
+    "mpc.neutral_horizon_publish_period_sec": "MPCが追い越し中でない時に中立horizonを固定周期publishする間隔[s]です。0以下で無効になります。",
+    "mpc.predicted_horizon_publish_mode": "MPC予測horizonの出し方です。overtake_or_neutralは従来互換、solver_when_solvedはsolver成功時だけ予測horizonを出します。",
     "mpc.lateral_target_mode": "MPCの横方向目標の作り方です。通常はreference_pathで、参照線中心に追従します。",
     "mpc.wall_margin_m": "MPC内部の壁・境界に対する追加マージン[m]です。大きいほど壁際を避けますが通れる幅は狭くなります。",
     "mpc.use_grade_accel_feedforward": "勾配推定による加速度feedforwardを使うかどうかです。坂や路面傾きでの速度落ち対策に使います。",
@@ -248,6 +254,7 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "overtake_planner_node.ros__parameters.safe_stop_lateral_error_threshold_m": "safe stop解除時に許容する横誤差[m]です。",
     "overtake_planner_node.ros__parameters.safe_stop_release_speed_mps": "safe stop解除判定で自車が十分低速とみなす速度[m/s]です。",
     "hybrid_control_mux_node.ros__parameters.enabled": "hybrid control mux全体を有効にするフラグです。falseにするとMPC指令が新鮮な間だけMPCを通し、それ以外は停止します。",
+    "hybrid_control_mux_node.ros__parameters.primary_source": "最終制御の主ソースです。mpcなら従来のHybrid、pure_pursuitならPurePursuit主制御でMPCはhorizon生成役になります。",
     "hybrid_control_mux_node.ros__parameters.control_rate_hz": "MPC/Pure Pursuit/停止のどれを出すか判定する周期[Hz]です。",
     "hybrid_control_mux_node.ros__parameters.mpc_cmd_timeout_sec": "MPC制御指令を新鮮とみなす最大時間[s]です。短いほどMPC遅延に敏感になります。",
     "hybrid_control_mux_node.ros__parameters.pure_pursuit_cmd_timeout_sec": "Pure Pursuit制御指令を新鮮とみなす最大時間[s]です。古いfallback指令を使い続けないための上限です。",
@@ -261,6 +268,7 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "hybrid_control_mux_node.ros__parameters.stop_decel_mps2": "MPCもPure Pursuitも使えないときに出す停止指令の加速度[m/s^2]です。",
     "hybrid_control_mux_node.ros__parameters.use_pure_pursuit_on_mpc_cmd_timeout": "MPC制御指令がtimeoutしたときPure Pursuitへ切り替えるかどうかです。",
     "hybrid_control_mux_node.ros__parameters.use_pure_pursuit_on_mpc_health_timeout": "MPC healthがtimeoutしたときPure Pursuitへ切り替えるかどうかです。debug topic欠落だけで落としたくない場合はfalseにします。",
+    "hybrid_control_mux_node.ros__parameters.use_mpc_on_pure_pursuit_cmd_timeout": "PurePursuit主制御時にPP指令がtimeoutした場合、MPCがhealthyなら一時的にMPC指令へ退避するかどうかです。通常はfalseで停止優先です。",
     "hybrid_control_mux_node.ros__parameters.debug_publish_period_sec": "/hybrid_control_mux/debugをpublishする周期[s]です。0以下で停止します。",
     "hybrid_control_mux_node.ros__parameters.enable_steering_rate_limit": "mux出力後の最終ステア指令にレート制限をかけるかどうかです。MPC/PP切り替え時の急操舵を抑えます。",
     "hybrid_control_mux_node.ros__parameters.max_steering_angle_rad": "mux出力後に許すステア角の絶対上限[rad]です。NaNや過大な指令もこの範囲へ丸めます。",
@@ -359,6 +367,8 @@ DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
     "enabled": "対象ノードの機能を有効にするフラグです。falseにするとその補助処理を止めます。",
     "mode": "対象ノードの動作モードです。delay-aware系では遅延補償方式を指定します。",
     "delay_enabled": "delay-aware odometry補償を有効にするフラグです。baseline比較ではfalseまたはmode=baselineを使います。",
+    "config_path": "MPC本体へ渡す設定YAMLです。pure_pursuit_mpc_horizonでは専用の軽量horizon生成用YAMLを指定します。",
+    "ref_vel_path": "MPC本体へ渡す区間速度YAMLです。",
     "delay_mode": "遅延補償モードです。baseline, state_shift, state_shift_with_steer_lag, delay_augmentedを選べます。",
     "steering_delay_sec": "ステアリング遅延として前方予測する時間[s]です。AWSIM想定値は0.20sです。",
     "prediction_dt": "遅延中の車両運動を積分する刻み幅[s]です。小さいほど精細ですが計算量が増えます。",
@@ -376,12 +386,14 @@ DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
     "use_boost_acceleration": "boost commander向けの加速コマンド形式を使うかどうかです。通常のAckermann出力ではfalseです。",
     "use_stats": "MPC内部の実行統計収集を有効にするかどうかです。調査時以外はfalseで軽くします。",
     "fallback_speed_mps": "hybrid fallback中のPure Pursuit目標速度[m/s]です。mux側の速度上限と合わせて調整します。",
+    "pure_pursuit_speed_mps": "PurePursuit主制御モードの基本目標速度[m/s]です。MPC horizon速度capやovertake速度capが低い場合はそちらが優先されます。",
     "input_mpc_cmd": "hybrid control muxが受け取るMPC制御指令topicです。",
     "input_pure_pursuit_cmd": "hybrid control muxが受け取るPure Pursuit制御指令topicです。",
     "input_mpc_health": "MPCのsolved/infeasible状態を監視するdebug topicです。",
     "output_control_cmd": "最終的に車両へ渡す制御指令topicです。",
     "output_debug": "hybrid control muxの切り替え状態を出すdebug topicです。",
     "output_raw_control_cmd": "各制御器のraw制御指令を確認するためのtopicです。",
+    "overtake_horizon_points": "overtake plannerがMPC/PPへ渡すoverride horizon点数です。MPCのNと揃えると余分な点を減らせます。",
     "input_kinematics": "制御器へ入力するodometry topicです。hybridではdelay補償後のodometryをPure Pursuitにも渡します。",
     "input_odom": "overtake plannerへ入力する自車odometry topicです。delay-aware運用では補償後odomへ差し替えます。",
     "input_trajectory": "Pure Pursuitが通常追従するTrajectory topicです。MPC horizonが使えない場合の基準経路になります。",
@@ -403,6 +415,8 @@ DELAY_AWARE_XML_DEFAULTS: dict[str, str] = {
     "min_mpc_horizon_points": "MPC予測ホライズンとして使う最小点数です。短すぎる予測をfallback追従に使わないための条件です。",
     "max_mpc_horizon_start_distance_m": "MPC予測ホライズン先頭点と自車位置の許容距離[m]です。大きいほど古い/遠いhorizonも使いやすくなります。",
     "min_mpc_horizon_arc_length_m": "MPC予測ホライズン全体に必要な最小弧長[m]です。短すぎてlookaheadが末端に張り付くのを防ぎます。",
+    "require_solved_mpc_health_for_horizon": "trueにするとMPC healthがsolvedかつ新鮮な時だけPure PursuitがMPC horizonを採用します。",
+    "max_mpc_health_age_sec": "Pure PursuitがMPC healthを新鮮とみなす最大時間[s]です。",
     "use_overtake_reference_override": "Pure Pursuitが/overtake/reference_overrideを読み、fallback中も追い越し・追従の横オフセットと速度capを反映するかどうかです。",
     "input_overtake_reference_override": "Pure Pursuitへ渡すovertake plannerのreference override topicです。",
     "overtake_override_timeout_sec": "Pure Pursuit側でovertake reference overrideを新鮮とみなす最大時間[s]です。古い追い越し指令を使い続けないための上限です。",
@@ -652,6 +666,63 @@ CATALOG: dict[str, list[dict[str, str]]] = {
             "label": "Delay compensator YAML fallback",
             "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_compensator.param.yaml",
             "kind": "yaml",
+        },
+        {
+            "label": "Delay-aware MPC ref velocity YAML",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/ref_vel.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Delay-aware MPC C++ node",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/src/delay_compensated_odometry_node.cpp",
+            "kind": "text",
+        },
+    ],
+    "pure_pursuit_mpc_horizon": [
+        {
+            "label": "Pure Pursuit MPC horizon launch params",
+            "path": str(LAUNCH_ROOT / "launch/control/pure_pursuit_mpc_horizon.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Pure Pursuit launch params",
+            "path": str(LAUNCH_ROOT / "launch/control/pure_pursuit.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Pure Pursuit MPC horizon YAML",
+            "path": "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/pure_pursuit_mpc_horizon_config.yaml",
+            "kind": "yaml",
+        },
+        {
+            "label": "Pure Pursuit primary mux params",
+            "path": str(HYBRID_CONTROL_MUX_ROOT / "config/pure_pursuit_mpc_horizon.param.yaml"),
+            "kind": "yaml",
+        },
+        {
+            "label": "Hybrid control mux launch",
+            "path": str(HYBRID_CONTROL_MUX_ROOT / "launch/hybrid_control_mux.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Delay-aware MPC launch params",
+            "path": str(LAUNCH_ROOT / "launch/control/delay_aware_mpc.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "Overtake planner params",
+            "path": str(OVERTAKE_ROOT / "config/overtake_planner.param.yaml"),
+            "kind": "yaml",
+        },
+        {
+            "label": "Overtake permission profile",
+            "path": str(OVERTAKE_PERMISSION_CSV_PATH),
+            "kind": "csv",
+        },
+        {
+            "label": "Overtake planner launch",
+            "path": str(OVERTAKE_ROOT / "launch/overtake_planner.launch.xml"),
+            "kind": "xml",
         },
         {
             "label": "Delay-aware MPC ref velocity YAML",

@@ -153,6 +153,7 @@ class MPCConfig:
     use_ref_vel_as_speed_cap: bool
     speed_profile_debug_publish_period_sec: float
     neutral_horizon_publish_period_sec: float
+    predicted_horizon_publish_mode: str
     use_grade_accel_feedforward: bool
     grade_ff_gain: float
     grade_ff_max_accel_mps2: float
@@ -528,6 +529,7 @@ class MPCController(Node):
                 cfg_bool(cfg_mpc, "use_ref_vel_as_speed_cap", True),
                 cfg_float(cfg_mpc, "speed_profile_debug_publish_period_sec", 0.25),
                 cfg_float(cfg_mpc, "neutral_horizon_publish_period_sec", 0.05),
+                cfg_str(cfg_mpc, "predicted_horizon_publish_mode", "overtake_or_neutral"),
                 cfg_bool(cfg_mpc, "use_grade_accel_feedforward", False),
                 cfg_float(cfg_mpc, "grade_ff_gain", 1.0),
                 cfg_float(cfg_mpc, "grade_ff_max_accel_mps2", 0.35),
@@ -726,6 +728,7 @@ class MPCController(Node):
                 "mpc_solve_time_ms": self._last_mpc_solve_time_ms,
                 "mpc_infeasible_count": self._last_mpc_infeasible_count,
                 "mpc_predicted_horizon_source": self._last_mpc_predicted_horizon_source,
+                "predicted_horizon_publish_mode": self._mpc_cfg.predicted_horizon_publish_mode,
                 "neutral_horizon_publish_period_sec": self._mpc_cfg.neutral_horizon_publish_period_sec,
                 "neutral_horizon_cache_age_sec": (
                     t - self._last_neutral_horizon_cache_sec
@@ -1095,7 +1098,7 @@ class MPCController(Node):
         trajectory.header.stamp = stamp.to_msg()
         trajectory.header.frame_id = "map"
 
-        if not self._should_publish_overtake_prediction_horizon():
+        if not self._should_publish_solver_prediction_horizon():
             if self._fixed_neutral_horizon_enabled():
                 return
             neutral_trajectory = self._build_neutral_predicted_horizon(stamp)
@@ -1140,8 +1143,22 @@ class MPCController(Node):
         mode_id = int(getattr(self._mpc, "overtake_mode_id", 0) or 0)
         return mode_id in OVERTAKE_HORIZON_MODE_IDS
 
+    def _should_publish_solver_prediction_horizon(self) -> bool:
+        mode = str(
+            self._mpc_cfg.predicted_horizon_publish_mode or "overtake_or_neutral"
+        ).strip().lower()
+        if mode == "solver_when_solved":
+            return True
+        return self._should_publish_overtake_prediction_horizon()
+
     def _fixed_neutral_horizon_enabled(self) -> bool:
-        return self._mpc_cfg.neutral_horizon_publish_period_sec > 0.0
+        mode = str(
+            self._mpc_cfg.predicted_horizon_publish_mode or "overtake_or_neutral"
+        ).strip().lower()
+        return (
+            mode != "solver_when_solved"
+            and self._mpc_cfg.neutral_horizon_publish_period_sec > 0.0
+        )
 
     def _start_fixed_neutral_horizon_timer(self) -> None:
         period = self._mpc_cfg.neutral_horizon_publish_period_sec

@@ -1,14 +1,14 @@
 hybrid_control_mux_node:
   ros__parameters:
     enabled: true
-    primary_source: "mpc"
+    primary_source: "pure_pursuit"
     control_rate_hz: 50.0
-    mpc_cmd_timeout_sec: 0.12
+    mpc_cmd_timeout_sec: 0.35
     pure_pursuit_cmd_timeout_sec: 0.20
-    mpc_health_timeout_sec: 0.75
+    mpc_health_timeout_sec: 0.50
     fallback_trigger_infeasible_count: 1
-    fallback_release_solved_cycles: 3
-    fallback_min_hold_sec: 1.0
+    fallback_release_solved_cycles: 1
+    fallback_min_hold_sec: 0.0
     fallback_speed_mps: 10.0
     fallback_accel_max_mps2: 1.3
     fallback_decel_min_mps2: -1.5

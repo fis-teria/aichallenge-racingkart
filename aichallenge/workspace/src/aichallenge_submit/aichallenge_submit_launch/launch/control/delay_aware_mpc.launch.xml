@@ -3,6 +3,8 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="use_obstacle_avoidance" default="true"/>
   <arg name="use_overtake_planner" default="true"/>
+  <arg name="config_path" default="$(find-pkg-share delay_aware_mpc_ros)/config/delay_aware_config.yaml"/>
+  <arg name="ref_vel_path" default="$(find-pkg-share delay_aware_mpc_ros)/config/ref_vel.yaml"/>
   <arg name="delay_enabled" default="true"/>
   <arg name="delay_mode" default="state_shift_with_steer_lag"/>
   <arg name="steering_delay_sec" default="0.20"/>
@@ -20,6 +22,7 @@
   <arg name="output_control_cmd" default="/control/command/control_cmd"/>
   <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
   <arg name="output_mpc_predicted_horizon" default="/mpc/predicted_horizon"/>
+  <arg name="overtake_horizon_points" default="50"/>
 
   <!-- localization odomを遅れ補償して、既存MPCが読む代替odomトピックを作る。 -->
   <node pkg="delay_aware_mpc_ros" exec="delay_compensated_odometry_node"
@@ -44,8 +47,8 @@
   <!-- MPC本体は既存実装を再利用し、入力odomだけ補償済みトピックへ差し替える。 -->
   <node pkg="delay_aware_mpc_ros" exec="run_delay_aware_mpc_controller.bash"
         name="delay_aware_mpc_controller" output="screen"
-        args="--config_path $(find-pkg-share delay_aware_mpc_ros)/config/delay_aware_config.yaml
-              --ref_vel_path $(find-pkg-share delay_aware_mpc_ros)/config/ref_vel.yaml">
+        args="--config_path $(var config_path)
+              --ref_vel_path $(var ref_vel_path)">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="use_boost_acceleration" value="false"/>
     <param name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
@@ -61,7 +64,7 @@
     <include file="$(find-pkg-share overtake_planner)/launch/overtake_planner.launch.xml">
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
       <arg name="input_odom" value="/delay_aware_mpc/localization/kinematic_state"/>
-      <arg name="horizon_points" value="50"/>
+      <arg name="horizon_points" value="$(var overtake_horizon_points)"/>
     </include>
   </group>
 </launch>

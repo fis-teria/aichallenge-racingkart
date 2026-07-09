@@ -14,11 +14,13 @@ class MpcHealth:
 
 @dataclass
 class HybridMuxConfig:
+    primary_source: str = "mpc"
     fallback_trigger_infeasible_count: int = 2
     fallback_release_solved_cycles: int = 3
     fallback_min_hold_sec: float = 1.0
     use_pure_pursuit_on_mpc_cmd_timeout: bool = True
     use_pure_pursuit_on_mpc_health_timeout: bool = False
+    use_mpc_on_pure_pursuit_cmd_timeout: bool = False
 
 
 @dataclass
@@ -143,15 +145,21 @@ class HybridMuxCore:
         pure_pursuit_cmd_fresh: bool,
         mpc_health: MpcHealth,
     ) -> MuxDecision:
+        if self._primary_source() == "pure_pursuit":
+            return self._update_pure_pursuit_primary(
+                now_sec,
+                mpc_cmd_fresh=mpc_cmd_fresh,
+                pure_pursuit_cmd_fresh=pure_pursuit_cmd_fresh,
+                mpc_health=mpc_health,
+            )
+
         trigger, trigger_reason = self._fallback_trigger(
             mpc_cmd_fresh=mpc_cmd_fresh,
             mpc_health=mpc_health,
         )
-        mpc_healthy = (
-            mpc_cmd_fresh
-            and mpc_health.valid
-            and mpc_health.status == "solved"
-            and mpc_health.infeasible_count <= 0
+        mpc_healthy = self._mpc_healthy(
+            mpc_cmd_fresh=mpc_cmd_fresh,
+            mpc_health=mpc_health,
         )
 
         if self.fallback_active:
@@ -194,6 +202,32 @@ class HybridMuxCore:
 
         return MuxDecision("stop", False, "no_fresh_control_cmd", self.solved_cycles)
 
+    def _update_pure_pursuit_primary(
+        self,
+        now_sec: float,
+        *,
+        mpc_cmd_fresh: bool,
+        pure_pursuit_cmd_fresh: bool,
+        mpc_health: MpcHealth,
+    ) -> MuxDecision:
+        mpc_healthy = self._mpc_healthy(
+            mpc_cmd_fresh=mpc_cmd_fresh,
+            mpc_health=mpc_health,
+        )
+        self.solved_cycles = 1 if mpc_healthy else 0
+
+        if pure_pursuit_cmd_fresh:
+            self.fallback_active = False
+            self.last_reason = "primary_pure_pursuit"
+            return MuxDecision("pure_pursuit", False, self.last_reason, self.solved_cycles)
+
+        self.fallback_active = True
+        self.fallback_enter_time_sec = now_sec
+        self.last_reason = "pure_pursuit_cmd_timeout"
+        if self.config.use_mpc_on_pure_pursuit_cmd_timeout and mpc_healthy:
+            return MuxDecision("mpc", True, self.last_reason, self.solved_cycles)
+        return MuxDecision("stop", True, self.last_reason, self.solved_cycles)
+
     def _fallback_trigger(self, *, mpc_cmd_fresh: bool, mpc_health: MpcHealth) -> tuple[bool, str]:
         if not mpc_cmd_fresh:
             return self.config.use_pure_pursuit_on_mpc_cmd_timeout, "mpc_cmd_timeout"
@@ -209,3 +243,16 @@ class HybridMuxCore:
         if threshold <= 1 and mpc_health.status == "infeasible":
             return True, "mpc_infeasible"
         return False, ""
+
+    def _primary_source(self) -> str:
+        source = str(self.config.primary_source or "mpc").strip().lower()
+        return "pure_pursuit" if source in {"pure_pursuit", "pp"} else "mpc"
+
+    @staticmethod
+    def _mpc_healthy(*, mpc_cmd_fresh: bool, mpc_health: MpcHealth) -> bool:
+        return (
+            mpc_cmd_fresh
+            and mpc_health.valid
+            and mpc_health.status == "solved"
+            and mpc_health.infeasible_count <= 0
+        )

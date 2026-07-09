@@ -89,6 +89,7 @@ mpc:
   use_ref_vel_as_speed_cap: true
   speed_profile_debug_publish_period_sec: 0.25
   neutral_horizon_publish_period_sec: 0.05
+  predicted_horizon_publish_mode: "overtake_or_neutral"
   use_grade_accel_feedforward: true
   grade_ff_gain: 1.0
   grade_ff_max_accel_mps2: 1.0

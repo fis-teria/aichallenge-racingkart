@@ -4,21 +4,23 @@
 
 ## Launchごとの有効値
 
-| 項目 | C++デフォルト | `pure_pursuit.launch.xml` | `hybrid_delay_aware_mpc.launch.xml` |
-| --- | ---: | ---: | ---: |
-| `wheel_base` | `1.087` | `1.087` | `1.087` |
-| `use_external_target_vel` | `false` | `false` | `true` |
-| `external_target_vel` | `0.0` | `9.5` | `fallback_speed_mps` default `10.0` |
-| `lookahead_gain` | `1.0` | `0.5` | `0.5` |
-| `lookahead_min_distance` | `1.0` | `2.5` | `3.5` |
-| `speed_proportional_gain` | `1.0` | `1.0` | `0.8` |
-| `steering_tire_angle_gain` | `1.0` | `1.639` | `1.639` |
-| `use_overtake_reference_override` | `false` | `true` | `use_overtake_planner` |
-| `use_mpc_predicted_horizon` | `false` | `false` | `true` |
-| `max_mpc_horizon_age_sec` | `0.15` | `0.50` | `0.15` |
-| `pp_control_delay_sec` | `0.0` | `0.0` | `0.0` |
-| `steering_time_constant_sec` | `0.30` | `0.30` | `0.30` |
-| `horizon_curvature_feedforward_gain` | `0.0` | `0.0` | `0.0` |
+| 項目 | C++デフォルト | `pure_pursuit.launch.xml` | `hybrid_delay_aware_mpc.launch.xml` | `pure_pursuit_mpc_horizon.launch.xml` |
+| --- | ---: | ---: | ---: | ---: |
+| `wheel_base` | `1.087` | `1.087` | `1.087` | `1.087` |
+| `use_external_target_vel` | `false` | `false` | `true` | `true` |
+| `external_target_vel` | `0.0` | `9.5` | `fallback_speed_mps` default `10.0` | `pure_pursuit_speed_mps` default `10.0` |
+| `lookahead_gain` | `1.0` | `0.5` | `0.5` | `0.5` |
+| `lookahead_min_distance` | `1.0` | `2.5` | `3.5` | `3.5` |
+| `speed_proportional_gain` | `1.0` | `1.0` | `0.8` | `0.8` |
+| `steering_tire_angle_gain` | `1.0` | `1.639` | `1.639` | `1.639` |
+| `use_overtake_reference_override` | `false` | `true` | `use_overtake_planner` | `use_overtake_planner` |
+| `use_mpc_predicted_horizon` | `false` | `false` | `true` | `true` |
+| `max_mpc_horizon_age_sec` | `0.15` | `0.50` | `0.15` | `0.35` |
+| `require_solved_mpc_health_for_horizon` | `false` | `false` | `false` | `true` |
+| `max_mpc_health_age_sec` | `0.30` | `0.30` | `0.30` | `0.35` |
+| `pp_control_delay_sec` | `0.0` | `0.0` | `0.0` | `0.0` |
+| `steering_time_constant_sec` | `0.30` | `0.30` | `0.30` | `0.30` |
+| `horizon_curvature_feedforward_gain` | `0.0` | `0.0` | `0.0` | `0.0` |
 
 注意: `pure_pursuit.launch.xml` 単体のデフォルトと、hybrid launch から渡す値は別です。MPC から PurePursuit へ fallback した時に予測ホライズンを追わせる設定は、通常 `hybrid_delay_aware_mpc.launch.xml` 側を確認します。
 
@@ -64,6 +66,8 @@ MPC horizon を使う場合、horizon 上の最近傍点速度が `external_targ
 | `min_mpc_horizon_points` | horizon として使う最小点数。 | 短すぎる予測を避けます。通常は `5` 以上。 |
 | `max_mpc_horizon_start_distance_m` | horizon の先頭点と ego の最大距離。 | 大きくすると古い/遠い horizon を拾いやすくなります。 |
 | `min_mpc_horizon_arc_length_m` | horizon 全体の最小弧長。 | 短すぎる horizon で lookahead が末端に張り付くのを防ぎます。 |
+| `require_solved_mpc_health_for_horizon` | MPC health が solved の時だけ horizon を使うか。 | PurePursuit主制御では `true` 推奨です。MPC infeasible時は通常trajectoryへ戻せます。 |
+| `max_mpc_health_age_sec` | MPC health を fresh とみなす最大 age。 | MPC debug周期より少し広くします。`0.30`-`0.50` が調整候補です。 |
 
 horizon は以下を満たす時だけ使われます。
 
@@ -75,6 +79,7 @@ horizon は以下を満たす時だけ使われます。
 - 先頭点が `max_mpc_horizon_start_distance_m` 以内
 - 弧長が `min_mpc_horizon_arc_length_m` 以上
 - ego 最近傍 index が先頭から大きくズレていない
+- `require_solved_mpc_health_for_horizon=true` の場合、`/mpc/speed_profile_debug` が fresh で `mpc_status=solved` かつ `mpc_infeasible_count=0`
 
 MPC側の `/mpc/predicted_horizon` は、`OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK` 中だけ solver の予測結果をpublishします。
 それ以外の通常走行、追従、追い越し準備中は、現在poseとMPC参照pathから作る neutral horizon をpublishします。
@@ -82,6 +87,10 @@ MPC側の `/mpc/predicted_horizon` は、`OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MER
 これにより、MPC solverが一時的に重くなっても PP fallback が horizon を stale 扱いしにくくなります。
 `neutral_reference` を生成できない場合は、追い越し込み solver horizon へ戻さず empty horizon をpublishします。
 これにより、PP fallbackが通常走行中に古い追い越し横オフセットを追い続けることを避けます。
+
+`pure_pursuit_mpc_horizon` では、MPC側の `predicted_horizon_publish_mode` を `solver_when_solved` にします。
+このモードではMPCが解けた時だけsolver予測horizonを出し、解けない時はempty horizonになります。
+Pure Pursuit側はhealth gateでempty/unsolved horizonを採用せず、通常trajectoryとovertake overrideによる走行へ戻ります。
 
 ## 曲率適応lookahead
 
@@ -132,8 +141,9 @@ MPC horizon が usable な時は、horizon を優先するため通常 trajector
 
 - `trajectory_source`: `trajectory`, `trajectory_overtake_override`, `mpc_horizon`
 - `mpc_horizon_applied`: horizon を実際に使ったか
-- `mpc_horizon_reject_reason`: `disabled`, `missing`, `stale`, `empty`, `short`, `frame_mismatch`, `nonfinite`, `start_distance`, `short_arc`, `nearest_index`, `fresh`
+- `mpc_horizon_reject_reason`: `disabled`, `missing`, `stale`, `empty`, `short`, `frame_mismatch`, `nonfinite`, `start_distance`, `short_arc`, `nearest_index`, `mpc_health_missing`, `mpc_health_stale`, `mpc_health_infeasible`, `fresh`
 - `mpc_horizon_age_sec`, `mpc_horizon_points`, `mpc_horizon_start_distance_m`, `mpc_horizon_arc_length_m`
+- `mpc_health_status`, `mpc_health_age_sec`, `mpc_infeasible_count`, `mpc_predicted_horizon_source`
 - `lookahead_distance_m`, `path_curvature_1pm`, `target_speed_mps`
 - `control_pose_shifted`, `control_pose_x/y/yaw_rad`, `steering_source`, `steering_age_sec`
 - `pure_pursuit_steering_tire_angle_rad`, `curvature_feedforward_steering_rad`, `signed_path_curvature_1pm`

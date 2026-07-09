@@ -55,6 +55,9 @@ class HybridControlMuxNode(Node):
         self.last_steering_limit_log_sec = -1.0e9
 
         config = HybridMuxConfig(
+            primary_source=str(
+                self.declare_parameter("primary_source", "mpc").value
+            ),
             fallback_trigger_infeasible_count=int(
                 self.declare_parameter("fallback_trigger_infeasible_count", 2).value
             ),
@@ -69,6 +72,9 @@ class HybridControlMuxNode(Node):
             ),
             use_pure_pursuit_on_mpc_health_timeout=bool(
                 self.declare_parameter("use_pure_pursuit_on_mpc_health_timeout", False).value
+            ),
+            use_mpc_on_pure_pursuit_cmd_timeout=bool(
+                self.declare_parameter("use_mpc_on_pure_pursuit_cmd_timeout", False).value
             ),
         )
         self.core = HybridMuxCore(config)
@@ -300,6 +306,7 @@ class HybridControlMuxNode(Node):
         msg.data = json.dumps(
             {
                 "controller": "hybrid_control_mux",
+                "primary_source": self.core.config.primary_source,
                 "source": source,
                 "fallback_active": fallback_active,
                 "reason": reason,

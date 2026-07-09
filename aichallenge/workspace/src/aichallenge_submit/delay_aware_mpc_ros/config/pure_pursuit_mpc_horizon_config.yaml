@@ -1,0 +1,86 @@
+common:
+  save_config: false
+
+delay_aware_mpc:
+  enabled: true
+  mode: "state_shift_with_steer_lag"
+  steering_delay_sec: 0.20
+  prediction_dt: 0.02
+  steering_time_constant_sec: 0.40
+  use_reference_time_shift: true
+  use_steering_status: true
+  steering_status_timeout_sec: 0.20
+  use_yaw_rate_fallback: true
+  use_command_history_fallback: true
+  input_control_cmd_raw_topic: "/control/command/control_cmd_raw"
+  min_velocity_for_yaw_prediction: 0.20
+  publish_debug_topics: true
+  debug_publish_period_sec: 0.25
+
+sim_logger:
+  animation_enabled: false
+
+map:
+  yaml_path: "env/final_ver3/occupancy_grid_map.yaml"
+
+waypoints:
+  csv_path: ""
+
+obstacles:
+  csv_path: ""
+  radius: 1.0
+
+reference_path:
+  update_by_topic: false
+  csv_path: "env/final_ver3/traj_mincurv_manual.csv"
+  resolution: 0.6
+  smoothing_distance: 2
+  max_width: 6.0
+  circular: true
+  use_path_constraints_topic: false
+  use_border_cells_topic: false
+
+bicycle_model:
+  length: 1.087
+  width: 1.4
+
+mpc:
+  # PurePursuit主制御ではMPCを制御出力ではなくhorizon生成に寄せる。
+  # 10Hzかつ短めNにして、solver負荷とinfeasible継続時間を抑える。
+  N: 20
+  R: [1000000.0, 10.0]
+  a_min: 0
+  a_max: 3.0
+  delta_max_deg: 32.0
+  steer_rate_max: 1.0
+  control_rate: 10.0
+  steering_tire_angle_gain_var: 1.639
+  accel_low_pass_gain: 1.0
+  steer_low_pass_gain: 1.0
+  wp_id_offset: 0
+  use_max_kappa_pred: true
+  lateral_target_mode: "reference_path"
+  wall_margin_m: 0.15
+  use_curvature_speed_profile: true
+  use_ref_vel_as_speed_cap: true
+  speed_profile_debug_publish_period_sec: 0.10
+  neutral_horizon_publish_period_sec: 0.0
+  predicted_horizon_publish_mode: "solver_when_solved"
+  use_grade_accel_feedforward: true
+  grade_ff_gain: 1.0
+  grade_ff_max_accel_mps2: 1.0
+  grade_ff_window_m: 2.0
+  grade_ff_min_distance_delta_m: 0.5
+  grade_ff_min_speed_mps: 0.3
+  grade_ff_low_pass_gain: 0.25
+  grade_ff_only_when_not_decelerating: true
+  grade_ff_speed_error_deadband_mps: 0.1
+  v_max: 35.0
+  ay_max: 30
+  Q: [300000.0, 100000000.0, 600000.0]
+  QN: [1000000.0, 1000000.0, 60000.0]
+
+v2x_obstacle_avoidance:
+  vehicle_radius: 0.75
+  v_max_safety: 30.0
+  position_jump_threshold: 5.0

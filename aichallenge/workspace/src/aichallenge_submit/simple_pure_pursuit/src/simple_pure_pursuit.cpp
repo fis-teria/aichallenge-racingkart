@@ -8,8 +8,10 @@
 #include <tf2/utils.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <iterator>
 #include <limits>
 #include <sstream>
@@ -64,6 +66,65 @@ double firstPointDistanceToEgo(const Trajectory &trajectory,
   return std::hypot(first.x - ego.x, first.y - ego.y);
 }
 
+std::optional<std::string> jsonStringField(const std::string &json,
+                                           const std::string &key) {
+  const std::string key_token = "\"" + key + "\"";
+  const auto key_pos = json.find(key_token);
+  if (key_pos == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto colon_pos = json.find(':', key_pos + key_token.size());
+  if (colon_pos == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto value_start = json.find('"', colon_pos + 1);
+  if (value_start == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto value_end = json.find('"', value_start + 1);
+  if (value_end == std::string::npos || value_end <= value_start) {
+    return std::nullopt;
+  }
+  return json.substr(value_start + 1, value_end - value_start - 1);
+}
+
+std::optional<double> jsonNumberField(const std::string &json,
+                                      const std::string &key) {
+  const std::string key_token = "\"" + key + "\"";
+  const auto key_pos = json.find(key_token);
+  if (key_pos == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto colon_pos = json.find(':', key_pos + key_token.size());
+  if (colon_pos == std::string::npos) {
+    return std::nullopt;
+  }
+
+  std::size_t value_start = colon_pos + 1;
+  while (value_start < json.size() &&
+         std::isspace(static_cast<unsigned char>(json[value_start]))) {
+    ++value_start;
+  }
+  std::size_t value_end = value_start;
+  while (value_end < json.size()) {
+    const char c = json[value_end];
+    if (!(std::isdigit(static_cast<unsigned char>(c)) || c == '-' || c == '+' ||
+          c == '.' || c == 'e' || c == 'E')) {
+      break;
+    }
+    ++value_end;
+  }
+  if (value_end == value_start) {
+    return std::nullopt;
+  }
+
+  try {
+    return std::stod(json.substr(value_start, value_end - value_start));
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
 } // namespace
 
 SimplePurePursuit::SimplePurePursuit()
@@ -102,6 +163,10 @@ SimplePurePursuit::SimplePurePursuit()
           declare_parameter<float>("max_mpc_horizon_start_distance_m", 2.0)),
       min_mpc_horizon_arc_length_m_(
           declare_parameter<float>("min_mpc_horizon_arc_length_m", 2.0)),
+      require_solved_mpc_health_for_horizon_(declare_parameter<bool>(
+          "require_solved_mpc_health_for_horizon", false)),
+      max_mpc_health_age_sec_(
+          declare_parameter<float>("max_mpc_health_age_sec", 0.30)),
       use_overtake_reference_override_(
           declare_parameter<bool>("use_overtake_reference_override", false)),
       overtake_override_timeout_sec_(
@@ -170,6 +235,9 @@ SimplePurePursuit::SimplePurePursuit()
         latest_steering_status_rad_ = msg->steering_tire_angle;
         last_steering_status_receive_sec_ = steadyNowSec();
       });
+  sub_mpc_health_ = create_subscription<String>(
+      "input/mpc_health", bv_qos,
+      [this](const String::SharedPtr msg) { onMpcHealth(msg); });
 
   using namespace std::literals::chrono_literals;
   timer_ =
@@ -548,6 +616,23 @@ SimplePurePursuit::evaluateMpcPredictedHorizon(double now_sec) const {
       start_distance_m, max_mpc_horizon_start_distance_m_, arc_length_m,
       min_mpc_horizon_arc_length_m_, values_valid, frame_valid);
 
+  if (result.usable && require_solved_mpc_health_for_horizon_) {
+    const double health_age_sec = mpcHealthAgeSec(now_sec);
+    if (!last_mpc_health_receive_sec_.has_value()) {
+      result.usable = false;
+      result.reason = "mpc_health_missing";
+    } else if (!ageFresh(health_age_sec, max_mpc_health_age_sec_)) {
+      result.usable = false;
+      result.reason = "mpc_health_stale";
+    } else if (mpc_health_status_ != "solved" ||
+               mpc_health_infeasible_count_ > 0) {
+      result.usable = false;
+      result.reason =
+          mpc_health_infeasible_count_ > 0 ? "mpc_health_infeasible"
+                                           : "mpc_health_" + mpc_health_status_;
+    }
+  }
+
   if (result.usable) {
     const auto nearest_idx = findNearestIndex(mpc_predicted_horizon_->points,
                                               odometry_->pose.pose.position);
@@ -558,6 +643,10 @@ SimplePurePursuit::evaluateMpcPredictedHorizon(double now_sec) const {
   }
 
   return result;
+}
+
+double SimplePurePursuit::mpcHealthAgeSec(double now_sec) const {
+  return inputAgeSec(last_mpc_health_receive_sec_, now_sec);
 }
 
 void SimplePurePursuit::publishStopForStaleInput(
@@ -594,6 +683,13 @@ void SimplePurePursuit::publishStaleDebug(const rclcpp::Time &stamp,
        << "\"override_age_sec\":" << freshness.ages.override_age_sec << ","
        << "\"mpc_horizon_age_sec\":" << horizon.age_sec << ","
        << "\"mpc_horizon_points\":" << horizon.point_count << ","
+       << "\"mpc_health_required_for_horizon\":"
+       << (require_solved_mpc_health_for_horizon_ ? "true" : "false") << ","
+       << "\"mpc_health_status\":\"" << mpc_health_status_ << "\","
+       << "\"mpc_health_age_sec\":" << mpcHealthAgeSec(now_sec) << ","
+       << "\"mpc_infeasible_count\":" << mpc_health_infeasible_count_ << ","
+       << "\"mpc_predicted_horizon_source\":\""
+       << mpc_predicted_horizon_source_ << "\","
        << "\"mpc_horizon_reject_reason\":\"" << horizon.reason << "\"}";
 
   String msg;
@@ -646,6 +742,31 @@ void SimplePurePursuit::onOvertakeOverride(
   overtake_mode_id_ = mode_id;
   overtake_override_active_ = true;
   last_overtake_override_sec_ = now_sec;
+}
+
+void SimplePurePursuit::onMpcHealth(const String::SharedPtr msg) {
+  last_mpc_health_receive_sec_ = steadyNowSec();
+
+  if (const auto status = jsonStringField(msg->data, "mpc_status")) {
+    mpc_health_status_ = *status;
+  } else {
+    mpc_health_status_ = "parse_error";
+  }
+
+  if (const auto infeasible_count =
+          jsonNumberField(msg->data, "mpc_infeasible_count")) {
+    mpc_health_infeasible_count_ =
+        std::max(0, static_cast<int>(std::llround(*infeasible_count)));
+  } else {
+    mpc_health_infeasible_count_ = 0;
+  }
+
+  if (const auto horizon_source =
+          jsonStringField(msg->data, "mpc_predicted_horizon_source")) {
+    mpc_predicted_horizon_source_ = *horizon_source;
+  } else {
+    mpc_predicted_horizon_source_ = "unknown";
+  }
 }
 
 void SimplePurePursuit::clearOvertakeOverride() {
@@ -798,6 +919,14 @@ void SimplePurePursuit::publishDebug(
        << mpc_horizon_freshness.start_distance_m << ","
        << "\"mpc_horizon_arc_length_m\":" << mpc_horizon_freshness.arc_length_m
        << ","
+       << "\"mpc_health_required_for_horizon\":"
+       << (require_solved_mpc_health_for_horizon_ ? "true" : "false") << ","
+       << "\"mpc_health_status\":\"" << mpc_health_status_ << "\","
+       << "\"mpc_health_age_sec\":" << mpcHealthAgeSec(freshness_now_sec)
+       << ","
+       << "\"mpc_infeasible_count\":" << mpc_health_infeasible_count_ << ","
+       << "\"mpc_predicted_horizon_source\":\""
+       << mpc_predicted_horizon_source_ << "\","
        << "\"mpc_horizon_reject_reason\":\"" << mpc_horizon_freshness.reason
        << "\","
        << "\"nearest_trajectory_index\":" << nearest_traj_point_idx << ","

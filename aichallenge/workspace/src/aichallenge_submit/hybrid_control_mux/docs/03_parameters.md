@@ -10,6 +10,12 @@ aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/hybrid_co
 
 `control_method:=hybrid_delay_aware_mpc` で起動した場合、この設定は `hybrid_control_mux.launch.xml` から読み込まれます。
 
+`control_method:=pure_pursuit_mpc_horizon` では、以下の専用設定を読みます。
+
+```text
+aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/pure_pursuit_mpc_horizon.param.yaml
+```
+
 Pure Pursuit fallback 側の launch パラメータは以下にあります。
 
 ```text
@@ -21,6 +27,7 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/co
 | パラメータ | デフォルト | 内容 |
 | --- | --- | --- |
 | `enabled` | `true` | hybrid control mux の切り替え処理を有効にする。false の場合は MPC が fresh なら MPC、そうでなければ stop を出す |
+| `primary_source` | `mpc` | 最終制御の主ソース。`mpc` は従来Hybrid、`pure_pursuit` はPurePursuit主制御でMPCをhorizon生成役にする |
 | `control_rate_hz` | `50.0` | mux が出力判定を行う周期 |
 | `mpc_cmd_timeout_sec` | `0.12` | MPC 指令を fresh とみなす最大時間 |
 | `pure_pursuit_cmd_timeout_sec` | `0.20` | Pure Pursuit 指令を fresh とみなす最大時間 |
@@ -34,6 +41,7 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/co
 | `stop_decel_mps2` | `-1.5` | stop 指令を出すときの加速度 |
 | `use_pure_pursuit_on_mpc_cmd_timeout` | `true` | MPC 指令が timeout したときに Pure Pursuit へ切り替える |
 | `use_pure_pursuit_on_mpc_health_timeout` | `false` | MPC health が timeout したときに Pure Pursuit へ切り替える |
+| `use_mpc_on_pure_pursuit_cmd_timeout` | `false` | `primary_source=pure_pursuit` でPP指令がtimeoutした時、MPCがhealthyなら一時的にMPC指令へ退避する |
 | `debug_publish_period_sec` | `0.25` | debug JSON を publish する周期 |
 | `enable_steering_rate_limit` | `true` | 最終出力の操舵角レート制限を有効にする |
 | `max_steering_angle_rad` | `1.708` | 最終出力の操舵角上限 [rad] |
@@ -44,6 +52,14 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/co
 | `steering_log_throttle_sec` | `1.0` | 操舵制限ログの最短出力間隔 |
 
 ## 切り替え感度に関係するパラメータ
+
+### `primary_source`
+
+`mpc` の場合は従来どおり、MPCを主制御にして infeasible / timeout 時だけPure Pursuitへ落とします。
+
+`pure_pursuit` の場合は、Pure Pursuitを主制御にします。この時MPCの制御指令は通常は最終出力に使わず、Pure Pursuitが追従する予測ホライズンを作る役になります。MPCがinfeasibleになっても、Pure Pursuitは通常trajectoryへ戻って走行を継続できます。
+
+`pure_pursuit` 主制御では、`fallback_active=false` のまま `source=pure_pursuit` になります。debugで「常にfallbackなのか」を誤読しないためです。
 
 ### `fallback_trigger_infeasible_count`
 
@@ -109,6 +125,8 @@ Pure Pursuit フォールバック中の速度上限です。
 値を上げるとフォールバック中も速く走れますが、Pure Pursuit は障害物回避をしないため、サイドバイサイドやコーナーでは危険になりやすいです。
 
 hybrid 起動では Pure Pursuit も `/overtake/reference_override` の速度 cap を読みます。実際の fallback 目標速度は、基本的に `fallback_speed_mps` と overtake planner の速度 cap の低い方になります。
+
+`pure_pursuit_mpc_horizon` では同じ値をPurePursuit主制御の速度上限として使います。launch側の `pure_pursuit_speed_mps` とこの値を大きくずらすと、PurePursuitが出した速度をmux側でclampするため、意図より遅くなることがあります。
 
 ## 操舵連続性に関係するパラメータ
 
@@ -217,6 +235,16 @@ fallback_decel_min_mps2: -1.5
 ```
 
 速度と加速を抑えるので、MPC が苦しい場面で無理に走り続けにくくなります。
+
+### Pure Pursuit主制御でMPCをhorizon生成だけに使いたい
+
+```yaml
+primary_source: "pure_pursuit"
+use_mpc_on_pure_pursuit_cmd_timeout: false
+fallback_speed_mps: 10.0
+```
+
+この設定では、PP指令がfreshなら常にPPを最終出力にします。PP指令が止まった時は停止します。`use_mpc_on_pure_pursuit_cmd_timeout=true` にすると、PP指令が止まった時だけhealthyなMPC指令へ退避できますが、制御ソースが急に変わるため基本はfalse推奨です。
 
 ### health トピック欠落でも Pure Pursuit へ落としたい
 

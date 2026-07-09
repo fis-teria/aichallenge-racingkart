@@ -44,6 +44,7 @@ public:
   rclcpp::Subscription<Trajectory>::SharedPtr sub_mpc_predicted_horizon_;
   rclcpp::Subscription<Float32MultiArray>::SharedPtr sub_overtake_override_;
   rclcpp::Subscription<SteeringReport>::SharedPtr sub_steering_status_;
+  rclcpp::Subscription<String>::SharedPtr sub_mpc_health_;
 
   // publishers
   rclcpp::Publisher<AckermannControlCommand>::SharedPtr pub_cmd_;
@@ -62,7 +63,11 @@ public:
   std::optional<double> last_trajectory_receive_sec_;
   std::optional<double> last_mpc_predicted_horizon_receive_sec_;
   std::optional<double> last_steering_status_receive_sec_;
+  std::optional<double> last_mpc_health_receive_sec_;
   double latest_steering_status_rad_{0.0};
+  std::string mpc_health_status_{"missing"};
+  int mpc_health_infeasible_count_{0};
+  std::string mpc_predicted_horizon_source_{"unknown"};
 
   // pure pursuit parameters
   const double wheel_base_;
@@ -83,6 +88,8 @@ public:
   const int min_mpc_horizon_points_;
   const double max_mpc_horizon_start_distance_m_;
   const double min_mpc_horizon_arc_length_m_;
+  const bool require_solved_mpc_health_for_horizon_;
+  const double max_mpc_health_age_sec_;
   const bool use_overtake_reference_override_;
   const double overtake_override_timeout_sec_;
   const bool curvature_adaptive_lookahead_enabled_;
@@ -134,6 +141,8 @@ private:
   void publishStaleDebug(const rclcpp::Time &stamp,
                          const FreshnessResult &freshness);
   void onOvertakeOverride(const Float32MultiArray::SharedPtr msg);
+  void onMpcHealth(const String::SharedPtr msg);
+  double mpcHealthAgeSec(double now_sec) const;
   void clearOvertakeOverride();
   bool applyOvertakeOverride(Trajectory &trajectory,
                              std::size_t nearest_traj_point_idx,
