@@ -5,6 +5,7 @@ import time
 import rclpy
 import rclpy.node
 from builtin_interfaces.msg import Duration
+from nav_msgs.msg import Odometry
 from std_msgs.msg import ColorRGBA, String
 from visualization_msgs.msg import Marker, MarkerArray
 from v2x_msgs.msg import V2XVehiclePositionArray
@@ -53,6 +54,7 @@ class V2XMarkerPublisherNode(rclpy.node.Node):
         self.declare_parameter("own_vehicle_id", "auto")
         self.declare_parameter("overtake_mode_topic", "/debug/overtake/mode")
         self.declare_parameter("overtake_mode_stale_timeout_sec", 1.0)
+        self.declare_parameter("publish_self_marker", True)
 
         configured_vehicle_id = self.get_parameter(
             "own_vehicle_id").get_parameter_value().string_value
@@ -61,11 +63,16 @@ class V2XMarkerPublisherNode(rclpy.node.Node):
             "overtake_mode_topic").get_parameter_value().string_value
         self.overtake_mode_stale_timeout_sec = self.get_parameter(
             "overtake_mode_stale_timeout_sec").get_parameter_value().double_value
+        self.publish_self_marker = self.get_parameter(
+            "publish_self_marker").get_parameter_value().bool_value
         self.overtake_mode = ""
         self.overtake_mode_received_at = 0.0
+        self.latest_odom = None
 
         self.sub = self.create_subscription(
             V2XVehiclePositionArray, "/v2x/vehicle_positions", self.callback, 1)
+        self.odom_sub = self.create_subscription(
+            Odometry, "/localization/kinematic_state", self.odom_callback, 1)
         self.mode_sub = self.create_subscription(
             String, self.overtake_mode_topic, self.mode_callback, 1)
         self.pub = self.create_publisher(
@@ -75,11 +82,19 @@ class V2XMarkerPublisherNode(rclpy.node.Node):
             self.get_logger().info(
                 f"V2X self marker color follows {self.overtake_mode_topic} "
                 f"for own_vehicle_id={self.own_vehicle_id}")
+            if self.publish_self_marker:
+                self.get_logger().info(
+                    "V2X self marker will be synthesized from "
+                    "/localization/kinematic_state when V2X does not include "
+                    "the own vehicle")
         else:
             self.get_logger().warn(
                 "own_vehicle_id could not be resolved; V2X markers will keep "
                 "vehicle-id colors. Set own_vehicle_id or ROS_DOMAIN_ID to "
                 "enable overtake state coloring.")
+
+    def odom_callback(self, msg: Odometry) -> None:
+        self.latest_odom = msg
 
     def mode_callback(self, msg: String) -> None:
         self.overtake_mode = msg.data.strip()
@@ -92,10 +107,25 @@ class V2XMarkerPublisherNode(rclpy.node.Node):
         clear.action = Marker.DELETEALL
         markers.markers.append(clear)
 
+        own_vehicle_in_v2x = False
         for index, vehicle in enumerate(msg.vehicles):
+            if vehicle.vehicle_id == self.own_vehicle_id:
+                own_vehicle_in_v2x = True
             markers.markers.append(self._build_marker(msg, vehicle, index))
 
+        if self._should_publish_synthesized_self_marker(own_vehicle_in_v2x):
+            markers.markers.append(self._build_self_marker(len(markers.markers)))
+
         self.pub.publish(markers)
+
+    def _should_publish_synthesized_self_marker(
+            self, own_vehicle_in_v2x: bool) -> bool:
+        return (
+            self.publish_self_marker
+            and self.own_vehicle_id is not None
+            and not own_vehicle_in_v2x
+            and self.latest_odom is not None
+        )
 
     def _build_marker(self, array_msg, vehicle, index: int) -> Marker:
         marker = Marker()
@@ -113,6 +143,24 @@ class V2XMarkerPublisherNode(rclpy.node.Node):
         marker.scale.y = SPHERE_DIAMETER
         marker.scale.z = SPHERE_DIAMETER
         r, g, b = self._color_for_vehicle(vehicle.vehicle_id)
+        marker.color = ColorRGBA(r=r, g=g, b=b, a=ALPHA)
+        marker.lifetime = Duration(sec=LIFETIME_SEC, nanosec=0)
+        return marker
+
+    def _build_self_marker(self, index: int) -> Marker:
+        marker = Marker()
+        odom = self.latest_odom
+        marker.header.frame_id = odom.header.frame_id or "map"
+        marker.header.stamp = odom.header.stamp
+        marker.ns = "v2x_vehicles"
+        marker.id = index
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose = odom.pose.pose
+        marker.scale.x = SPHERE_DIAMETER
+        marker.scale.y = SPHERE_DIAMETER
+        marker.scale.z = SPHERE_DIAMETER
+        r, g, b = self._color_for_vehicle(self.own_vehicle_id)
         marker.color = ColorRGBA(r=r, g=g, b=b, a=ALPHA)
         marker.lifetime = Duration(sec=LIFETIME_SEC, nanosec=0)
         return marker
