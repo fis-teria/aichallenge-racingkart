@@ -164,6 +164,7 @@ bool hasFeasibleReleaseCandidate(
 }
 
 constexpr double kPublishedLateralTargetMemorySec = 0.5;
+constexpr double kStartGraceMotionSpeedMps = 0.20;
 
 } // namespace
 
@@ -193,6 +194,10 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     mode_ = BehaviorMode::FREE_RUN;
     safe_stop_trigger_count_ = 0;
     slow_front_exception_count_ = 0;
+    leader_priority_hold_active_ = false;
+    leader_priority_hold_id_.clear();
+    leader_priority_hold_until_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
     last_published_lateral_offsets_.clear();
     last_published_lateral_target_sec_ =
         std::numeric_limits<double>::quiet_NaN();
@@ -208,6 +213,10 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   if (!std::isfinite(first_valid_update_sec_)) {
     first_valid_update_sec_ = now_sec;
   }
+  if (!std::isfinite(first_motion_update_sec_) && std::isfinite(ego.v) &&
+      ego.v >= kStartGraceMotionSpeedMps) {
+    first_motion_update_sec_ = now_sec;
+  }
 
   // 処理ブロック: コース区間設定、追い越し許可、現在相手車リスクを集約する。
   // 設計意図: 候補生成前に「今どの制約が有効か」をBlockedInfoへ一度まとめる。
@@ -217,6 +226,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   const double wall_soft_margin = effectiveWallSoftMargin(active_section);
   BlockedInfo blocked = blocked_risk_.detectBlocked(ego, opponents, now_sec);
   const auto predictions = predictOpponents(opponents, now_sec);
+  promoteSlowObstacleChain(blocked, opponents);
   blocked =
       blocked_risk_.evaluatePassGap(blocked, opponents, predictions, mode_);
   blocked.overtake_permission_allowed =
@@ -234,13 +244,16 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
         config_.default_overtake_allowed ? "default_allowed"
                                          : "default_disallowed";
   }
-  blocked.front_vehicle_low_speed =
-      config_.slow_front_exception_enabled && blocked.nearest_index >= 0 &&
+  const bool front_low_speed_by_distance =
+      blocked.nearest_index >= 0 &&
       std::isfinite(blocked.front_vehicle_speed_mps) &&
       blocked.front_vehicle_speed_mps <=
           std::max(0.0, config_.slow_front_exception_speed_mps) &&
-      blocked.front_delta_s <=
-          std::max(0.0, config_.slow_front_exception_distance_m);
+      (blocked.front_delta_s <=
+           std::max(0.0, config_.slow_front_exception_distance_m) ||
+       blocked.slow_obstacle_chain_active);
+  blocked.front_vehicle_low_speed =
+      config_.slow_front_exception_enabled && front_low_speed_by_distance;
   blocked.slow_front_exception_active = updateSlowFrontException(blocked);
   blocked.slow_front_exception_count = slow_front_exception_count_;
   if (!blocked.overtake_permission_allowed &&
@@ -279,6 +292,11 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   } else {
     straight_overtake_start_allowed_ = true;
   }
+  if (!blocked.straight_overtake_start_allowed &&
+      blocked.slow_front_exception_active && blocked.blocked) {
+    blocked.straight_overtake_start_allowed = true;
+    blocked.overtake_start_gate_reason = "slow_front_exception_curve";
+  }
   const bool permission_start_allowed =
       blocked.overtake_permission_allowed ||
       blocked.slow_front_exception_active;
@@ -309,6 +327,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       blocked.yield_reason = "section_outer_yield";
     }
   }
+  updateLeaderPriority(now_sec, blocked);
   const bool large_lateral_error =
       config_.large_lateral_error_threshold_m >= 0.0 &&
       std::abs(ego.frenet.d) > config_.large_lateral_error_threshold_m;
@@ -321,6 +340,8 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   if (freeze_overtake_decisions) {
     blocked.can_pass_left = false;
     blocked.can_pass_right = false;
+    blocked.pass_decision_frozen = true;
+    blocked.pass_decision_freeze_reason = "large_lateral_error";
     if (blocked.pass_gap_reason.empty() || blocked.pass_gap_reason == "ok") {
       blocked.pass_gap_reason = "large_lateral_error";
     }
@@ -414,8 +435,11 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   const bool start_grace_active =
       safe_stop_base_condition &&
       shouldSuppressSafeStopForStartGrace(now_sec, ego, blocked);
+  const bool leader_priority_safe_stop_suppressed =
+      safe_stop_base_condition && blocked.leader_priority_active;
   const bool effective_safe_stop_base_condition =
-      safe_stop_base_condition && !start_grace_active;
+      safe_stop_base_condition && !start_grace_active &&
+      !leader_priority_safe_stop_suppressed;
 
   // 処理ブロック: 回避不能状態が連続した時だけSAFE_STOP要求を作る。
   // 設計意図: 一瞬のinfeasibleで停止に入ると走行が固まるため、trigger_cyclesで確定させる。
@@ -582,6 +606,9 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   }
   if (start_grace_active) {
     output_built.reason = "start_grace_safe_stop_suppressed";
+  } else if (leader_priority_safe_stop_suppressed &&
+             output_built.reason.empty()) {
+    output_built.reason = "leader_priority_safe_stop_suppressed";
   }
   applyLateralTargetRateLimit(now_sec, output_built);
   applyHighSpeedCurveLateralHold(now_sec, ego, output_built);
@@ -864,6 +891,52 @@ double OvertakePlannerCore::effectiveWallSoftMargin(
   return base * std::max(1.0, section.wall_margin_scale);
 }
 
+// 入力: detectBlocked直後のBlockedInfoと相手車一覧。
+// 出力: parallel-sideの低速/停止車を前方閉塞へ昇格したならtrue。
+// 処理概要: 停止車列を1台ずつ抜く場面で、2台目以降がfrontではなく
+// parallel-sideに見えても、既存PASS候補生成と状態機械に載せる。
+bool OvertakePlannerCore::promoteSlowObstacleChain(
+    BlockedInfo &blocked, const std::vector<OpponentState> &opponents) const {
+  if (!config_.slow_obstacle_chain_enabled ||
+      !config_.slow_front_exception_enabled || blocked.nearest_index >= 0 ||
+      !blocked.parallel_side_candidate || blocked.parallel_side_index < 0 ||
+      static_cast<std::size_t>(blocked.parallel_side_index) >=
+          opponents.size()) {
+    return false;
+  }
+  if (!std::isfinite(blocked.parallel_side_delta_s) ||
+      blocked.parallel_side_delta_s <= 0.0 ||
+      blocked.parallel_side_delta_s >
+          std::max(0.0, config_.slow_obstacle_chain_distance_m)) {
+    return false;
+  }
+
+  const auto &target =
+      opponents[static_cast<std::size_t>(blocked.parallel_side_index)];
+  if (!std::isfinite(target.v) ||
+      target.v > std::max(0.0, config_.slow_front_exception_speed_mps)) {
+    return false;
+  }
+
+  blocked.slow_obstacle_chain_active = true;
+  blocked.slow_obstacle_chain_id = target.id;
+  blocked.slow_obstacle_chain_delta_s = blocked.parallel_side_delta_s;
+  blocked.slow_obstacle_chain_delta_d = blocked.parallel_side_delta_d;
+  blocked.slow_obstacle_chain_speed_mps = target.v;
+
+  blocked.blocked = true;
+  blocked.nearest_index = blocked.parallel_side_index;
+  blocked.nearest_id = blocked.parallel_side_id;
+  blocked.front_delta_s = blocked.parallel_side_delta_s;
+  blocked.front_delta_d = blocked.parallel_side_delta_d;
+  blocked.front_rel_v = blocked.parallel_side_rel_v;
+  blocked.front_vehicle_speed_mps = target.v;
+  blocked.front_s_dot_mps = blocked.parallel_side_s_dot_mps;
+  blocked.front_direction_known = blocked.parallel_side_direction_known;
+  blocked.front_same_direction = blocked.parallel_side_same_direction;
+  return true;
+}
+
 // 入力: 現在のBlockedInfo。
 // 出力: 低速前走車例外が有効になったならtrue。
 // 処理概要: 追い越し禁止区間でも、前走車が低速で一定周期続いた時だけ開始許可へ戻す。
@@ -886,12 +959,15 @@ bool OvertakePlannerCore::shouldSuppressSafeStopForStartGrace(
     double now_sec, const EgoState &ego, const BlockedInfo &blocked) const {
   if (!config_.start_grace_safe_stop_enabled ||
       config_.start_grace_duration_sec <= 0.0 ||
-      !std::isfinite(first_valid_update_sec_) ||
-      !std::isfinite(now_sec) || now_sec < first_valid_update_sec_) {
+      !std::isfinite(first_valid_update_sec_) || !std::isfinite(now_sec) ||
+      now_sec < first_valid_update_sec_) {
     return false;
   }
-  if (now_sec - first_valid_update_sec_ >
-      config_.start_grace_duration_sec) {
+  const double start_grace_reference_sec =
+      std::isfinite(first_motion_update_sec_) ? first_motion_update_sec_
+                                              : now_sec;
+  if (now_sec < start_grace_reference_sec ||
+      now_sec - start_grace_reference_sec > config_.start_grace_duration_sec) {
     return false;
   }
   if (config_.start_grace_max_speed_mps >= 0.0 &&
@@ -903,6 +979,119 @@ bool OvertakePlannerCore::shouldSuppressSafeStopForStartGrace(
   }
   return blocked.side_by_side || blocked.parallel_side_candidate ||
          blocked.future_side_by_side || blocked.future_yield_required;
+}
+
+// 入力: BlockedInfoと、先行扱いに必要な相手後方距離margin。
+// 出力: 自車が横並び/並走相手より明確に前ならtrue。
+// 処理概要: 別の前方車に塞がれていない場面で、対象相手が後ろにいることをs差で判定する。
+bool OvertakePlannerCore::leaderPriorityCandidate(
+    const BlockedInfo &blocked, double margin_m, std::string &target_id,
+    double &target_delta_s, std::string &reason) const {
+  if (!config_.side_by_side_leader_priority_enabled) {
+    return false;
+  }
+  const double required_margin = std::max(0.0, margin_m);
+  const auto is_leading = [required_margin](double delta_s) {
+    return std::isfinite(delta_s) && delta_s <= -required_margin;
+  };
+  const auto blocked_by_other_front = [&blocked](const std::string &id) {
+    return blocked.blocked && !blocked.nearest_id.empty() &&
+           blocked.nearest_id != id;
+  };
+  if (blocked.side_by_side && blocked.side_same_direction &&
+      !blocked.side_id.empty() && !blocked_by_other_front(blocked.side_id) &&
+      is_leading(blocked.side_delta_s)) {
+    target_id = blocked.side_id;
+    target_delta_s = blocked.side_delta_s;
+    reason = "side_by_side_leader";
+    return true;
+  }
+  if (blocked.parallel_side_candidate && blocked.parallel_side_same_direction &&
+      !blocked.parallel_side_id.empty() &&
+      !blocked_by_other_front(blocked.parallel_side_id) &&
+      is_leading(blocked.parallel_side_delta_s)) {
+    target_id = blocked.parallel_side_id;
+    target_delta_s = blocked.parallel_side_delta_s;
+    reason = "parallel_side_leader";
+    return true;
+  }
+  return false;
+}
+
+// 入力: 現在時刻とBlockedInfo。
+// 出力: なし。BlockedInfoへleader priority情報を付与する。
+// 処理概要: 先行/後続の優先権が毎周期入れ替わらないよう、解除側に小さなヒステリシスと保持時間を持たせる。
+void OvertakePlannerCore::updateLeaderPriority(double now_sec,
+                                               BlockedInfo &blocked) {
+  blocked.leader_priority_active = false;
+  blocked.leader_priority_latched = false;
+  blocked.leader_priority_id.clear();
+  blocked.leader_priority_delta_s = std::numeric_limits<double>::infinity();
+  blocked.leader_priority_reason.clear();
+
+  if (!config_.side_by_side_leader_priority_enabled) {
+    leader_priority_hold_active_ = false;
+    leader_priority_hold_id_.clear();
+    leader_priority_hold_until_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
+    return;
+  }
+
+  std::string target_id;
+  double target_delta_s = std::numeric_limits<double>::infinity();
+  std::string reason;
+  bool active = leaderPriorityCandidate(
+      blocked, config_.side_by_side_leader_priority_enter_s_m, target_id,
+      target_delta_s, reason);
+  bool latched = false;
+
+  const bool hold_window_active =
+      leader_priority_hold_active_ && std::isfinite(now_sec) &&
+      std::isfinite(leader_priority_hold_until_sec_) &&
+      now_sec <= leader_priority_hold_until_sec_;
+  if (active && hold_window_active && target_id == leader_priority_hold_id_) {
+    latched = true;
+    reason = "leader_priority_hold";
+  }
+
+  if (!active && hold_window_active) {
+    const double release_margin = std::min(
+        std::max(0.0, config_.side_by_side_leader_priority_enter_s_m),
+        std::max(0.0, config_.side_by_side_leader_priority_release_s_m));
+    std::string held_id;
+    double held_delta_s = std::numeric_limits<double>::infinity();
+    std::string held_reason;
+    if (leaderPriorityCandidate(blocked, release_margin, held_id, held_delta_s,
+                                held_reason) &&
+        held_id == leader_priority_hold_id_) {
+      active = true;
+      latched = true;
+      target_id = held_id;
+      target_delta_s = held_delta_s;
+      reason = "leader_priority_hold";
+    }
+  }
+
+  if (!active) {
+    if (!std::isfinite(now_sec) || !std::isfinite(leader_priority_hold_until_sec_) ||
+        now_sec > leader_priority_hold_until_sec_) {
+      leader_priority_hold_active_ = false;
+      leader_priority_hold_id_.clear();
+      leader_priority_hold_until_sec_ =
+          std::numeric_limits<double>::quiet_NaN();
+    }
+    return;
+  }
+
+  blocked.leader_priority_active = true;
+  blocked.leader_priority_latched = latched;
+  blocked.leader_priority_id = target_id;
+  blocked.leader_priority_delta_s = target_delta_s;
+  blocked.leader_priority_reason = reason;
+  leader_priority_hold_active_ = true;
+  leader_priority_hold_id_ = target_id;
+  leader_priority_hold_until_sec_ =
+      now_sec + std::max(0.0, config_.side_by_side_leader_priority_hold_sec);
 }
 
 // 入力: なし。

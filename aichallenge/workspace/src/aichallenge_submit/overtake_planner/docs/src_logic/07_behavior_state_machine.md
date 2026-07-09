@@ -76,6 +76,7 @@ future yield holdを継続すべきか判定します。
 - 停止候補が安全でなくなったら、`YIELD_BEHIND`, `SIDE_BY_SIDE_KEEP`, `FOLLOW_BLOCKED`, `ABORT_RECOVERY` などへ退避する。
 - 停止候補が安全なら保持countを増やす。
 - 停止要求が消えていても、壁余裕または中心からの横ずれが解除条件を満たさない場合は `ABORT_RECOVERY` へ渡す。
+- `slow_obstacle_chain_active=true` で、停止要求が消え、feasibleなPASS候補が選ばれている場合は `FOLLOW_BLOCKED` へ戻し、PASS安全周期を貯め直せるようにする。
 - `release_ready` が連続で成立したら `FOLLOW_BLOCKED` または `FREE_RUN` へ戻る。
 
 ## infeasible候補時

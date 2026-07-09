@@ -16,7 +16,8 @@
     <arg name="output_raw_control_cmd" value="/pure_pursuit_mpc_horizon/mpc/control_cmd_raw"/>
     <arg name="output_mpc_predicted_horizon" value="/pure_pursuit_mpc_horizon/mpc/predicted_horizon"/>
     <arg name="input_control_cmd_raw" value="/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd_raw"/>
-    <arg name="overtake_horizon_points" value="20"/>
+    <arg name="overtake_horizon_points" value="40"/>
+    <arg name="overtake_mpc_health_solve_time_warn_ms" value="200.0"/>
   </include>
 
   <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">

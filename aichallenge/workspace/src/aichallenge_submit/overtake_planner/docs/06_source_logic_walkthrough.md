@@ -305,6 +305,11 @@ override配列は初期値として `d=0`、`v_ref=v_passthrough_mps` を持ち�
 
 `straight_only_overtake_enabled` が有効な場合、前方曲率が `straight_overtake_max_curvature_m_inv` を超えると、PASS候補が安全でも追い越し開始を抑制します。
 このとき `overtake_start_gate_reason="curve"` になります。
+ただし前方車が停止/低速で `slow_front_exception_active=true` の場合は、pass gapと安全評価を維持したまま曲率ゲートだけを例外的に開き、`overtake_start_gate_reason="slow_front_exception_curve"` として記録します。
+
+停止車列では、1台目を抜いた直後に2台目が `front_vehicle_id` ではなく `parallel_side_vehicle_id` として見える場合があります。
+`slow_obstacle_chain_enabled=true` かつ相手が自車より前方、`slow_obstacle_chain_distance_m` 内、`slow_front_exception_speed_mps` 以下なら、core側で `slow_obstacle_chain_active=true` として前方閉塞へ昇格します。
+これにより、2台目以降も既存の `FOLLOW` / `PASS_LEFT` / `PASS_RIGHT` 候補生成、安全評価、状態機械に載ります。
 
 ### 候補生成
 
@@ -357,6 +362,8 @@ SAFE_STOPが必要かどうかを見る前にも、通常fallback候補として
 
 SAFE_STOPは、通常の回避候補が全部ダメなときの低速停止overrideです。
 物理的な緊急停止ではなく、`safe_stop_v_mps` の速度上限を持つ候補として扱われます。
+発進直後の `start_grace` は、最初の有効ego受信時刻ではなく、最初に自車速度が動き出し判定を超えた時刻を基準にします。
+これにより、AWSIMのWAIT_START中にSAFE_STOP猶予時間が消費されることを避けます。
 
 ```mermaid
 flowchart TD
@@ -451,6 +458,9 @@ targetの現在位置と予測 `d[]` を見て、左右の最小gapを求めま�
 - `right_gap_narrow`
 - `both_gap_narrow`
 - `no_target`
+- `large_lateral_error`
+
+`large_lateral_error` の場合は、pass gap自体が空いていても、横ずれが大きい危険文脈で `pass_decision_frozen=true` になり、PASS開始を一時的に凍結しています。
 
 ## `src/future_side_by_side_risk_analyzer.cpp`
 
@@ -669,9 +679,9 @@ else:
 ```mermaid
 flowchart TD
   Start["build()"] --> SafeStopInfeasible{"SAFE_STOP候補がinfeasible?"}
-  SafeStopInfeasible -- "yes" --> SpeedOnly["speed_only_fallback_v_max_mps"]
+  SafeStopInfeasible -- "yes" --> SpeedOnly["speed_only_fallback_v_max_mps<br/>opponent_collision時は専用低速cap"]
   SafeStopInfeasible -- "no" --> SelectedUnsafe{"選択候補がunsafeでFASTEST/SAFE_STOP以外?"}
-  SelectedUnsafe -- "yes" --> SpeedOnly2["selected capとspeed_only_fallback_v_max_mpsの小さい方"]
+  SelectedUnsafe -- "yes" --> SpeedOnly2["selected capとfallback capの小さい方<br/>opponent_collision時は専用低速cap"]
   SelectedUnsafe -- "no" --> Wall{"ego_wall_clearance < wall_soft_margin?"}
   Wall -- "yes" --> WallGuard["wall_risk_v_max_mps"]
   Wall -- "no" --> Section{"strict sectionで横並び文脈?"}
@@ -748,15 +758,22 @@ y = ref.y + d * cos(ref.yaw)
 
 1. `blocked`
 2. `front_vehicle_id`
-3. `can_pass_left`
-4. `can_pass_right`
-5. `pass_gap_reason`
-6. `straight_overtake_start_allowed`
-7. `overtake_start_gate_reason`
-8. `selected`
-9. `reason`
+3. `parallel_side_vehicle_id`
+4. `slow_obstacle_chain_active`
+5. `can_pass_left`
+6. `can_pass_right`
+7. `pass_decision_frozen`
+8. `pass_decision_freeze_reason`
+9. `pass_gap_reason`
+10. `straight_overtake_start_allowed`
+11. `overtake_start_gate_reason`
+12. `selected`
+13. `reason`
 
 コーナーで追い越し開始しない場合、`straight_overtake_start_allowed=false` かつ `overtake_start_gate_reason=curve` なら、直線限定ゲートで止めています。
+`overtake_start_gate_reason=slow_front_exception_curve` の場合は、停止/低速車例外によって曲率ゲートだけが解除されており、pass gapや安全評価は引き続き有効です。
+1台目通過後に2台目へ向かわない場合は、`slow_obstacle_chain_active` が立っているかを先に見ます。
+立っていないなら、2台目が前方側のparallel-sideとして認識されていない、速度が低速条件を満たしていない、または距離が `slow_obstacle_chain_distance_m` を超えています。
 
 ### なぜYIELD_BEHINDになるか
 

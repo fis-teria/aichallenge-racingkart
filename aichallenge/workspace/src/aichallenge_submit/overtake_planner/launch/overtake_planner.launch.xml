@@ -4,12 +4,14 @@
   <arg name="input_odom" default="/localization/kinematic_state"/>
   <arg name="param_path" default="$(find-pkg-share overtake_planner)/config/overtake_planner.param.yaml"/>
   <arg name="horizon_points" default="20"/>
+  <arg name="mpc_health_solve_time_warn_ms" default="80.0"/>
 
   <node pkg="overtake_planner" exec="overtake_planner_node"
         name="overtake_planner_node" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param from="$(var param_path)"/>
     <param name="horizon_points" value="$(var horizon_points)"/>
+    <param name="mpc_health_solve_time_warn_ms" value="$(var mpc_health_solve_time_warn_ms)"/>
     <remap from="/localization/kinematic_state" to="$(var input_odom)"/>
   </node>
 </launch>

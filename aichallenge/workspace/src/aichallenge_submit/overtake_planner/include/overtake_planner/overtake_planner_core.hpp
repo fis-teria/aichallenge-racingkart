@@ -48,10 +48,18 @@ private:
   bool permissionRuleContainsS(const OvertakePermissionRule &rule,
                                double s) const;
   double effectiveWallSoftMargin(const ActiveSectionSafety &section) const;
+  bool
+  promoteSlowObstacleChain(BlockedInfo &blocked,
+                           const std::vector<OpponentState> &opponents) const;
   bool updateSlowFrontException(const BlockedInfo &blocked);
   bool shouldSuppressSafeStopForStartGrace(double now_sec,
                                            const EgoState &ego,
                                            const BlockedInfo &blocked) const;
+  bool leaderPriorityCandidate(const BlockedInfo &blocked, double margin_m,
+                               std::string &target_id,
+                               double &target_delta_s,
+                               std::string &reason) const;
+  void updateLeaderPriority(double now_sec, BlockedInfo &blocked);
   bool localizedLateralProfileEnabled() const;
   CandidateType preferredPassType(const BlockedInfo &blocked) const;
   int localizedProfileTargetIndex(const BlockedInfo &blocked) const;
@@ -78,8 +86,13 @@ private:
   BehaviorStateMachine state_machine_;
   BehaviorMode mode_{BehaviorMode::FREE_RUN};
   double first_valid_update_sec_{std::numeric_limits<double>::quiet_NaN()};
+  double first_motion_update_sec_{std::numeric_limits<double>::quiet_NaN()};
   int safe_stop_trigger_count_{0};
   int slow_front_exception_count_{0};
+  bool leader_priority_hold_active_{false};
+  std::string leader_priority_hold_id_{};
+  double leader_priority_hold_until_sec_{
+      std::numeric_limits<double>::quiet_NaN()};
   bool straight_overtake_start_allowed_{true};
   std::vector<double> last_published_lateral_offsets_;
   double last_published_lateral_target_sec_{

@@ -94,3 +94,7 @@ SAFE_STOPは停止候補がfeasibleなときだけoverrideします。
 
 section safety profileが有効な場合、速度capに `speed_cap_scale` を掛けます。
 scaleは `0.05` から `1.0` にclampされます。
+
+`speed_only_fallback_<reject_reason>` のうち、`reject_reason` が
+`opponent_collision` の場合は `opponent_collision_fallback_v_max_mps` を使います。
+これは安全ゲート向けの低速crawlで、横回避候補が不安全なのに速度だけ高く残る状態を避けるためです。

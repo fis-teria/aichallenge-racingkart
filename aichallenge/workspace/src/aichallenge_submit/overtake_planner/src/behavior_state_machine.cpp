@@ -33,6 +33,14 @@ bool shouldHoldHighSpeedCurveRecovery(const PlannerConfig &config,
          blocked_info.corner_abs_curvature > releaseCurvature(config);
 }
 
+// 入力: CandidateType。
+// 出力: 左右PASS候補ならtrue。
+// 処理概要: SAFE_STOP解除中でも低速車列を抜ける候補だけを限定的に通す。
+bool isPassCandidate(CandidateType selected) {
+  return selected == CandidateType::PASS_LEFT ||
+         selected == CandidateType::PASS_RIGHT;
+}
+
 } // namespace
 
 // 入力: planner設定。
@@ -153,6 +161,18 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
                               config_.safe_stop_lateral_error_threshold_m));
     if (recovery_required && canSwitch(now_sec)) {
       next = BehaviorMode::ABORT_RECOVERY;
+      safe_stop_hold_count_ = 0;
+      safe_stop_release_count_ = 0;
+      pass_left_safe_cycles_ = 0;
+      pass_right_safe_cycles_ = 0;
+      markIfChanged(now_sec, current, next);
+      future_yield_hold_active_ = false;
+      return next;
+    }
+
+    if (!safe_stop_context.requested && blocked_info.slow_obstacle_chain_active &&
+        selected_feasible && isPassCandidate(selected) && canSwitch(now_sec)) {
+      next = BehaviorMode::FOLLOW_BLOCKED;
       safe_stop_hold_count_ = 0;
       safe_stop_release_count_ = 0;
       pass_left_safe_cycles_ = 0;

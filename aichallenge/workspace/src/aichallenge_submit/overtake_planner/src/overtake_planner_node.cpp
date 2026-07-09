@@ -301,6 +301,10 @@ public:
         declare_parameter<double>("slow_front_exception_distance_m", 8.0);
     config.slow_front_exception_required_cycles =
         declare_parameter<int>("slow_front_exception_required_cycles", 3);
+    config.slow_obstacle_chain_enabled =
+        declare_parameter<bool>("slow_obstacle_chain_enabled", true);
+    config.slow_obstacle_chain_distance_m =
+        declare_parameter<double>("slow_obstacle_chain_distance_m", 12.0);
     config.large_lateral_error_threshold_m =
         declare_parameter<double>("large_lateral_error_threshold_m", 0.60);
     config.large_lateral_error_v_max_mps =
@@ -385,6 +389,18 @@ public:
         declare_parameter<bool>("speed_only_fallback_enabled", true);
     config.speed_only_fallback_v_max_mps =
         declare_parameter<double>("speed_only_fallback_v_max_mps", 3.0);
+    config.opponent_collision_fallback_v_max_mps = declare_parameter<double>(
+        "opponent_collision_fallback_v_max_mps", 0.5);
+    config.side_by_side_leader_priority_enabled =
+        declare_parameter<bool>("side_by_side_leader_priority_enabled", true);
+    config.side_by_side_leader_priority_enter_s_m = declare_parameter<double>(
+        "side_by_side_leader_priority_enter_s_m", 1.0);
+    config.side_by_side_leader_priority_release_s_m = declare_parameter<double>(
+        "side_by_side_leader_priority_release_s_m", 0.3);
+    config.side_by_side_leader_priority_hold_sec = declare_parameter<double>(
+        "side_by_side_leader_priority_hold_sec", 1.0);
+    config.side_by_side_leader_priority_v_max_mps = declare_parameter<double>(
+        "side_by_side_leader_priority_v_max_mps", 3.0);
     config.wall_risk_speed_guard_enabled =
         declare_parameter<bool>("wall_risk_speed_guard_enabled", true);
     config.wall_soft_margin_m =
@@ -512,11 +528,20 @@ private:
     bool front_vehicle_low_speed{false};
     bool slow_front_exception_active{false};
     int slow_front_exception_count{0};
+    bool slow_obstacle_chain_active{false};
+    std::string slow_obstacle_chain_id{};
     double front_vehicle_speed_mps{std::numeric_limits<double>::quiet_NaN()};
+    bool pass_decision_frozen{false};
+    std::string pass_decision_freeze_reason{};
     double future_wall_clearance_m{std::numeric_limits<double>::infinity()};
     std::string front_vehicle_id{};
     std::string side_vehicle_id{};
     std::string parallel_side_vehicle_id{};
+    bool leader_priority_active{false};
+    bool leader_priority_latched{false};
+    std::string leader_priority_id{};
+    double leader_priority_delta_s{std::numeric_limits<double>::infinity()};
+    std::string leader_priority_reason{};
     std::string pass_gap_reason{};
     std::string yield_reason{};
     std::string reason{};
@@ -926,6 +951,17 @@ private:
         << ","
         << "\"slow_front_exception_count\":"
         << output.blocked_info.slow_front_exception_count << ","
+        << "\"slow_obstacle_chain_active\":"
+        << (output.blocked_info.slow_obstacle_chain_active ? "true" : "false")
+        << ","
+        << "\"slow_obstacle_chain_id\":\""
+        << output.blocked_info.slow_obstacle_chain_id << "\","
+        << "\"slow_obstacle_chain_delta_s\":"
+        << jsonNumber(output.blocked_info.slow_obstacle_chain_delta_s) << ","
+        << "\"slow_obstacle_chain_delta_d\":"
+        << jsonNumber(output.blocked_info.slow_obstacle_chain_delta_d) << ","
+        << "\"slow_obstacle_chain_speed_mps\":"
+        << jsonNumber(output.blocked_info.slow_obstacle_chain_speed_mps) << ","
         << "\"future_side_by_side\":"
         << (output.blocked_info.future_side_by_side ? "true" : "false") << ","
         << "\"future_corner_side_by_side\":"
@@ -1006,6 +1042,18 @@ private:
         << (output.blocked_info.parallel_side_direction_known ? "true"
                                                               : "false")
         << ","
+        << "\"leader_priority_active\":"
+        << (output.blocked_info.leader_priority_active ? "true" : "false")
+        << ","
+        << "\"leader_priority_latched\":"
+        << (output.blocked_info.leader_priority_latched ? "true" : "false")
+        << ","
+        << "\"leader_priority_id\":\""
+        << output.blocked_info.leader_priority_id << "\","
+        << "\"leader_priority_delta_s\":"
+        << jsonNumber(output.blocked_info.leader_priority_delta_s) << ","
+        << "\"leader_priority_reason\":\""
+        << output.blocked_info.leader_priority_reason << "\","
         << "\"ignored_opposite_direction_count\":"
         << output.blocked_info.ignored_opposite_direction_count << ","
         << "\"left_pass_gap_m\":"
@@ -1018,6 +1066,11 @@ private:
         << (output.blocked_info.can_pass_right ? "true" : "false") << ","
         << "\"pass_gap_required_m\":"
         << jsonNumber(output.blocked_info.pass_gap_required_m) << ","
+        << "\"pass_decision_frozen\":"
+        << (output.blocked_info.pass_decision_frozen ? "true" : "false")
+        << ","
+        << "\"pass_decision_freeze_reason\":\""
+        << output.blocked_info.pass_decision_freeze_reason << "\","
         << "\"pass_gap_reason\":\"" << output.blocked_info.pass_gap_reason
         << "\","
         << "\"ego_x\":" << jsonNumber(ego.x) << ","
@@ -1148,13 +1201,29 @@ private:
         output.blocked_info.slow_front_exception_active;
     snapshot.slow_front_exception_count =
         output.blocked_info.slow_front_exception_count;
+    snapshot.slow_obstacle_chain_active =
+        output.blocked_info.slow_obstacle_chain_active;
+    snapshot.slow_obstacle_chain_id =
+        output.blocked_info.slow_obstacle_chain_id;
     snapshot.front_vehicle_speed_mps =
         output.blocked_info.front_vehicle_speed_mps;
+    snapshot.pass_decision_frozen = output.blocked_info.pass_decision_frozen;
+    snapshot.pass_decision_freeze_reason =
+        output.blocked_info.pass_decision_freeze_reason;
     snapshot.future_wall_clearance_m =
         output.blocked_info.future_wall_clearance_m;
     snapshot.front_vehicle_id = output.blocked_info.nearest_id;
     snapshot.side_vehicle_id = output.blocked_info.side_id;
     snapshot.parallel_side_vehicle_id = output.blocked_info.parallel_side_id;
+    snapshot.leader_priority_active =
+        output.blocked_info.leader_priority_active;
+    snapshot.leader_priority_latched =
+        output.blocked_info.leader_priority_latched;
+    snapshot.leader_priority_id = output.blocked_info.leader_priority_id;
+    snapshot.leader_priority_delta_s =
+        output.blocked_info.leader_priority_delta_s;
+    snapshot.leader_priority_reason =
+        output.blocked_info.leader_priority_reason;
     snapshot.pass_gap_reason = output.blocked_info.pass_gap_reason;
     snapshot.yield_reason = output.blocked_info.yield_reason;
     snapshot.reason = output.reason;
@@ -1207,10 +1276,13 @@ private:
            !snapshot.straight_overtake_start_allowed ||
            !snapshot.overtake_permission_allowed ||
            snapshot.slow_front_exception_active ||
+           snapshot.slow_obstacle_chain_active ||
+           snapshot.pass_decision_frozen ||
            !snapshot.active_section_name.empty() ||
            !snapshot.front_vehicle_id.empty() ||
            !snapshot.side_vehicle_id.empty() ||
-           !snapshot.parallel_side_vehicle_id.empty() || has_pass_gap_context ||
+           !snapshot.parallel_side_vehicle_id.empty() ||
+           snapshot.leader_priority_active || has_pass_gap_context ||
            !snapshot.reason.empty();
   }
 
@@ -1257,13 +1329,25 @@ private:
             previous.slow_front_exception_active ||
         current.slow_front_exception_count !=
             previous.slow_front_exception_count ||
+        current.slow_obstacle_chain_active !=
+            previous.slow_obstacle_chain_active ||
+        current.slow_obstacle_chain_id != previous.slow_obstacle_chain_id ||
         std::abs(current.front_vehicle_speed_mps -
                  previous.front_vehicle_speed_mps) > 0.05 ||
+        current.pass_decision_frozen != previous.pass_decision_frozen ||
+        current.pass_decision_freeze_reason !=
+            previous.pass_decision_freeze_reason ||
         std::abs(current.future_wall_clearance_m -
                  previous.future_wall_clearance_m) > 0.05 ||
         current.front_vehicle_id != previous.front_vehicle_id ||
         current.side_vehicle_id != previous.side_vehicle_id ||
         current.parallel_side_vehicle_id != previous.parallel_side_vehicle_id ||
+        current.leader_priority_active != previous.leader_priority_active ||
+        current.leader_priority_latched != previous.leader_priority_latched ||
+        current.leader_priority_id != previous.leader_priority_id ||
+        std::abs(current.leader_priority_delta_s -
+                 previous.leader_priority_delta_s) > 0.05 ||
+        current.leader_priority_reason != previous.leader_priority_reason ||
         current.pass_gap_reason != previous.pass_gap_reason ||
         current.yield_reason != previous.yield_reason ||
         current.safe_stop_triggered != previous.safe_stop_triggered ||
@@ -1329,13 +1413,16 @@ private:
         "front_id=%s front_ds=%.2f "
         "front_dd=%.2f rel_v=%.2f side_id=%s side_ds=%.2f side_dd=%.2f "
         "side_s_dot=%.2f parallel_id=%s parallel_ds=%.2f parallel_dd=%.2f "
+        "leader_priority=%d leader_latched=%d leader_id=%s "
+        "leader_ds=%.2f leader_reason=%s "
         "can_left=%d can_right=%d pass_gap_reason=%s "
         "corner_abs_curvature=%.3f straight_start_allowed=%d "
         "overtake_start_abs_curvature=%.3f overtake_start_gate_reason=%s "
         "permission_allowed=%d permission_section=%s permission_reason=%s "
         "front_low_speed=%d slow_exception=%d slow_exception_count=%d "
-        "front_speed=%.2f "
+        "slow_chain=%d slow_chain_id=%s front_speed=%.2f "
         "future_wall_clearance=%.2f yield_reason=%s "
+        "pass_frozen=%d pass_freeze_reason=%s "
         "ego_s=%.2f ego_d=%.2f target_d=%.2f min_cbf_h=%.3f cbf_slack=%.3f "
         "safe_stop_triggered=%d start_grace=%d safe_stop_reason=%s "
         "safe_stop_reject_reason=%s "
@@ -1361,6 +1448,11 @@ private:
         output.blocked_info.parallel_side_id.c_str(),
         output.blocked_info.parallel_side_delta_s,
         output.blocked_info.parallel_side_delta_d,
+        output.blocked_info.leader_priority_active,
+        output.blocked_info.leader_priority_latched,
+        output.blocked_info.leader_priority_id.c_str(),
+        output.blocked_info.leader_priority_delta_s,
+        output.blocked_info.leader_priority_reason.c_str(),
         output.blocked_info.can_pass_left, output.blocked_info.can_pass_right,
         output.blocked_info.pass_gap_reason.c_str(),
         output.blocked_info.corner_abs_curvature,
@@ -1373,9 +1465,14 @@ private:
         output.blocked_info.front_vehicle_low_speed,
         output.blocked_info.slow_front_exception_active,
         output.blocked_info.slow_front_exception_count,
+        output.blocked_info.slow_obstacle_chain_active,
+        output.blocked_info.slow_obstacle_chain_id.c_str(),
         output.blocked_info.front_vehicle_speed_mps,
         output.blocked_info.future_wall_clearance_m,
-        output.blocked_info.yield_reason.c_str(), ego.frenet.s, ego.frenet.d,
+        output.blocked_info.yield_reason.c_str(),
+        output.blocked_info.pass_decision_frozen,
+        output.blocked_info.pass_decision_freeze_reason.c_str(), ego.frenet.s,
+        ego.frenet.d,
         output.target_lateral_offset_m, output.min_cbf_h, output.cbf_slack,
         output.safe_stop_triggered, output.start_grace_active,
         output.safe_stop_reason.c_str(), output.safe_stop_reject_reason.c_str(),

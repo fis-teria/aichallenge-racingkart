@@ -620,6 +620,9 @@ class MPCController(Node):
                 warn_callback=self.get_logger().warn,
             )
             self._v2x_vehicle_radius = float(v2x_cfg.vehicle_radius)
+            self._v2x_prediction_obstacle_min_spacing_m = float(
+                getattr(v2x_cfg, "prediction_obstacle_min_spacing_m", 0.0)
+            )
             mpc_N = int(self._cfg.mpc.N)  # type: ignore
             t_horizon = mpc_N / float(self._cfg.mpc.control_rate)  # type: ignore
             self._v2x_t_samples = [
@@ -955,7 +958,10 @@ class MPCController(Node):
         self._v2x_tracker.update(msg)
         predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
         self._dynamic_obstacles = predictions_to_obstacles(
-            predictions, self._v2x_vehicle_radius)
+            predictions,
+            self._v2x_vehicle_radius,
+            min_spacing_m=self._v2x_prediction_obstacle_min_spacing_m,
+        )
         self._obstacles_updated = True
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
@@ -1210,12 +1216,19 @@ class MPCController(Node):
 
         if self._odom is not None:
             pose = odom_to_pose_2d(self._odom)
+            anchor_speed_mps = max(0.0, float(self._odom.twist.twist.linear.x))
+            anchor_waypoint = reference_path.get_waypoint(int(model.wp_id))
+            anchor_v_ref = getattr(anchor_waypoint, "v_ref", None)
+            if anchor_v_ref is not None:
+                ref_speed = float(anchor_v_ref)
+                if np.isfinite(ref_speed) and ref_speed >= 0.0:
+                    anchor_speed_mps = ref_speed
             self._append_horizon_point(
                 trajectory,
                 pose.x,
                 pose.y,
                 pose.theta,
-                max(0.0, float(self._odom.twist.twist.linear.x)),
+                anchor_speed_mps,
             )
 
         point_count = max(0, int(getattr(self._mpc, "N", 0)))

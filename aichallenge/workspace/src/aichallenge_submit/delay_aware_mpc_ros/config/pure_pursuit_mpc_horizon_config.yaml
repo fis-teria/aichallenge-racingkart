@@ -47,7 +47,7 @@ bicycle_model:
 mpc:
   # PurePursuit主制御ではMPCを制御出力ではなくhorizon生成に寄せる。
   # 10Hzかつ短めNにして、solver負荷とinfeasible継続時間を抑える。
-  N: 20
+  N: 40
   R: [1000000.0, 10.0]
   a_min: 0
   a_max: 3.0
@@ -64,8 +64,8 @@ mpc:
   use_curvature_speed_profile: true
   use_ref_vel_as_speed_cap: true
   speed_profile_debug_publish_period_sec: 0.10
-  neutral_horizon_publish_period_sec: 0.0
-  predicted_horizon_publish_mode: "solver_when_solved"
+  neutral_horizon_publish_period_sec: 0.05
+  predicted_horizon_publish_mode: "overtake_or_neutral"
   use_grade_accel_feedforward: true
   grade_ff_gain: 1.0
   grade_ff_max_accel_mps2: 1.0
@@ -82,5 +82,6 @@ mpc:
 
 v2x_obstacle_avoidance:
   vehicle_radius: 0.75
+  prediction_obstacle_min_spacing_m: 0.50
   v_max_safety: 30.0
   position_jump_threshold: 5.0

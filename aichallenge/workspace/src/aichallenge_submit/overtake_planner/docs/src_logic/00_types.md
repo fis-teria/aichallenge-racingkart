@@ -38,8 +38,11 @@
 - `blocked`: 前方車で詰まっているか。
 - `side_by_side`: 狭義の横並びか。
 - `parallel_side_candidate`: 広めの並走候補か。
+- `slow_obstacle_chain_active`: 停止車列の2台目以降として、parallel-side車両を前方閉塞へ昇格したか。
 - `future_yield_required`: 未来予測上、譲りが必要か。
 - `can_pass_left` / `can_pass_right`: 左右に追い越し余裕があるか。
+- `pass_decision_frozen`: 大きな横ずれなどでPASS判断を凍結したか。
+- `pass_decision_freeze_reason`: 凍結理由。
 - `pass_gap_reason`: 左右gap判定の理由。
 - `ego_wall_clearance_m`: 自車の安全コリドー余裕。
 
@@ -71,6 +74,7 @@ ROS parameterを集約した設定です。
 
 - `left_offset_m`, `right_offset_m`
 - `pass_horizon_publish_mode`
+- `slow_obstacle_chain_enabled`, `slow_obstacle_chain_distance_m`
 - `prepare_distance_m`, `merge_distance_m`
 - `side_by_side_target_gap_m`, `side_by_side_shift_distance_m`
 - `recovery_v_max_mps`, `wall_margin_recovery_v_max_mps`

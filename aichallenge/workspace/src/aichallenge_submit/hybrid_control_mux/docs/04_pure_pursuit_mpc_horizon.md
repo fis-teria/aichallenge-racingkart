@@ -41,8 +41,9 @@ flowchart LR
 | --- | --- | --- |
 | `delay_aware_mpc_ros/config/pure_pursuit_mpc_horizon_config.yaml` | `mpc.control_rate: 10.0` | MPC solve周期を落としてCPU負荷を下げる |
 | 同上 | `mpc.N: 20` | horizon生成に必要な範囲を残しつつ、問題サイズを小さくする |
-| 同上 | `mpc.predicted_horizon_publish_mode: solver_when_solved` | MPCがsolveできた時だけ予測horizonをpublishする |
-| 同上 | `mpc.neutral_horizon_publish_period_sec: 0.0` | solve失敗中に中立horizonを出し続けない |
+| 同上 | `mpc.predicted_horizon_publish_mode: overtake_or_neutral` | 実追い越し/merge中だけsolver予測horizonをpublishする |
+| 同上 | `mpc.neutral_horizon_publish_period_sec: 0.05` | 非追い越し中は固定周期の中立horizonを出す |
+| `pure_pursuit_mpc_horizon.launch.xml` | `overtake_mpc_health_solve_time_warn_ms: 200.0` | 10Hz horizon生成時だけ、overtake plannerのsolve-time guardを緩める |
 | `pure_pursuit.launch.xml` | `require_solved_mpc_health_for_horizon` | MPC healthがsolvedの時だけhorizonを採用する |
 | `hybrid_control_mux/config/pure_pursuit_mpc_horizon.param.yaml` | `primary_source: pure_pursuit` | 最終出力をPure Pursuit主制御にする |
 
@@ -50,7 +51,7 @@ flowchart LR
 
 ### MPC horizon が低周期になる
 
-MPCは10Hzなので、40Hz運用よりhorizon更新は遅くなります。Pure Pursuit側は `max_mpc_horizon_age_sec=0.35` まで許容しますが、healthがstaleまたはunsolvedなら通常trajectoryへ戻します。
+MPCは10Hzなので、40Hz運用よりsolver予測horizon更新は遅くなります。非追い越し中は `neutral_horizon_publish_period_sec=0.05` の固定周期neutral horizonを使い、Pure Pursuit側は `max_mpc_horizon_age_sec=0.35` まで許容します。healthがstaleまたはunsolvedなら通常trajectoryへ戻します。
 
 ### MPCが解けない区間では制約付きの未来経路を使えない
 
@@ -81,6 +82,6 @@ Pure PursuitはMPCのような最適化制約を持ちません。速度は `pur
 
 `/mpc/speed_profile_debug`:
 
-- `predicted_horizon_publish_mode`: `solver_when_solved`
+- `predicted_horizon_publish_mode`: `overtake_or_neutral`
 - `mpc_status`: `solved` / `infeasible`
-- `mpc_predicted_horizon_source`: `solver_prediction` または `empty`
+- `mpc_predicted_horizon_source`: 通常時は `fixed_neutral_reference`、実追い越し/merge中は `solver_prediction`

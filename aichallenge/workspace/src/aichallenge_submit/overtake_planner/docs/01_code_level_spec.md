@@ -153,9 +153,11 @@ MPCへ渡す候補軌道です。
    - 前走車と横並び車両をFrenet座標で検出
 3. `predictOpponents()`
    - 他車を短いhorizonで等速予測
-4. `BlockedRiskAnalyzer::evaluatePassGap()`
+4. `promoteSlowObstacleChain()`
+   - 低速/停止のparallel-side前方車を、停止車列の次の前方閉塞対象へ昇格
+5. `BlockedRiskAnalyzer::evaluatePassGap()`
    - 左右の追い越し可能幅を評価
-5. 曲率、壁余裕、未来横並びリスクを追加
+6. 曲率、壁余裕、未来横並びリスクを追加
    - `corner_abs_curvature`
    - `corner_side_by_side`
    - `straight_overtake_start_allowed`
@@ -164,20 +166,22 @@ MPCへ渡す候補軌道です。
    - `overtake_permission_section_name`
    - `overtake_permission_reason`
    - `slow_front_exception_active`
+   - `slow_obstacle_chain_active`
    - `ego_wall_clearance_m`
    - `FutureSideBySideRiskAnalyzer::evaluate()`
    - `future_side_by_side`
    - `future_outer_wall_risk`
    - `future_yield_required`
-6. 大きい横ずれ中の危険文脈では追い越し判断を凍結
+7. 大きい横ずれ中の危険文脈では追い越し判断を凍結
    - `can_pass_left/right=false`
+   - `pass_decision_frozen=true`
    - `RECOVERY` 候補を優先
-7. 候補軌道を生成
+8. 候補軌道を生成
    - `FASTEST`
    - 必要に応じて `FOLLOW`, `PASS_LEFT`, `PASS_RIGHT`, `SIDE_BY_SIDE_KEEP`, `YIELD_BEHIND`, `RECOVERY`
    - 通常fallbackが成立しないときだけ `SAFE_STOP`
-8. 各候補を安全評価
-9. 候補スコアで1つ選ぶ
+9. 各候補を安全評価
+10. 候補スコアで1つ選ぶ
 10. `BehaviorStateMachine` でモードを安定化
    - `straight_overtake_start_allowed=false` のときは、PASS候補が安全でも `PREPARE_OVERTAKE_LEFT/RIGHT` へ入らず `FOLLOW_BLOCKED` を維持する
 11. モードに合わせて候補を再生成
@@ -431,6 +435,7 @@ h = (x_body / safety_ellipse_a_m)^2
 
 - `speed_only_fallback_enabled`
   - `SIDE_BY_SIDE_KEEP` や `YIELD_BEHIND` が `opponent_collision` などでrejectされた場合、または `SAFE_STOP` 候補がunsafeな場合、現在横位置を保持するd列と低い `v_ref` を出す
+  - reject理由が `opponent_collision` の場合は、通常の `speed_only_fallback_v_max_mps` より `opponent_collision_fallback_v_max_mps` を優先し、安全ゲートで接触へ進み続けないようにする
 - `wall_risk_speed_guard_enabled`
   - 自車の壁余裕が `wall_soft_margin_m` 未満なら `wall_risk_v_max_mps` へ絞る
 - `mpc_health_speed_guard_enabled`
@@ -473,6 +478,7 @@ overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_G
 
 - `speed_only_fallback_enabled`
 - `speed_only_fallback_v_max_mps`
+- `opponent_collision_fallback_v_max_mps`
 - `wall_risk_speed_guard_enabled`
 - `wall_soft_margin_m`
 - `wall_risk_v_max_mps`
@@ -504,6 +510,8 @@ overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_G
 - `slow_front_exception_speed_mps`
 - `slow_front_exception_distance_m`
 - `slow_front_exception_required_cycles`
+- `slow_obstacle_chain_enabled`
+- `slow_obstacle_chain_distance_m`
 
 壁と復帰:
 
@@ -609,6 +617,7 @@ overtake decision:
 - 直線限定ゲートが閉じている区間では、gapがあっても追い越し開始へ入らない
 - 追い越し許可CSVで `allow_overtake=false` の区間では、gapがあっても追い越し開始へ入らず `FOLLOW_BLOCKED` を維持する
 - `allow_overtake=false` でも、前方車が停止/低速条件を連続で満たす場合だけ `slow_front_exception_active=true` としてPASS開始を許可する
+- 1台目通過後に2台目が `parallel_side_candidate` として見える停止車列では、条件を満たす場合だけ `slow_obstacle_chain_active=true` として前方閉塞へ昇格する
 - `overtake_permission_lookahead_m` 内に不可区間がある場合は、現在位置が許可区間でも追い越し開始を抑制する
 - 大きい横ずれ中は、parallel side candidateや壁リスクがあれば `RECOVERY` を優先する
 - `pass_gap_reason` は `no_target`, `ok`, `left_gap_narrow`, `right_gap_narrow`, `both_gap_narrow`, `large_lateral_error` の意味を崩さない

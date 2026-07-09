@@ -23,6 +23,7 @@
   <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
   <arg name="output_mpc_predicted_horizon" default="/mpc/predicted_horizon"/>
   <arg name="overtake_horizon_points" default="50"/>
+  <arg name="overtake_mpc_health_solve_time_warn_ms" default="80.0"/>
 
   <!-- localization odomを遅れ補償して、既存MPCが読む代替odomトピックを作る。 -->
   <node pkg="delay_aware_mpc_ros" exec="delay_compensated_odometry_node"
@@ -65,6 +66,7 @@
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
       <arg name="input_odom" value="/delay_aware_mpc/localization/kinematic_state"/>
       <arg name="horizon_points" value="$(var overtake_horizon_points)"/>
+      <arg name="mpc_health_solve_time_warn_ms" value="$(var overtake_mpc_health_solve_time_warn_ms)"/>
     </include>
   </group>
 </launch>

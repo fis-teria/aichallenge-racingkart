@@ -151,6 +151,12 @@ struct BlockedInfo {
   double parallel_side_s_dot_mps{0.0};
   bool parallel_side_direction_known{false};
   bool parallel_side_same_direction{true};
+  bool slow_obstacle_chain_active{false};
+  std::string slow_obstacle_chain_id{};
+  double slow_obstacle_chain_delta_s{std::numeric_limits<double>::infinity()};
+  double slow_obstacle_chain_delta_d{0.0};
+  double slow_obstacle_chain_speed_mps{
+      std::numeric_limits<double>::quiet_NaN()};
   bool future_side_by_side{false};
   bool future_corner_side_by_side{false};
   bool future_outer_wall_risk{false};
@@ -182,7 +188,14 @@ struct BlockedInfo {
   bool slow_front_exception_active{false};
   int slow_front_exception_count{0};
   double front_vehicle_speed_mps{std::numeric_limits<double>::quiet_NaN()};
+  bool pass_decision_frozen{false};
+  std::string pass_decision_freeze_reason{};
   std::string pass_gap_reason{};
+  bool leader_priority_active{false};
+  bool leader_priority_latched{false};
+  std::string leader_priority_id{};
+  double leader_priority_delta_s{std::numeric_limits<double>::infinity()};
+  std::string leader_priority_reason{};
 };
 
 struct SafeStopContext {
@@ -282,6 +295,8 @@ struct PlannerConfig {
   double slow_front_exception_speed_mps{1.0};
   double slow_front_exception_distance_m{8.0};
   int slow_front_exception_required_cycles{3};
+  bool slow_obstacle_chain_enabled{true};
+  double slow_obstacle_chain_distance_m{12.0};
   double large_lateral_error_threshold_m{0.60};
   double large_lateral_error_v_max_mps{2.5};
   double min_pass_gap_m{1.80};
@@ -325,6 +340,12 @@ struct PlannerConfig {
   double high_speed_curve_lateral_hold_release_curvature_m_inv{0.025};
   bool speed_only_fallback_enabled{true};
   double speed_only_fallback_v_max_mps{3.0};
+  double opponent_collision_fallback_v_max_mps{0.5};
+  bool side_by_side_leader_priority_enabled{true};
+  double side_by_side_leader_priority_enter_s_m{1.0};
+  double side_by_side_leader_priority_release_s_m{0.3};
+  double side_by_side_leader_priority_hold_sec{1.0};
+  double side_by_side_leader_priority_v_max_mps{3.0};
   bool wall_risk_speed_guard_enabled{true};
   double wall_soft_margin_m{0.25};
   double wall_risk_v_max_mps{5.0};

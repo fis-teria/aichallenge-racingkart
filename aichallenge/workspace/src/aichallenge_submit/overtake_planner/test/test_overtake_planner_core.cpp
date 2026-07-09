@@ -114,6 +114,29 @@ overtake_planner::PlannerConfig makeConfig() {
 
 } // namespace
 
+TEST(OvertakePlannerCore, PublicBehaviorModeIdsStayStable) {
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::FREE_RUN), 0);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::FOLLOW_BLOCKED), 1);
+  EXPECT_EQ(static_cast<int>(
+                overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT),
+            2);
+  EXPECT_EQ(static_cast<int>(
+                overtake_planner::BehaviorMode::PREPARE_OVERTAKE_RIGHT),
+            3);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::OVERTAKE_LEFT),
+            4);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::OVERTAKE_RIGHT),
+            5);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::MERGE_BACK), 6);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::ABORT_RECOVERY),
+            7);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::SIDE_BY_SIDE_KEEP),
+            8);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::YIELD_BEHIND), 9);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::SAFE_STOP), 10);
+  EXPECT_EQ(static_cast<int>(overtake_planner::BehaviorMode::SPEED_GUARD), 11);
+}
+
 TEST(OvertakePlannerCore, SideBySideOpponentOnLeftMovesRightAndOverrides) {
   const auto frame = makeStraightFrame();
   auto config = makeConfig();
@@ -545,8 +568,8 @@ TEST(OvertakePlannerCore, RejectedSideBySideKeepPublishesSpeedOnlyFallback) {
                           output.lateral_offsets.end(),
                           [](double d) { return std::abs(d) < 1.0e-9; }));
   ASSERT_FALSE(output.speed_caps.empty());
-  EXPECT_NEAR(output.speed_caps.back(), config.speed_only_fallback_v_max_mps,
-              1.0e-9);
+  EXPECT_NEAR(output.speed_caps.back(),
+              config.opponent_collision_fallback_v_max_mps, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, RejectedYieldBehindPublishesSpeedOnlyFallback) {
@@ -573,8 +596,8 @@ TEST(OvertakePlannerCore, RejectedYieldBehindPublishesSpeedOnlyFallback) {
                           output.lateral_offsets.end(),
                           [](double d) { return std::abs(d) < 1.0e-9; }));
   ASSERT_FALSE(output.speed_caps.empty());
-  EXPECT_NEAR(output.speed_caps.back(), config.speed_only_fallback_v_max_mps,
-              1.0e-9);
+  EXPECT_NEAR(output.speed_caps.back(),
+              config.opponent_collision_fallback_v_max_mps, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, WallMarginRecoveryStartsInsideCorridorAndSlows) {
@@ -697,6 +720,9 @@ TEST(OvertakePlannerCore, LargeLateralErrorFreezesPassDecisionToRecovery) {
   EXPECT_TRUE(output.blocked_info.blocked);
   EXPECT_FALSE(output.blocked_info.can_pass_left);
   EXPECT_FALSE(output.blocked_info.can_pass_right);
+  EXPECT_TRUE(output.blocked_info.pass_decision_frozen);
+  EXPECT_EQ(output.blocked_info.pass_decision_freeze_reason,
+            "large_lateral_error");
   EXPECT_EQ(output.blocked_info.pass_gap_reason, "large_lateral_error");
   EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
   EXPECT_EQ(output.selected, overtake_planner::CandidateType::RECOVERY);
@@ -728,6 +754,9 @@ TEST(OvertakePlannerCore,
   EXPECT_TRUE(output.blocked_info.parallel_side_candidate);
   EXPECT_FALSE(output.blocked_info.can_pass_left);
   EXPECT_FALSE(output.blocked_info.can_pass_right);
+  EXPECT_TRUE(output.blocked_info.pass_decision_frozen);
+  EXPECT_EQ(output.blocked_info.pass_decision_freeze_reason,
+            "large_lateral_error");
   EXPECT_EQ(output.blocked_info.pass_gap_reason, "large_lateral_error");
   EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
   EXPECT_EQ(output.selected, overtake_planner::CandidateType::RECOVERY);
@@ -983,6 +1012,27 @@ TEST(OvertakePlannerCore, MpcHealthSolveTimePublishesSpeedGuard) {
   EXPECT_NEAR(output.mpc_health.solve_time_ms, health.solve_time_ms, 1.0e-9);
 }
 
+TEST(OvertakePlannerCore, RaisedMpcHealthSolveTimeThresholdSuppressesSpeedGuard) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.mpc_health_solve_time_warn_ms = 200.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  overtake_planner::MpcHealthStatus health;
+  health.valid = true;
+  health.infeasible_count = 0;
+  health.solve_time_ms = 80.0;
+  health.age_sec = 0.1;
+
+  const auto output = core.update(0.1, ego, {}, health);
+
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::FREE_RUN);
+  EXPECT_FALSE(output.active_override);
+  EXPECT_FALSE(output.mpc_health_speed_guard_active);
+  EXPECT_TRUE(output.speed_cap_reason.empty());
+}
+
 TEST(OvertakePlannerCore, MpcHealthSolveTimePreservesFeasibleLateralOverride) {
   const auto frame = makeStraightFrame();
   auto config = makeConfig();
@@ -1234,6 +1284,38 @@ TEST(OvertakePlannerCore, StartGraceSuppressesSafeStopForSideBySideStartRisk) {
   EXPECT_TRUE(output.start_grace_active);
   EXPECT_FALSE(output.safe_stop_triggered);
   EXPECT_EQ(output.safe_stop_trigger_count, 0);
+  EXPECT_EQ(output.reason, "start_grace_safe_stop_suppressed");
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_GT(output.speed_caps.back(), config.safe_stop_v_mps);
+}
+
+TEST(OvertakePlannerCore,
+     StartGraceUsesFirstMotionInsteadOfFirstValidUpdate) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.safe_stop_trigger_cycles = 1;
+  config.start_grace_safe_stop_enabled = true;
+  config.start_grace_duration_sec = 1.0;
+  config.start_grace_max_speed_mps = 1.5;
+  config.opponent_stale_time_sec = 5.0;
+  config.speed_only_fallback_v_max_mps = 8.0;
+  config.safety_ellipse_a_m = 2.0;
+  config.safety_ellipse_b_m = 2.0;
+  config.large_lateral_error_threshold_m = 0.60;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  auto ego = makeEgo(frame, 5.0, 1.20);
+  ego.v = 0.0;
+  const auto idle = core.update(0.1, ego, {});
+  ASSERT_FALSE(idle.safe_stop_triggered);
+
+  ego.v = 0.3;
+  const auto opponent = makeOpponent(frame, 5.2, -0.60);
+  const auto output = core.update(2.5, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.parallel_side_candidate);
+  EXPECT_TRUE(output.start_grace_active);
+  EXPECT_FALSE(output.safe_stop_triggered);
   EXPECT_EQ(output.reason, "start_grace_safe_stop_suppressed");
   ASSERT_FALSE(output.speed_caps.empty());
   EXPECT_GT(output.speed_caps.back(), config.safe_stop_v_mps);
@@ -1526,6 +1608,144 @@ TEST(OvertakePlannerCore, InfeasibleSafeStopPublishesSpeedOnlyFallback) {
   ASSERT_FALSE(output.speed_caps.empty());
   EXPECT_GT(output.speed_caps.back(), 0.0);
   EXPECT_LE(output.speed_caps.back(), config.speed_only_fallback_v_max_mps);
+  EXPECT_LE(output.speed_caps.back(),
+            config.opponent_collision_fallback_v_max_mps);
+}
+
+TEST(OvertakePlannerCore,
+     LeaderSideBySideInfeasibleSafeStopRelaxesCollisionFallbackCap) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.safe_stop_trigger_cycles = 1;
+  config.side_by_side_s_m = 4.0;
+  config.side_by_side_leader_priority_enabled = true;
+  config.side_by_side_leader_priority_enter_s_m = 1.0;
+  config.side_by_side_leader_priority_release_s_m = 0.3;
+  config.side_by_side_leader_priority_v_max_mps = 2.8;
+  config.opponent_collision_fallback_v_max_mps = 0.5;
+  config.safety_ellipse_a_m = 3.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto opponent = makeOpponent(frame, 3.0, 0.0);
+  opponent.vx = 0.0;
+  opponent.v = 0.0;
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.side_by_side);
+  EXPECT_FALSE(output.blocked_info.blocked);
+  EXPECT_LT(output.blocked_info.side_delta_s,
+            -config.side_by_side_leader_priority_enter_s_m);
+  EXPECT_TRUE(output.blocked_info.leader_priority_active);
+  EXPECT_FALSE(output.blocked_info.leader_priority_latched);
+  EXPECT_EQ(output.blocked_info.leader_priority_id, "npc");
+  EXPECT_FALSE(output.safe_stop_triggered);
+  EXPECT_TRUE(output.safe_stop_reason.empty());
+  EXPECT_TRUE(output.safe_stop_reject_reason.empty());
+  EXPECT_TRUE(output.speed_only_fallback_active);
+  EXPECT_EQ(output.speed_cap_reason, "speed_only_fallback_leader_priority");
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_NEAR(output.speed_caps.back(),
+              config.side_by_side_leader_priority_v_max_mps, 1.0e-9);
+  EXPECT_GT(output.speed_caps.back(),
+            config.opponent_collision_fallback_v_max_mps);
+}
+
+TEST(OvertakePlannerCore,
+     RearSideBySideInfeasibleSafeStopKeepsCollisionFallbackCap) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.safe_stop_trigger_cycles = 1;
+  config.side_by_side_s_m = 4.0;
+  config.side_by_side_leader_priority_enabled = true;
+  config.side_by_side_leader_priority_enter_s_m = 1.0;
+  config.side_by_side_leader_priority_v_max_mps = 2.8;
+  config.opponent_collision_fallback_v_max_mps = 0.5;
+  config.safety_ellipse_a_m = 3.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto opponent = makeOpponent(frame, 7.0, 0.0);
+  opponent.vx = 0.0;
+  opponent.v = 0.0;
+
+  const auto output = core.update(0.1, ego, {opponent});
+
+  EXPECT_TRUE(output.blocked_info.side_by_side);
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_GT(output.blocked_info.side_delta_s,
+            config.side_by_side_leader_priority_enter_s_m);
+  EXPECT_FALSE(output.blocked_info.leader_priority_active);
+  EXPECT_TRUE(output.safe_stop_triggered);
+  EXPECT_EQ(output.safe_stop_reason, "safe_stop_infeasible");
+  EXPECT_EQ(output.safe_stop_reject_reason, "opponent_collision");
+  EXPECT_TRUE(output.speed_only_fallback_active);
+  EXPECT_EQ(output.speed_cap_reason,
+            "speed_only_fallback_safe_stop_infeasible");
+  ASSERT_FALSE(output.speed_caps.empty());
+  EXPECT_NEAR(output.speed_caps.back(),
+              config.opponent_collision_fallback_v_max_mps, 1.0e-9);
+}
+
+TEST(OvertakePlannerCore, SeparateFrontVehicleBlocksLeaderPriority) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.safe_stop_enabled = false;
+  config.side_by_side_s_m = 4.0;
+  config.side_by_side_leader_priority_enabled = true;
+  config.side_by_side_leader_priority_enter_s_m = 2.5;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto side = makeOpponent(frame, 3.8, 0.6);
+  side.id = "side";
+  auto front = makeOpponent(frame, 8.0, 0.0);
+  front.id = "front";
+
+  const auto output = core.update(0.1, ego, {side, front});
+
+  EXPECT_TRUE(output.blocked_info.side_by_side);
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_EQ(output.blocked_info.side_id, "side");
+  EXPECT_EQ(output.blocked_info.nearest_id, "front");
+  EXPECT_FALSE(output.blocked_info.leader_priority_active);
+}
+
+TEST(OvertakePlannerCore, LeaderPriorityHoldsAcrossSmallDeltaSChange) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.safe_stop_trigger_cycles = 1;
+  config.side_by_side_s_m = 4.0;
+  config.side_by_side_leader_priority_enabled = true;
+  config.side_by_side_leader_priority_enter_s_m = 1.0;
+  config.side_by_side_leader_priority_release_s_m = 0.3;
+  config.side_by_side_leader_priority_hold_sec = 1.0;
+  config.side_by_side_leader_priority_v_max_mps = 2.8;
+  config.opponent_collision_fallback_v_max_mps = 0.5;
+  config.safety_ellipse_a_m = 3.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto clear_lead_opponent = makeOpponent(frame, 2.0, 0.0);
+  clear_lead_opponent.vx = 0.0;
+  clear_lead_opponent.v = 0.0;
+  const auto first = core.update(0.1, ego, {clear_lead_opponent});
+  ASSERT_TRUE(first.blocked_info.leader_priority_active);
+  ASSERT_FALSE(first.blocked_info.leader_priority_latched);
+
+  auto still_behind_opponent = makeOpponent(frame, 4.0, 0.0);
+  still_behind_opponent.vx = 0.0;
+  still_behind_opponent.v = 0.0;
+  const auto second = core.update(0.2, ego, {still_behind_opponent});
+
+  EXPECT_TRUE(second.blocked_info.leader_priority_active);
+  EXPECT_TRUE(second.blocked_info.leader_priority_latched);
+  EXPECT_EQ(second.blocked_info.leader_priority_reason, "leader_priority_hold");
+  EXPECT_EQ(second.speed_cap_reason, "speed_only_fallback_leader_priority");
+  ASSERT_FALSE(second.speed_caps.empty());
+  EXPECT_NEAR(second.speed_caps.back(),
+              config.side_by_side_leader_priority_v_max_mps, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore,
@@ -1630,6 +1850,156 @@ TEST(OvertakePlannerCore, CurvedRoadStraightOnlyGatePreventsPassStart) {
   EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
   EXPECT_EQ(output.selected, overtake_planner::CandidateType::FOLLOW);
   EXPECT_TRUE(output.active_override);
+}
+
+TEST(OvertakePlannerCore,
+     SlowFrontExceptionAllowsPassStartDespiteCurveGate) {
+  const auto frame = makeCurvedFrame();
+  auto config = makeConfig();
+  config.straight_only_overtake_enabled = true;
+  config.straight_overtake_max_curvature_m_inv = 0.025;
+  config.straight_overtake_lookahead_m = 8.0;
+  config.slow_front_exception_enabled = true;
+  config.slow_front_exception_speed_mps = 1.0;
+  config.slow_front_exception_distance_m = 8.5;
+  config.slow_front_exception_required_cycles = 2;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto stopped_opponent = makeOpponent(frame, 13.0, -0.7);
+  stopped_opponent.vx = 0.0;
+  stopped_opponent.v = 0.0;
+
+  const auto first = core.update(0.1, ego, {stopped_opponent});
+  EXPECT_FALSE(first.blocked_info.slow_front_exception_active);
+  EXPECT_FALSE(first.blocked_info.straight_overtake_start_allowed);
+  EXPECT_EQ(first.blocked_info.overtake_start_gate_reason, "curve");
+  EXPECT_EQ(first.mode, overtake_planner::BehaviorMode::FOLLOW_BLOCKED);
+
+  const auto second = core.update(0.2, ego, {stopped_opponent});
+  EXPECT_TRUE(second.blocked_info.front_vehicle_low_speed);
+  EXPECT_TRUE(second.blocked_info.slow_front_exception_active);
+  EXPECT_TRUE(second.blocked_info.straight_overtake_start_allowed);
+  EXPECT_EQ(second.blocked_info.overtake_start_gate_reason,
+            "slow_front_exception_curve");
+  EXPECT_TRUE(second.blocked_info.can_pass_left);
+  EXPECT_EQ(second.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+  EXPECT_EQ(second.selected, overtake_planner::CandidateType::PASS_LEFT);
+}
+
+TEST(OvertakePlannerCore, SlowParallelSideObstaclePromotesToBlockedPassTarget) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.min_pass_gap_m = 0.2;
+  config.safety_ellipse_b_m = 0.1;
+  config.slow_front_exception_enabled = true;
+  config.slow_front_exception_speed_mps = 1.0;
+  config.slow_front_exception_required_cycles = 1;
+  config.slow_obstacle_chain_enabled = true;
+  config.slow_obstacle_chain_distance_m = 12.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto stopped_parallel_front = makeOpponent(frame, 11.0, -1.0);
+  stopped_parallel_front.vx = 0.0;
+  stopped_parallel_front.v = 0.0;
+
+  const auto output = core.update(0.1, ego, {stopped_parallel_front});
+
+  EXPECT_TRUE(output.blocked_info.parallel_side_candidate);
+  EXPECT_TRUE(output.blocked_info.slow_obstacle_chain_active);
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_EQ(output.blocked_info.nearest_id, "npc");
+  EXPECT_EQ(output.blocked_info.slow_obstacle_chain_id, "npc");
+  EXPECT_TRUE(output.blocked_info.front_vehicle_low_speed);
+  EXPECT_TRUE(output.blocked_info.slow_front_exception_active);
+  EXPECT_TRUE(output.blocked_info.can_pass_left);
+  EXPECT_FALSE(output.blocked_info.can_pass_right);
+  EXPECT_EQ(output.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::PASS_LEFT);
+}
+
+TEST(OvertakePlannerCore,
+     SlowParallelSideObstacleExceptionAllowsPassDespiteCurveGate) {
+  const auto frame = makeCurvedFrame();
+  auto config = makeConfig();
+  config.min_pass_gap_m = 0.2;
+  config.safety_ellipse_b_m = 0.1;
+  config.straight_only_overtake_enabled = true;
+  config.straight_overtake_max_curvature_m_inv = 0.025;
+  config.straight_overtake_lookahead_m = 8.0;
+  config.slow_front_exception_enabled = true;
+  config.slow_front_exception_speed_mps = 1.0;
+  config.slow_front_exception_required_cycles = 1;
+  config.slow_obstacle_chain_enabled = true;
+  config.slow_obstacle_chain_distance_m = 12.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  auto stopped_parallel_front = makeOpponent(frame, 11.0, -1.0);
+  stopped_parallel_front.vx = 0.0;
+  stopped_parallel_front.v = 0.0;
+
+  const auto output = core.update(0.1, ego, {stopped_parallel_front});
+
+  EXPECT_TRUE(output.blocked_info.slow_obstacle_chain_active);
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_TRUE(output.blocked_info.slow_front_exception_active);
+  EXPECT_TRUE(output.blocked_info.straight_overtake_start_allowed);
+  EXPECT_EQ(output.blocked_info.overtake_start_gate_reason,
+            "slow_front_exception_curve");
+  EXPECT_EQ(output.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::PASS_LEFT);
+}
+
+TEST(OvertakePlannerCore,
+     SlowObstacleChainKeepsLatchedPassCorridorForNextObstacle) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.min_pass_gap_m = 0.2;
+  config.safety_ellipse_b_m = 0.1;
+  config.min_mode_hold_time_sec = 0.0;
+  config.overtake_lateral_profile_mode = "localized_latched";
+  config.localized_avoidance_start_before_target_m = 6.0;
+  config.localized_avoidance_full_offset_before_target_m = 2.0;
+  config.localized_avoidance_hold_after_target_m = 5.0;
+  config.localized_avoidance_merge_distance_m = 8.0;
+  config.maneuver_latch_min_hold_sec = 1.0;
+  config.slow_front_exception_enabled = true;
+  config.slow_front_exception_speed_mps = 1.0;
+  config.slow_front_exception_required_cycles = 1;
+  config.slow_obstacle_chain_enabled = true;
+  config.slow_obstacle_chain_distance_m = 12.0;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto first_ego = makeEgo(frame, 5.0, 0.0);
+  auto first_obstacle = makeOpponent(frame, 11.0, -1.0);
+  first_obstacle.id = "d2";
+  first_obstacle.vx = 0.0;
+  first_obstacle.v = 0.0;
+  const auto first = core.update(0.1, first_ego, {first_obstacle});
+  ASSERT_EQ(first.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+  ASSERT_TRUE(first.maneuver_latch_active);
+  ASSERT_GT(first.target_lateral_offset_m, 0.0);
+
+  const auto second_ego = makeEgo(frame, 12.0, 0.45);
+  auto next_obstacle = makeOpponent(frame, 18.0, -1.0);
+  next_obstacle.id = "d3";
+  next_obstacle.vx = 0.0;
+  next_obstacle.v = 0.0;
+  const auto second = core.update(0.2, second_ego, {next_obstacle});
+
+  EXPECT_TRUE(second.blocked_info.slow_obstacle_chain_active);
+  EXPECT_EQ(second.blocked_info.slow_obstacle_chain_id, "d3");
+  EXPECT_EQ(second.mode, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
+  EXPECT_EQ(second.selected, overtake_planner::CandidateType::PASS_LEFT);
+  EXPECT_TRUE(second.maneuver_latch_active);
+  EXPECT_GT(second.target_lateral_offset_m, 0.0);
+  EXPECT_NEAR(second.lateral_offsets.front(), second_ego.frenet.d, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, OvertakePermissionDisallowedSectionKeepsFollow) {

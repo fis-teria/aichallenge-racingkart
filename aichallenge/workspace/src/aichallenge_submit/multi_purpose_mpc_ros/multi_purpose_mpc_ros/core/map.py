@@ -159,8 +159,18 @@ class Map:
             # Add circular object to map
             y, x = np.ogrid[-radius_px: radius_px, -radius_px: radius_px]
             index = x ** 2 + y ** 2 <= radius_px ** 2
-            self.data[cy_px-radius_px:cy_px+radius_px, cx_px-radius_px:
-                                                cx_px+radius_px][index] = 0
+            x0 = max(cx_px - radius_px, 0)
+            x1 = min(cx_px + radius_px, self.width)
+            y0 = max(cy_px - radius_px, 0)
+            y1 = min(cy_px + radius_px, self.height)
+            if x0 >= x1 or y0 >= y1:
+                continue
+            mask_x0 = x0 - (cx_px - radius_px)
+            mask_x1 = mask_x0 + (x1 - x0)
+            mask_y0 = y0 - (cy_px - radius_px)
+            mask_y1 = mask_y0 + (y1 - y0)
+            self.data[y0:y1, x0:x1][
+                index[mask_y0:mask_y1, mask_x0:mask_x1]] = 0
 
     def add_boundary(self, boundaries):
         """

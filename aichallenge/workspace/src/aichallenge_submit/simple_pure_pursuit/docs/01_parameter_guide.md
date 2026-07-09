@@ -43,7 +43,7 @@ hybrid launch では `simple_pure_pursuit` の入力 odom がすでに `/delay_a
 | `use_external_target_vel` | trajectory の速度ではなく `external_target_vel` を使うか。 | hybrid fallback では `true` にして、PP の基本速度を明示します。 |
 | `external_target_vel` | 外部指定の目標速度。 | 高いほど勝ちに行けますが、MPC timeout 後の回避余裕は減ります。 |
 
-MPC horizon を使う場合、horizon 上の最近傍点速度が `external_target_vel` より低ければ、PP の速度は horizon 側で cap されます。さらに overtake override の speed cap が有効なら、その cap も適用されます。
+MPC horizon を使う場合、horizon 上の速度が `external_target_vel` より低ければ、PP の速度は horizon 側で cap されます。`neutral_reference` / `fixed_neutral_reference` では、現在poseを表す先頭アンカー点の速度だけでcapすると停止付近で加速できなくなるため、速度capは最近傍点から少し先の点を参照します。`solver_prediction` ではMPCが出した即時減速を尊重するため、最近傍点速度をそのまま使います。さらに overtake override の speed cap が有効なら、その cap も適用されます。
 
 ## 入力stale guard
 
@@ -84,12 +84,13 @@ horizon は以下を満たす時だけ使われます。
 MPC側の `/mpc/predicted_horizon` は、`OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK` 中だけ solver の予測結果をpublishします。
 それ以外の通常走行、追従、追い越し準備中は、現在poseとMPC参照pathから作る neutral horizon をpublishします。
 `neutral_horizon_publish_period_sec > 0` の場合、neutral horizon はMPC solve loopから分離され、固定周期のtimerで `fixed_neutral_reference` としてpublishされます。
+neutral horizon の先頭アンカー点は現在poseを表しますが、速度は現在速度ではなく参照path速度を優先して入れます。
 これにより、MPC solverが一時的に重くなっても PP fallback が horizon を stale 扱いしにくくなります。
 `neutral_reference` を生成できない場合は、追い越し込み solver horizon へ戻さず empty horizon をpublishします。
 これにより、PP fallbackが通常走行中に古い追い越し横オフセットを追い続けることを避けます。
 
-`pure_pursuit_mpc_horizon` では、MPC側の `predicted_horizon_publish_mode` を `solver_when_solved` にします。
-このモードではMPCが解けた時だけsolver予測horizonを出し、解けない時はempty horizonになります。
+`pure_pursuit_mpc_horizon` では、MPC側の `predicted_horizon_publish_mode` を `overtake_or_neutral` にします。
+このモードでは `OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK` 中だけsolver予測horizonを出し、それ以外は固定周期のneutral horizonを出します。
 Pure Pursuit側はhealth gateでempty/unsolved horizonを採用せず、通常trajectoryとovertake overrideによる走行へ戻ります。
 
 ## 曲率適応lookahead

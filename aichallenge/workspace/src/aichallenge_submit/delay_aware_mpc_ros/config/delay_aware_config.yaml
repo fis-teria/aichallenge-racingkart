@@ -150,5 +150,6 @@ mpc:
 
 v2x_obstacle_avoidance:
   vehicle_radius: 0.75          # [m]
+  prediction_obstacle_min_spacing_m: 0.50 # [m]
   v_max_safety: 30.0           # [m/s]
   position_jump_threshold: 5.0 # [m]

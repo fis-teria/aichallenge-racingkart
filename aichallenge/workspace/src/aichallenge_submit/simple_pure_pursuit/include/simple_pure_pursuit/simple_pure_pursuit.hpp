@@ -12,6 +12,7 @@
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <memory>
 #include <nav_msgs/msg/odometry.hpp>
 #include <optional>
 #include <rclcpp/rclcpp.hpp>
@@ -129,6 +130,52 @@ private:
     std::string steering_source{"last_command"};
   };
 
+  // onTimer()が扱う参照trajectoryを1つに正規化した結果。
+  // 通常trajectory、MPC predicted horizon、overtake override適用後trajectoryの
+  // どれを使ったかを、制御計算とdebug出力へ同じ契約で渡す。
+  struct ControlTrajectoryContext {
+    bool valid{false};
+    std::string invalid_reason{"empty_trajectory"};
+    std::shared_ptr<Trajectory> owned_trajectory;
+    const Trajectory *trajectory{nullptr};
+    std::size_t nearest_index{0};
+    bool mpc_horizon_applied{false};
+    bool overtake_override_applied{false};
+    std::string source{"trajectory"};
+    HorizonFreshnessResult mpc_horizon_freshness{};
+  };
+
+  // 縦方向制御の中間結果。
+  // 速度capの出所を保持して、最終cmdとdebug JSONで同じ値を使う。
+  struct LongitudinalCommand {
+    double target_speed_mps{0.0};
+    double current_speed_mps{0.0};
+    double acceleration_mps2{0.0};
+    bool mpc_horizon_velocity_cap_applied{false};
+    double mpc_horizon_velocity_cap_mps{-1.0};
+    double overtake_speed_cap_mps{0.0};
+  };
+
+  // 横方向pure pursuit計算の中間結果。
+  // lookahead点、曲率、feed-forward量をまとめてdebug出力の引数肥大化を抑える。
+  struct LateralCommand {
+    double base_lookahead_distance_m{0.0};
+    double desired_lookahead_distance_m{0.0};
+    double lookahead_distance_m{0.0};
+    double path_curvature_1pm{0.0};
+    double signed_path_curvature_1pm{0.0};
+    double curvature_window_distance_m{0.0};
+    double lookahead_point_x{0.0};
+    double lookahead_point_y{0.0};
+    double rear_x{0.0};
+    double rear_y{0.0};
+    double alpha_rad{0.0};
+    double pure_pursuit_steering_tire_angle_rad{0.0};
+    double curvature_feedforward_steering_rad{0.0};
+    double raw_steering_tire_angle_rad{0.0};
+    double steering_tire_angle_rad{0.0};
+  };
+
   void onTimer();
   double steadyNowSec() const;
   ControlPosePrediction predictControlPose(double now_sec) const;
@@ -136,6 +183,21 @@ private:
   estimateCurrentSteering(double now_sec, double *steering_age_sec) const;
   FreshnessResult evaluateInputFreshness(double now_sec) const;
   HorizonFreshnessResult evaluateMpcPredictedHorizon(double now_sec) const;
+  bool handleInvalidFreshness(const rclcpp::Time &stamp,
+                              const FreshnessResult &freshness);
+  void clearStaleOvertakeOverride(double now_sec);
+  ControlTrajectoryContext
+  selectControlTrajectory(const ControlPosePrediction &control_pose,
+                          double now_sec,
+                          const HorizonFreshnessResult &mpc_horizon_freshness);
+  LongitudinalCommand
+  computeLongitudinalCommand(const ControlTrajectoryContext &context,
+                             double now_sec) const;
+  LateralCommand
+  computeLateralCommand(const ControlTrajectoryContext &context,
+                        const ControlPosePrediction &control_pose,
+                        const LongitudinalCommand &longitudinal);
+  void publishLookaheadPoint(double x, double y, double z);
   void publishStopForStaleInput(const rclcpp::Time &stamp,
                                 const FreshnessResult &freshness);
   void publishStaleDebug(const rclcpp::Time &stamp,

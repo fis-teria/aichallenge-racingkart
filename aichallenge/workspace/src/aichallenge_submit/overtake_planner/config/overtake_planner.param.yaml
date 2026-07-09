@@ -53,6 +53,8 @@ overtake_planner_node:
     slow_front_exception_speed_mps: 1.0
     slow_front_exception_distance_m: 8.0
     slow_front_exception_required_cycles: 3
+    slow_obstacle_chain_enabled: true
+    slow_obstacle_chain_distance_m: 12.0
     large_lateral_error_threshold_m: 0.60
     large_lateral_error_v_max_mps: 8.5
     min_pass_gap_m: 1.8
@@ -62,7 +64,7 @@ overtake_planner_node:
     yield_rejoin_gap_m: 3.0
     left_offset_m: 0.80
     right_offset_m: -0.80
-    overtake_lateral_profile_mode: "legacy"  # legacy / localized_latched
+    overtake_lateral_profile_mode: "localized_latched"  # legacy / localized_latched
     pass_horizon_publish_mode: "overtake_only"  # prepare_and_overtake / overtake_only
     localized_avoidance_start_before_target_m: 6.0
     localized_avoidance_full_offset_before_target_m: 2.0
@@ -94,17 +96,23 @@ overtake_planner_node:
     high_speed_curve_lateral_hold_release_speed_mps: 2.5
     high_speed_curve_lateral_hold_release_curvature_m_inv: 0.025
     speed_only_fallback_enabled: true
-    speed_only_fallback_v_max_mps: 8.0
+    speed_only_fallback_v_max_mps: 3.0
+    opponent_collision_fallback_v_max_mps: 0.5
+    side_by_side_leader_priority_enabled: true
+    side_by_side_leader_priority_enter_s_m: 1.0
+    side_by_side_leader_priority_release_s_m: 0.3
+    side_by_side_leader_priority_hold_sec: 1.0
+    side_by_side_leader_priority_v_max_mps: 3.0
     wall_risk_speed_guard_enabled: true
     wall_soft_margin_m: 0.25
     wall_risk_v_max_mps: 8.0
     mpc_health_speed_guard_enabled: true
     mpc_health_infeasible_count_threshold: 1
     mpc_health_solve_time_warn_ms: 80.0
-    mpc_health_v_max_mps: 8.0
+    mpc_health_v_max_mps: 3.0
     mpc_health_stale_time_sec: 0.60
     recovery_speed_guard_enabled: true
-    recovery_speed_guard_v_max_mps: 8.0
+    recovery_speed_guard_v_max_mps: 3.0
     section_safety_profile_enabled: true
     # Add same-length arrays to enable section presets, e.g. names/profiles/start_wp/end_wp.
     safe_stop_enabled: true

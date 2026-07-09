@@ -1,6 +1,8 @@
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+import yaml
+
 
 def _aichallenge_submit_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -180,7 +182,8 @@ def test_pure_pursuit_mpc_horizon_keeps_mpc_as_horizon_generator():
     assert delay_args["output_mpc_predicted_horizon"] == (
         "/pure_pursuit_mpc_horizon/mpc/predicted_horizon"
     )
-    assert delay_args["overtake_horizon_points"] == "20"
+    assert delay_args["overtake_horizon_points"] == "40"
+    assert delay_args["overtake_mpc_health_solve_time_warn_ms"] == "200.0"
     assert pp_args["input_mpc_predicted_horizon"] == (
         "/pure_pursuit_mpc_horizon/mpc/predicted_horizon"
     )
@@ -190,6 +193,19 @@ def test_pure_pursuit_mpc_horizon_keeps_mpc_as_horizon_generator():
     assert mux_args["input_pure_pursuit_cmd"] == (
         "/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd"
     )
+
+
+def test_pure_pursuit_mpc_horizon_config_publishes_neutral_outside_overtake():
+    config_path = (
+        _aichallenge_submit_root()
+        / "delay_aware_mpc_ros/config/pure_pursuit_mpc_horizon_config.yaml"
+    )
+    with config_path.open() as stream:
+        config = yaml.safe_load(stream)
+
+    mpc_config = config["mpc"]
+    assert mpc_config["predicted_horizon_publish_mode"] == "overtake_or_neutral"
+    assert mpc_config["neutral_horizon_publish_period_sec"] == 0.05
 
 
 def test_reference_launch_exposes_pure_pursuit_mpc_horizon_control_method():

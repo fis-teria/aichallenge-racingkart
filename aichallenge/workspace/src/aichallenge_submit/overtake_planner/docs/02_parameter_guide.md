@@ -43,7 +43,7 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 | `side_by_side_target_gap_m` | `0.75` | `0.75` | 相手から離れる横距離。上げると接触余裕は増えるが壁側へ逃げやすい。 |
 | `side_by_side_shift_distance_m` | `7.0` | `7.0` | 横方向へ移る距離。上げると操舵が穏やか。 |
 | `wall_risk_v_max_mps` | `8.0` | `5.0` | 壁リスク時の速度上限。下げると壁際の破綻を抑えやすい。 |
-| `mpc_health_v_max_mps` | `8.0` | `3.0` | MPC不調時の速度上限。下げると計算破綻時に保守的。 |
+| `mpc_health_v_max_mps` | `3.0` | `3.0` | MPC不調時の速度上限。下げると計算破綻時に保守的。 |
 | `recovery_speed_guard_v_max_mps` | `3.0` | `3.0` | `RECOVERY` / `ABORT_RECOVERY` 中だけ、壁リスク・MPC不調・大横ずれ時に追加で速度を絞る。通常の壁/MPC capを攻めた値にしている場合の保険。 |
 
 スタート直後から第1コーナーまで横並びを認識しない場合:
@@ -78,6 +78,8 @@ ref velocity区間を元に追い越し開始を許可/禁止したい場合:
 | `slow_front_exception_speed_mps` | `1.0` | `1.0` | 停止/低速とみなす前方車速度。 |
 | `slow_front_exception_distance_m` | `8.0` | `8.0` | 低速例外を許す前方距離。 |
 | `slow_front_exception_required_cycles` | `3` | `3` | 低速例外に必要な連続判定周期数。 |
+| `slow_obstacle_chain_enabled` | `true` | `true` | 1台目通過後に2台目が `parallel_side` として見える停止車列を前方閉塞へ昇格する。 |
+| `slow_obstacle_chain_distance_m` | `12.0` | `12.0` | 停止車列として昇格するparallel-side前方距離。 |
 
 CSV例:
 
@@ -186,6 +188,8 @@ s9,335,1,true
 | `slow_front_exception_speed_mps` | `1.0` | `1.0` | 低速例外の相手速度しきい値。 |
 | `slow_front_exception_distance_m` | `8.0` | `8.0` | 低速例外を使う前方距離。 |
 | `slow_front_exception_required_cycles` | `3` | `3` | 低速例外を確定する連続周期数。 |
+| `slow_obstacle_chain_enabled` | `true` | `true` | frontではなくparallel-sideで見えた停止/低速前方車もPASS対象に載せる。 |
+| `slow_obstacle_chain_distance_m` | `12.0` | `12.0` | slow obstacle chain昇格を許す前方距離。 |
 | `corner_side_yield_curvature_m_inv` | `0.05` | `0.05` | 横並び中に譲りを強めるコーナー曲率。下げるほど緩いカーブでも譲る。 |
 | `corner_side_yield_lookahead_m` | `10.0` | `10.0` | 横並びコーナー判定で曲率を見る前方距離。 |
 | `large_lateral_error_threshold_m` | `0.60` | `0.60` | 横ずれがこの値を超え、危険文脈があるとPASSを凍結して復帰寄りにする。 |
@@ -202,6 +206,7 @@ s9,335,1,true
 |---|---:|---:|---|
 | `left_offset_m` | `0.80` | `0.80` | 左追い越し時の目標d。 |
 | `right_offset_m` | `-0.80` | `-0.80` | 右追い越し時の目標d。 |
+| `overtake_lateral_profile_mode` | `localized_latched` | `legacy` | `localized_latched` では停止車列の対象sと回避区間を保持し、通過直後に中心へ戻りすぎるのを抑える。 |
 | `pass_horizon_publish_mode` | `overtake_only` | `prepare_and_overtake` | `overtake_only` では `PREPARE_OVERTAKE_*` 中に内部PASS判定だけ進め、MPCへはFOLLOW horizonを出す。 |
 | `prepare_distance_m` | `8.0` | `8.0` | PASS目標dへ移る距離。上げると横移動が穏やか。 |
 | `merge_distance_m` | `12.0` | `12.0` | 中心線へ戻る距離。 |
@@ -281,14 +286,20 @@ upper_d = d_max_m - min_wall_margin_m
 | パラメータ | 現在値 | fallback | 変更すると何が変わるか |
 |---|---:|---:|---|
 | `speed_only_fallback_enabled` | `true` | `true` | unsafeな横方向候補やSAFE_STOP infeasible時に速度only fallbackを出す。 |
-| `speed_only_fallback_v_max_mps` | `8.0` | `3.0` | 速度only fallbackの上限。 |
+| `speed_only_fallback_v_max_mps` | `3.0` | `3.0` | 速度only fallbackの上限。 |
+| `opponent_collision_fallback_v_max_mps` | `0.5` | `0.5` | `opponent_collision` で横候補がunsafeな場合だけ使う低速上限。後続車や優先権なしの膠着ではこちらを使う。 |
+| `side_by_side_leader_priority_enabled` | `true` | `true` | 横並び/並走で自車が明確に先行している場合だけ、SAFE_STOP要求と `opponent_collision` fallbackの低速固定を緩める。安全評価自体は無効化しない。 |
+| `side_by_side_leader_priority_enter_s_m` | `1.0` | `1.0` | 先行車扱いへ入るために必要な、相手が後方にいる距離。`side_delta_s <= -enter` または `parallel_side_delta_s <= -enter` で入る。 |
+| `side_by_side_leader_priority_release_s_m` | `0.3` | `0.3` | 先行車扱いを解除しにくくする距離。`enter` より小さくしてチャタリングを抑える。 |
+| `side_by_side_leader_priority_hold_sec` | `1.0` | `1.0` | 先行車扱いを最低保持する時間。短すぎるとd1/d2間で優先権が揺れやすい。 |
+| `side_by_side_leader_priority_v_max_mps` | `3.0` | `3.0` | 先行車扱い中に `opponent_collision` fallbackへ使う速度上限。高くすると先行車が逃げやすいが、壁/制御遅延リスクは増える。 |
 | `wall_risk_speed_guard_enabled` | `true` | `true` | 壁余裕不足時に速度だけ落とす。 |
 | `wall_soft_margin_m` | `0.25` | `0.25` | 壁リスク速度ガードを始めるソフト余裕。 |
 | `wall_risk_v_max_mps` | `8.0` | `5.0` | 壁リスク時の速度上限。 |
 | `mpc_health_speed_guard_enabled` | `true` | `true` | MPC health debugを見て速度を落とす。 |
 | `mpc_health_infeasible_count_threshold` | `1` | `1` | infeasible countがこの値以上なら速度ガード。 |
-| `mpc_health_solve_time_warn_ms` | `80.0` | `80.0` | solve timeがこの値以上なら速度ガード。 |
-| `mpc_health_v_max_mps` | `8.0` | `3.0` | MPC health悪化時の速度上限。 |
+| `mpc_health_solve_time_warn_ms` | `80.0` | `80.0` | solve timeがこの値以上なら速度ガード。`pure_pursuit_mpc_horizon` では10Hz horizon生成に合わせ、launch側で `200.0` に上書きする。 |
+| `mpc_health_v_max_mps` | `3.0` | `3.0` | MPC health悪化時の速度上限。 |
 | `mpc_health_stale_time_sec` | `0.60` | `0.60` | MPC health debugが古い場合のstale判定。 |
 | `recovery_speed_guard_enabled` | `true` | `true` | `RECOVERY` / `ABORT_RECOVERY` 中に復帰専用の低速capを重ねる。 |
 | `recovery_speed_guard_v_max_mps` | `3.0` | `3.0` | 復帰専用速度cap。`wall_risk_v_max_mps` や `mpc_health_v_max_mps` を高めにしていても、壁際復帰とPP fallback中はこの値で抑えやすくする。 |
@@ -336,7 +347,7 @@ MPC側で `0.0 m/s` が無効扱いにならないよう、停止意図は小さ
 | `safe_stop_v_mps` | `0.20` | `0.20` | SAFE_STOP中に出す速度上限。 |
 | `safe_stop_trigger_cycles` | `1` | `1` | 通常fallbackがunsafeな状態が何周期続いたらSAFE_STOPへ入るか。 |
 | `start_grace_safe_stop_enabled` | `true` | `true` | 発進直後の横並び/並走リスクで、前方閉塞が無い時だけSAFE_STOP突入を猶予する。 |
-| `start_grace_duration_sec` | `8.0` | `8.0` | 最初の有効な自車状態を受けてから一度だけ、何秒間start graceを有効にするか。 |
+| `start_grace_duration_sec` | `8.0` | `8.0` | 最初に自車速度が動き出し判定を超えてから一度だけ、何秒間start graceを有効にするか。WAIT_START中の有効ego受信時間では消費しない。 |
 | `start_grace_max_speed_mps` | `1.5` | `1.5` | start graceを適用する自車速度上限。負値で速度条件を無効化。 |
 | `safe_stop_release_cycles` | `5` | `5` | 解除条件が何周期続いたらSAFE_STOPを抜けるか。 |
 | `safe_stop_release_front_gap_m` | `5.0` | `5.0` | 再発進に必要な前方ギャップ。 |
@@ -358,7 +369,7 @@ future_side_yield_wall_clearance_m: 0.35
 corner_side_yield_wall_clearance_m: 0.55
 corner_yield_v_max_mps: 8.0
 wall_risk_v_max_mps: 8.0
-mpc_health_v_max_mps: 8.0
+mpc_health_v_max_mps: 3.0
 recovery_speed_guard_enabled: true
 recovery_speed_guard_v_max_mps: 3.0
 outside_corridor_recovery_centering_time_sec: 1.0
@@ -419,6 +430,11 @@ lateral_target_max_step_m: 0.20
 - `future_outer_wall_risk`
 - `future_wall_clearance_m`
 - `yield_reason`
+- `leader_priority_active`
+- `leader_priority_latched`
+- `leader_priority_id`
+- `leader_priority_delta_s`
+- `leader_priority_reason`
 - `straight_overtake_start_allowed`
 - `overtake_start_abs_curvature`
 - `overtake_start_gate_reason`

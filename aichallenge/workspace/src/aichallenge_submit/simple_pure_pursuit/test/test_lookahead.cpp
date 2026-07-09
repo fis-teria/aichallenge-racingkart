@@ -36,6 +36,13 @@ TrajectoryPoint makePoint(double x, double y, double yaw_rad) {
   return point;
 }
 
+TrajectoryPoint makePointWithSpeed(double x, double y, double yaw_rad,
+                                   double speed_mps) {
+  auto point = makePoint(x, y, yaw_rad);
+  point.longitudinal_velocity_mps = speed_mps;
+  return point;
+}
+
 Trajectory makeStraightThenArcTrajectory() {
   constexpr double radius_m = 10.0;
   constexpr double step_rad = 0.10;
@@ -138,6 +145,67 @@ TEST(Lookahead, SmoothingBlendsPreviousAndDesiredDistance) {
   EXPECT_NEAR(
       simple_pure_pursuit::smoothLookaheadDistance(4.0, 8.0, false, 0.25), 4.0,
       1.0e-9);
+}
+
+TEST(Lookahead, ForwardTrajectoryIndexSkipsCurrentAnchor) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 0.0));
+  trajectory.points.push_back(makePointWithSpeed(0.1, 0.0, 0.0, 9.5));
+  trajectory.points.push_back(makePointWithSpeed(0.6, 0.0, 0.0, 9.5));
+
+  const auto idx =
+      simple_pure_pursuit::selectForwardTrajectoryIndex(trajectory, 0, 0.25);
+
+  EXPECT_EQ(idx, 2U);
+  EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 9.5, 1.0e-9);
+}
+
+TEST(Lookahead, ForwardTrajectoryIndexFallsBackToNearestAtEnd) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 8.0));
+
+  const auto idx =
+      simple_pure_pursuit::selectForwardTrajectoryIndex(trajectory, 0, 0.25);
+
+  EXPECT_EQ(idx, 0U);
+}
+
+TEST(Lookahead, MpcHorizonVelocityCapSkipsZeroIndexAnchor) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 0.0));
+  trajectory.points.push_back(makePointWithSpeed(0.1, 0.0, 0.0, 9.5));
+  trajectory.points.push_back(makePointWithSpeed(0.6, 0.0, 0.0, 9.5));
+
+  const auto idx = simple_pure_pursuit::selectMpcHorizonVelocityCapIndex(
+      trajectory, 0, 0.25, true);
+
+  EXPECT_EQ(idx, 2U);
+  EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 9.5, 1.0e-9);
+}
+
+TEST(Lookahead, MpcHorizonVelocityCapKeepsForwardNearestIndex) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 9.5));
+  trajectory.points.push_back(makePointWithSpeed(0.6, 0.0, 0.0, 4.0));
+  trajectory.points.push_back(makePointWithSpeed(1.2, 0.0, 0.0, 9.5));
+
+  const auto idx = simple_pure_pursuit::selectMpcHorizonVelocityCapIndex(
+      trajectory, 1, 0.25, true);
+
+  EXPECT_EQ(idx, 1U);
+  EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 4.0, 1.0e-9);
+}
+
+TEST(Lookahead, MpcHorizonVelocityCapKeepsSolverZeroIndex) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 2.0));
+  trajectory.points.push_back(makePointWithSpeed(0.6, 0.0, 0.0, 9.5));
+
+  const auto idx = simple_pure_pursuit::selectMpcHorizonVelocityCapIndex(
+      trajectory, 0, 0.25, false);
+
+  EXPECT_EQ(idx, 0U);
+  EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 2.0, 1.0e-9);
 }
 
 TEST(Lookahead, StraightTrajectoryCurvatureIsZero) {

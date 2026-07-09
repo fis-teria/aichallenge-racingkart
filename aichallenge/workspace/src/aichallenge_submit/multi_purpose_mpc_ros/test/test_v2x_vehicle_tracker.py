@@ -168,6 +168,28 @@ def test_predictions_to_obstacles_flattens_with_radius():
     ])
 
 
+def test_predictions_to_obstacles_deduplicates_nearby_points_per_vehicle():
+    from multi_purpose_mpc_ros.v2x_vehicle_tracker import predictions_to_obstacles
+
+    predictions = {
+        "d2": [(1.0, 2.0), (1.2, 2.1), (1.7, 2.0)],
+        "d3": [(1.05, 2.05)],
+    }
+    obstacles = predictions_to_obstacles(
+        predictions,
+        vehicle_radius=0.5,
+        obstacle_cls=_StubObstacle,
+        min_spacing_m=0.5,
+    )
+
+    centers = sorted((o.cx, o.cy, o.radius) for o in obstacles)
+    assert centers == sorted([
+        (1.0, 2.0, 0.5),
+        (1.7, 2.0, 0.5),
+        (1.05, 2.05, 0.5),
+    ])
+
+
 def test_predictions_to_obstacles_empty_input():
     from multi_purpose_mpc_ros.v2x_vehicle_tracker import predictions_to_obstacles
     assert predictions_to_obstacles(

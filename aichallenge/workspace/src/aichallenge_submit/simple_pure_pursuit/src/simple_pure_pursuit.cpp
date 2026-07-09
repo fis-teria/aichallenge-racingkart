@@ -25,6 +25,7 @@ using tier4_autoware_utils::calcYawDeviation;
 
 namespace {
 constexpr std::size_t kMaxMpcHorizonNearestIndex = 3;
+constexpr double kMpcHorizonVelocityCapForwardArcM = 0.25;
 
 double trajectoryArcLength(const Trajectory &trajectory) {
   if (trajectory.points.size() < 2) {
@@ -258,41 +259,26 @@ AckermannControlCommand zeroAckermannControlCommand(rclcpp::Time stamp) {
 void SimplePurePursuit::onTimer() {
   const auto stamp = get_clock()->now();
   const double now_sec = steadyNowSec();
+
+  // 1. 入力が古い場合は、制御計算へ進まず停止/diagnosticだけを出す。
   const auto freshness = evaluateInputFreshness(now_sec);
-  if (!freshness.fresh) {
-    has_smoothed_lookahead_distance_ = false;
-    RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(),
-        static_cast<int>(std::max(0.1, diagnostic_throttle_sec_) * 1000.0),
-        "PurePursuit input invalid: %s odom_age=%.3f trajectory_age=%.3f",
-        freshness.reason.c_str(), freshness.ages.odom_age_sec,
-        freshness.ages.trajectory_age_sec);
-    publishStaleDebug(stamp, freshness);
-    if (stop_on_stale_input_) {
-      publishStopForStaleInput(stamp, freshness);
-    }
+  if (handleInvalidFreshness(stamp, freshness)) {
     return;
   }
 
-  if (overtake_override_active_ && !overtakeOverrideFresh(now_sec)) {
-    const double override_age_sec =
-        inputAgeSec(last_overtake_override_sec_, now_sec);
-    RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(),
-        static_cast<int>(std::max(0.1, diagnostic_throttle_sec_) * 1000.0),
-        "PurePursuit overtake override stale: age=%.3f", override_age_sec);
-    clearOvertakeOverride();
-  }
-
+  // 2. 古いovertake overrideはこの周期の参照生成へ混ぜない。
+  clearStaleOvertakeOverride(now_sec);
   const auto control_pose = predictControlPose(now_sec);
   const auto mpc_horizon_freshness = evaluateMpcPredictedHorizon(now_sec);
-  const bool mpc_horizon_applied = mpc_horizon_freshness.usable;
-  const Trajectory *control_trajectory =
-      mpc_horizon_applied ? mpc_predicted_horizon_.get() : trajectory_.get();
-  if (control_trajectory == nullptr || control_trajectory->points.empty()) {
+
+  // 3. 通常trajectory / MPC horizon / overtake override適用後trajectoryを
+  //    1つのcontrol trajectoryへ正規化する。
+  const auto context =
+      selectControlTrajectory(control_pose, now_sec, mpc_horizon_freshness);
+  if (!context.valid || context.trajectory == nullptr ||
+      context.trajectory->points.empty()) {
     FreshnessResult invalid;
-    invalid.reason =
-        mpc_horizon_applied ? "empty_mpc_horizon" : "empty_trajectory";
+    invalid.reason = context.invalid_reason;
     publishStaleDebug(stamp, invalid);
     if (stop_on_stale_input_) {
       publishStopForStaleInput(stamp, invalid);
@@ -300,68 +286,183 @@ void SimplePurePursuit::onTimer() {
     return;
   }
 
-  size_t closet_traj_point_idx =
-      findNearestIndex(control_trajectory->points, control_pose.position);
-  std::string trajectory_source =
-      mpc_horizon_applied ? "mpc_horizon" : "trajectory";
-  Trajectory adjusted_trajectory;
-  bool overtake_override_applied = false;
-  if (!mpc_horizon_applied && overtakeOverrideFresh(now_sec)) {
-    adjusted_trajectory = *trajectory_;
-    overtake_override_applied = applyOvertakeOverride(
-        adjusted_trajectory, closet_traj_point_idx, now_sec);
-    if (overtake_override_applied) {
-      control_trajectory = &adjusted_trajectory;
-      trajectory_source = "trajectory_overtake_override";
-      closet_traj_point_idx =
-          findNearestIndex(control_trajectory->points, control_pose.position);
+  AckermannControlCommand cmd = zeroAckermannControlCommand(stamp);
+  const auto &nearest_traj_point =
+      context.trajectory->points.at(context.nearest_index);
+
+  // 4. 速度と横制御を別々に計算し、最後にAckermann commandへ詰める。
+  const auto longitudinal = computeLongitudinalCommand(context, now_sec);
+  cmd.longitudinal.speed = longitudinal.target_speed_mps;
+  cmd.longitudinal.acceleration = longitudinal.acceleration_mps2;
+
+  const auto lateral =
+      computeLateralCommand(context, control_pose, longitudinal);
+  publishLookaheadPoint(lateral.lookahead_point_x, lateral.lookahead_point_y,
+                        nearest_traj_point.pose.position.z);
+  cmd.lateral.steering_tire_angle = lateral.steering_tire_angle_rad;
+
+  publishDebug(
+      cmd.stamp, *context.trajectory, context.nearest_index,
+      longitudinal.target_speed_mps, longitudinal.current_speed_mps,
+      longitudinal.acceleration_mps2, lateral.base_lookahead_distance_m,
+      lateral.desired_lookahead_distance_m, lateral.lookahead_distance_m,
+      lateral.path_curvature_1pm, lateral.signed_path_curvature_1pm,
+      lateral.curvature_window_distance_m, lateral.lookahead_point_x,
+      lateral.lookahead_point_y, lateral.rear_x, lateral.rear_y,
+      lateral.alpha_rad, lateral.pure_pursuit_steering_tire_angle_rad,
+      lateral.curvature_feedforward_steering_rad,
+      lateral.raw_steering_tire_angle_rad, lateral.steering_tire_angle_rad,
+      context.overtake_override_applied, overtakeLateralOffset(0),
+      longitudinal.overtake_speed_cap_mps, now_sec, context.mpc_horizon_applied,
+      longitudinal.mpc_horizon_velocity_cap_applied,
+      longitudinal.mpc_horizon_velocity_cap_mps, context.mpc_horizon_freshness,
+      context.source, control_pose);
+
+  pub_cmd_->publish(cmd);
+  last_commanded_steering_tire_angle_ = cmd.lateral.steering_tire_angle;
+  cmd.lateral.steering_tire_angle = lateral.raw_steering_tire_angle_rad;
+  pub_raw_cmd_->publish(cmd);
+}
+
+bool SimplePurePursuit::handleInvalidFreshness(
+    const rclcpp::Time &stamp, const FreshnessResult &freshness) {
+  if (freshness.fresh) {
+    return false;
+  }
+
+  has_smoothed_lookahead_distance_ = false;
+  RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(),
+      static_cast<int>(std::max(0.1, diagnostic_throttle_sec_) * 1000.0),
+      "PurePursuit input invalid: %s odom_age=%.3f trajectory_age=%.3f",
+      freshness.reason.c_str(), freshness.ages.odom_age_sec,
+      freshness.ages.trajectory_age_sec);
+  publishStaleDebug(stamp, freshness);
+  if (stop_on_stale_input_) {
+    publishStopForStaleInput(stamp, freshness);
+  }
+  return true;
+}
+
+void SimplePurePursuit::clearStaleOvertakeOverride(double now_sec) {
+  if (!overtake_override_active_ || overtakeOverrideFresh(now_sec)) {
+    return;
+  }
+
+  const double override_age_sec =
+      inputAgeSec(last_overtake_override_sec_, now_sec);
+  RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(),
+      static_cast<int>(std::max(0.1, diagnostic_throttle_sec_) * 1000.0),
+      "PurePursuit overtake override stale: age=%.3f", override_age_sec);
+  clearOvertakeOverride();
+}
+
+SimplePurePursuit::ControlTrajectoryContext
+SimplePurePursuit::selectControlTrajectory(
+    const ControlPosePrediction &control_pose, double now_sec,
+    const HorizonFreshnessResult &mpc_horizon_freshness) {
+  ControlTrajectoryContext context;
+  context.mpc_horizon_freshness = mpc_horizon_freshness;
+  context.mpc_horizon_applied = mpc_horizon_freshness.usable;
+  context.trajectory = context.mpc_horizon_applied
+                           ? mpc_predicted_horizon_.get()
+                           : trajectory_.get();
+  context.source = context.mpc_horizon_applied ? "mpc_horizon" : "trajectory";
+
+  if (context.trajectory == nullptr || context.trajectory->points.empty()) {
+    context.invalid_reason =
+        context.mpc_horizon_applied ? "empty_mpc_horizon" : "empty_trajectory";
+    return context;
+  }
+
+  context.nearest_index =
+      findNearestIndex(context.trajectory->points, control_pose.position);
+
+  // MPC horizonを使っている周期は、horizon自体を優先する。
+  // 通常trajectory周期だけ、plannerから来るovertake overrideを重ねる。
+  if (!context.mpc_horizon_applied && overtakeOverrideFresh(now_sec)) {
+    context.owned_trajectory = std::make_shared<Trajectory>(*trajectory_);
+    context.overtake_override_applied = applyOvertakeOverride(
+        *context.owned_trajectory, context.nearest_index, now_sec);
+    if (context.overtake_override_applied) {
+      context.trajectory = context.owned_trajectory.get();
+      context.source = "trajectory_overtake_override";
+      context.nearest_index =
+          findNearestIndex(context.trajectory->points, control_pose.position);
     }
-  } else if (!mpc_horizon_applied && overtake_override_active_) {
+  } else if (!context.mpc_horizon_applied && overtake_override_active_) {
     clearOvertakeOverride();
   }
 
-  // publish zero command
-  AckermannControlCommand cmd = zeroAckermannControlCommand(stamp);
+  context.valid = true;
+  return context;
+}
 
-  // get closest trajectory point from current position
-  TrajectoryPoint closet_traj_point =
-      control_trajectory->points.at(closet_traj_point_idx);
+SimplePurePursuit::LongitudinalCommand
+SimplePurePursuit::computeLongitudinalCommand(
+    const ControlTrajectoryContext &context, double now_sec) const {
+  LongitudinalCommand result;
+  const auto &nearest = context.trajectory->points.at(context.nearest_index);
 
-  // calc longitudinal speed and acceleration
-  double target_longitudinal_vel =
-      use_external_target_vel_ ? external_target_vel_
-                               : closet_traj_point.longitudinal_velocity_mps;
-  const double mpc_horizon_velocity_cap_mps =
-      mpc_horizon_applied ? closet_traj_point.longitudinal_velocity_mps : -1.0;
-  bool mpc_horizon_velocity_cap_applied = false;
-  if (mpc_horizon_applied && std::isfinite(mpc_horizon_velocity_cap_mps) &&
-      mpc_horizon_velocity_cap_mps >= 0.0) {
-    mpc_horizon_velocity_cap_applied =
-        mpc_horizon_velocity_cap_mps < target_longitudinal_vel;
-    target_longitudinal_vel =
-        std::min(target_longitudinal_vel, mpc_horizon_velocity_cap_mps);
+  result.target_speed_mps = use_external_target_vel_
+                                ? external_target_vel_
+                                : nearest.longitudinal_velocity_mps;
+  result.current_speed_mps = odometry_->twist.twist.linear.x;
+
+  // neutral horizonの先頭点は、現在姿勢アンカーとして低速/0mpsに
+  // なることがあるため、少し前方の速度capを見る。
+  const bool skip_mpc_horizon_anchor_speed =
+      mpc_predicted_horizon_source_ == "neutral_reference" ||
+      mpc_predicted_horizon_source_ == "fixed_neutral_reference";
+  const auto cap_index = context.mpc_horizon_applied
+                             ? selectMpcHorizonVelocityCapIndex(
+                                   *context.trajectory, context.nearest_index,
+                                   kMpcHorizonVelocityCapForwardArcM,
+                                   skip_mpc_horizon_anchor_speed)
+                             : context.nearest_index;
+  result.mpc_horizon_velocity_cap_mps =
+      context.mpc_horizon_applied
+          ? context.trajectory->points.at(cap_index).longitudinal_velocity_mps
+          : -1.0;
+  if (context.mpc_horizon_applied &&
+      std::isfinite(result.mpc_horizon_velocity_cap_mps) &&
+      result.mpc_horizon_velocity_cap_mps >= 0.0) {
+    result.mpc_horizon_velocity_cap_applied =
+        result.mpc_horizon_velocity_cap_mps < result.target_speed_mps;
+    result.target_speed_mps =
+        std::min(result.target_speed_mps, result.mpc_horizon_velocity_cap_mps);
   }
-  const auto overtake_speed_cap = overtakeSpeedCap(0, now_sec);
-  if (overtake_speed_cap.has_value()) {
-    target_longitudinal_vel =
-        std::min(target_longitudinal_vel, overtake_speed_cap.value());
-  }
-  double current_longitudinal_vel = odometry_->twist.twist.linear.x;
-  const double current_yaw = control_pose.yaw;
 
-  cmd.longitudinal.speed = target_longitudinal_vel;
-  cmd.longitudinal.acceleration =
+  if (const auto overtake_speed_cap = overtakeSpeedCap(0, now_sec)) {
+    result.overtake_speed_cap_mps = overtake_speed_cap.value();
+    result.target_speed_mps =
+        std::min(result.target_speed_mps, overtake_speed_cap.value());
+  }
+
+  result.acceleration_mps2 =
       speed_proportional_gain_ *
-      (target_longitudinal_vel - current_longitudinal_vel);
+      (result.target_speed_mps - result.current_speed_mps);
+  return result;
+}
 
-  // calc lateral control
-  //// calc lookahead distance
+SimplePurePursuit::LateralCommand SimplePurePursuit::computeLateralCommand(
+    const ControlTrajectoryContext &context,
+    const ControlPosePrediction &control_pose,
+    const LongitudinalCommand &longitudinal) {
+  LateralCommand result;
+  const auto &trajectory = *context.trajectory;
+
   const LookaheadParams lookahead_params{
       lookahead_gain_, lookahead_min_distance_,
       curvature_adaptive_lookahead_enabled_, curvature_lookahead_min_distance_,
       curvature_lookahead_sensitivity_};
-  const double base_lookahead_distance = speedBasedLookaheadDistance(
-      target_longitudinal_vel, current_longitudinal_vel, lookahead_params);
+  result.base_lookahead_distance_m = speedBasedLookaheadDistance(
+      longitudinal.target_speed_mps, longitudinal.current_speed_mps,
+      lookahead_params);
+
+  // 曲率を見る距離は、速度由来のlookaheadを基準にしつつ上限を持たせる。
+  // 直線では遠く、コーナーでは手前を見るための前処理。
   const double curvature_window_ratio =
       std::isfinite(curvature_lookahead_window_ratio_)
           ? std::max(1.0, curvature_lookahead_window_ratio_)
@@ -374,88 +475,76 @@ void SimplePurePursuit::onTimer() {
       std::isfinite(curvature_lookahead_max_window_distance_)
           ? std::max(curvature_min_arc_m,
                      curvature_lookahead_max_window_distance_)
-          : base_lookahead_distance;
-  const double curvature_window_distance = std::min(
-      curvature_window_max_m, base_lookahead_distance * curvature_window_ratio);
-  const double path_curvature = estimateTrajectoryCurvature(
-      *control_trajectory, closet_traj_point_idx, curvature_window_distance,
+          : result.base_lookahead_distance_m;
+  result.curvature_window_distance_m =
+      std::min(curvature_window_max_m,
+               result.base_lookahead_distance_m * curvature_window_ratio);
+  result.path_curvature_1pm = estimateTrajectoryCurvature(
+      trajectory, context.nearest_index, result.curvature_window_distance_m,
       curvature_min_arc_m);
-  const double signed_path_curvature = estimateSignedTrajectoryCurvature(
-      *control_trajectory, closet_traj_point_idx, curvature_window_distance,
+  result.signed_path_curvature_1pm = estimateSignedTrajectoryCurvature(
+      trajectory, context.nearest_index, result.curvature_window_distance_m,
       curvature_min_arc_m);
-  const double desired_lookahead_distance = adaptiveLookaheadDistance(
-      target_longitudinal_vel, current_longitudinal_vel, path_curvature,
-      lookahead_params);
-  double lookahead_distance = desired_lookahead_distance;
+  result.desired_lookahead_distance_m = adaptiveLookaheadDistance(
+      longitudinal.target_speed_mps, longitudinal.current_speed_mps,
+      result.path_curvature_1pm, lookahead_params);
+  result.lookahead_distance_m = result.desired_lookahead_distance_m;
   if (curvature_adaptive_lookahead_enabled_) {
-    lookahead_distance = smoothLookaheadDistance(
-        desired_lookahead_distance, smoothed_lookahead_distance_,
+    result.lookahead_distance_m = smoothLookaheadDistance(
+        result.desired_lookahead_distance_m, smoothed_lookahead_distance_,
         has_smoothed_lookahead_distance_, curvature_lookahead_smoothing_alpha_);
-    smoothed_lookahead_distance_ = lookahead_distance;
+    smoothed_lookahead_distance_ = result.lookahead_distance_m;
     has_smoothed_lookahead_distance_ = true;
   } else {
     has_smoothed_lookahead_distance_ = false;
   }
-  //// calc center coordinate of rear wheel
-  double rear_x =
-      control_pose.position.x - wheel_base_ / 2.0 * std::cos(current_yaw);
-  double rear_y =
-      control_pose.position.y - wheel_base_ / 2.0 * std::sin(current_yaw);
-  //// search lookahead point
-  auto lookahead_point_itr = std::find_if(
-      control_trajectory->points.begin() + closet_traj_point_idx,
-      control_trajectory->points.end(), [&](const TrajectoryPoint &point) {
-        return std::hypot(point.pose.position.x - rear_x,
-                          point.pose.position.y - rear_y) >= lookahead_distance;
-      });
-  if (lookahead_point_itr == control_trajectory->points.end()) {
-    lookahead_point_itr = std::prev(control_trajectory->points.end());
-  }
-  double lookahead_point_x = lookahead_point_itr->pose.position.x;
-  double lookahead_point_y = lookahead_point_itr->pose.position.y;
 
+  // PurePursuitは後輪中心からlookahead点を見るため、制御姿勢から後輪中心へ戻す。
+  result.rear_x =
+      control_pose.position.x - wheel_base_ / 2.0 * std::cos(control_pose.yaw);
+  result.rear_y =
+      control_pose.position.y - wheel_base_ / 2.0 * std::sin(control_pose.yaw);
+  auto lookahead_point_itr =
+      std::find_if(trajectory.points.begin() + context.nearest_index,
+                   trajectory.points.end(), [&](const TrajectoryPoint &point) {
+                     return std::hypot(point.pose.position.x - result.rear_x,
+                                       point.pose.position.y - result.rear_y) >=
+                            result.lookahead_distance_m;
+                   });
+  if (lookahead_point_itr == trajectory.points.end()) {
+    lookahead_point_itr = std::prev(trajectory.points.end());
+  }
+  result.lookahead_point_x = lookahead_point_itr->pose.position.x;
+  result.lookahead_point_y = lookahead_point_itr->pose.position.y;
+
+  result.alpha_rad =
+      normalizeAngle(std::atan2(result.lookahead_point_y - result.rear_y,
+                                result.lookahead_point_x - result.rear_x) -
+                     control_pose.yaw);
+  result.pure_pursuit_steering_tire_angle_rad =
+      std::atan2(2.0 * wheel_base_ * std::sin(result.alpha_rad),
+                 result.lookahead_distance_m);
+  result.curvature_feedforward_steering_rad =
+      std::clamp(horizon_curvature_feedforward_gain_ *
+                     std::atan(wheel_base_ * result.signed_path_curvature_1pm),
+                 -std::max(0.0, horizon_curvature_feedforward_max_rad_),
+                 std::max(0.0, horizon_curvature_feedforward_max_rad_));
+  result.raw_steering_tire_angle_rad =
+      result.pure_pursuit_steering_tire_angle_rad +
+      result.curvature_feedforward_steering_rad;
+  result.steering_tire_angle_rad =
+      steering_tire_angle_gain_ * result.raw_steering_tire_angle_rad;
+  return result;
+}
+
+void SimplePurePursuit::publishLookaheadPoint(double x, double y, double z) {
   geometry_msgs::msg::PointStamped lookahead_point_msg;
   lookahead_point_msg.header.stamp = get_clock()->now();
   lookahead_point_msg.header.frame_id = "map";
-  lookahead_point_msg.point.x = lookahead_point_x;
-  lookahead_point_msg.point.y = lookahead_point_y;
-  lookahead_point_msg.point.z = closet_traj_point.pose.position.z;
+  lookahead_point_msg.point.x = x;
+  lookahead_point_msg.point.y = y;
+  lookahead_point_msg.point.z = z;
   pub_lookahead_point_->publish(lookahead_point_msg);
-
-  // calc steering angle for lateral control
-  double alpha = normalizeAngle(
-      std::atan2(lookahead_point_y - rear_y, lookahead_point_x - rear_x) -
-      current_yaw);
-  const double pure_pursuit_steering_tire_angle =
-      std::atan2(2.0 * wheel_base_ * std::sin(alpha), lookahead_distance);
-  const double curvature_feedforward_steering_rad =
-      std::clamp(horizon_curvature_feedforward_gain_ *
-                     std::atan(wheel_base_ * signed_path_curvature),
-                 -std::max(0.0, horizon_curvature_feedforward_max_rad_),
-                 std::max(0.0, horizon_curvature_feedforward_max_rad_));
-  const double raw_steering_tire_angle =
-      pure_pursuit_steering_tire_angle + curvature_feedforward_steering_rad;
-  cmd.lateral.steering_tire_angle =
-      steering_tire_angle_gain_ * raw_steering_tire_angle;
-
-  publishDebug(cmd.stamp, *control_trajectory, closet_traj_point_idx,
-               target_longitudinal_vel, current_longitudinal_vel,
-               cmd.longitudinal.acceleration, base_lookahead_distance,
-               desired_lookahead_distance, lookahead_distance, path_curvature,
-               signed_path_curvature, curvature_window_distance,
-               lookahead_point_x, lookahead_point_y, rear_x, rear_y, alpha,
-               pure_pursuit_steering_tire_angle,
-               curvature_feedforward_steering_rad, raw_steering_tire_angle,
-               cmd.lateral.steering_tire_angle, overtake_override_applied,
-               overtakeLateralOffset(0), overtake_speed_cap.value_or(0.0),
-               now_sec, mpc_horizon_applied, mpc_horizon_velocity_cap_applied,
-               mpc_horizon_velocity_cap_mps, mpc_horizon_freshness,
-               trajectory_source, control_pose);
-
-  pub_cmd_->publish(cmd);
-  last_commanded_steering_tire_angle_ = cmd.lateral.steering_tire_angle;
-  cmd.lateral.steering_tire_angle = raw_steering_tire_angle;
-  pub_raw_cmd_->publish(cmd);
 }
 
 double SimplePurePursuit::steadyNowSec() const {
@@ -627,9 +716,9 @@ SimplePurePursuit::evaluateMpcPredictedHorizon(double now_sec) const {
     } else if (mpc_health_status_ != "solved" ||
                mpc_health_infeasible_count_ > 0) {
       result.usable = false;
-      result.reason =
-          mpc_health_infeasible_count_ > 0 ? "mpc_health_infeasible"
-                                           : "mpc_health_" + mpc_health_status_;
+      result.reason = mpc_health_infeasible_count_ > 0
+                          ? "mpc_health_infeasible"
+                          : "mpc_health_" + mpc_health_status_;
     }
   }
 
@@ -688,8 +777,8 @@ void SimplePurePursuit::publishStaleDebug(const rclcpp::Time &stamp,
        << "\"mpc_health_status\":\"" << mpc_health_status_ << "\","
        << "\"mpc_health_age_sec\":" << mpcHealthAgeSec(now_sec) << ","
        << "\"mpc_infeasible_count\":" << mpc_health_infeasible_count_ << ","
-       << "\"mpc_predicted_horizon_source\":\""
-       << mpc_predicted_horizon_source_ << "\","
+       << "\"mpc_predicted_horizon_source\":\"" << mpc_predicted_horizon_source_
+       << "\","
        << "\"mpc_horizon_reject_reason\":\"" << horizon.reason << "\"}";
 
   String msg;
@@ -922,11 +1011,10 @@ void SimplePurePursuit::publishDebug(
        << "\"mpc_health_required_for_horizon\":"
        << (require_solved_mpc_health_for_horizon_ ? "true" : "false") << ","
        << "\"mpc_health_status\":\"" << mpc_health_status_ << "\","
-       << "\"mpc_health_age_sec\":" << mpcHealthAgeSec(freshness_now_sec)
-       << ","
+       << "\"mpc_health_age_sec\":" << mpcHealthAgeSec(freshness_now_sec) << ","
        << "\"mpc_infeasible_count\":" << mpc_health_infeasible_count_ << ","
-       << "\"mpc_predicted_horizon_source\":\""
-       << mpc_predicted_horizon_source_ << "\","
+       << "\"mpc_predicted_horizon_source\":\"" << mpc_predicted_horizon_source_
+       << "\","
        << "\"mpc_horizon_reject_reason\":\"" << mpc_horizon_freshness.reason
        << "\","
        << "\"nearest_trajectory_index\":" << nearest_traj_point_idx << ","

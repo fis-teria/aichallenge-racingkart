@@ -165,11 +165,33 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
       speed_cap_reason = reason;
     }
   };
+  const auto speedOnlyFallbackCapForReject =
+      [&](const std::string &reject_reason, bool &leader_priority_relaxed) {
+        double cap = config_.speed_only_fallback_v_max_mps;
+        if (reject_reason == "opponent_collision") {
+          if (config_.side_by_side_leader_priority_enabled &&
+              blocked.leader_priority_active) {
+            leader_priority_relaxed = true;
+            cap = finitePositiveOr(config_.side_by_side_leader_priority_v_max_mps,
+                                   cap);
+          } else {
+            cap = std::min(
+                cap, finitePositiveOr(
+                         config_.opponent_collision_fallback_v_max_mps, cap));
+          }
+        }
+        return cap;
+      };
 
   if (allow_speed_guard && config_.speed_only_fallback_enabled &&
       input.safe_stop_candidate_infeasible) {
-    requestSpeedCap(config_.speed_only_fallback_v_max_mps,
-                    "speed_only_fallback_safe_stop_infeasible");
+    bool leader_priority_relaxed = false;
+    requestSpeedCap(
+        speedOnlyFallbackCapForReject(safe_stop_candidate.reject_reason,
+                                      leader_priority_relaxed),
+        leader_priority_relaxed
+            ? "speed_only_fallback_leader_priority_safe_stop_infeasible"
+            : "speed_only_fallback_safe_stop_infeasible");
     speed_only_fallback = true;
   }
 
@@ -177,11 +199,18 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
       !input.safe_stop_candidate_infeasible && !selected.feasible &&
       selected.type != CandidateType::FASTEST &&
       selected.type != CandidateType::SAFE_STOP) {
-    const double selected_cap =
-        candidateSpeedCapOr(selected, config_.speed_only_fallback_v_max_mps);
+    bool leader_priority_relaxed = false;
+    const double fallback_cap = speedOnlyFallbackCapForReject(
+        selected.reject_reason, leader_priority_relaxed);
+    const double selected_cap = candidateSpeedCapOr(selected, fallback_cap);
+    const double requested_fallback_cap =
+        leader_priority_relaxed ? fallback_cap
+                                : std::min(selected_cap, fallback_cap);
     requestSpeedCap(
-        std::min(selected_cap, config_.speed_only_fallback_v_max_mps),
-        selected.reject_reason.empty()
+        requested_fallback_cap,
+        leader_priority_relaxed
+            ? "speed_only_fallback_leader_priority"
+        : selected.reject_reason.empty()
             ? "speed_only_fallback"
             : "speed_only_fallback_" + selected.reject_reason);
     speed_only_fallback = true;

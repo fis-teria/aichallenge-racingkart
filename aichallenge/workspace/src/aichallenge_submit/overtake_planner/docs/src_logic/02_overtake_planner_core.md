@@ -44,21 +44,22 @@ plannerの中核です。
 2. section safetyを取得する。
 3. `detectBlocked()` で前方車/横並びを判定する。
 4. `predictOpponents()` で他車予測を作る。
-5. `evaluatePassGap()` で左右追い越し余裕を判定する。
-6. 曲率からcorner判定、straight-only gateを更新する。
-7. `FutureSideBySideRiskAnalyzer::evaluate()` で未来リスクを足す。
-8. 候補経路を複数作る。
-9. `SafetyEvaluator::evaluate()` で候補を安全評価する。
-10. `candidateScore()` で候補に点数を付ける。
-11. SAFE_STOP条件を判定する。
-12. `selectCandidate()` で暫定候補を選ぶ。
-13. `BehaviorStateMachine::update()` でmodeを安定化する。
-14. modeに合わせてpublish用候補を再生成する。
+5. `promoteSlowObstacleChain()` で低速/停止のparallel-side前方車を必要なら前方閉塞へ昇格する。
+6. `evaluatePassGap()` で左右追い越し余裕を判定する。
+7. 曲率からcorner判定、straight-only gateを更新する。
+8. `FutureSideBySideRiskAnalyzer::evaluate()` で未来リスクを足す。
+9. 候補経路を複数作る。
+10. `SafetyEvaluator::evaluate()` で候補を安全評価する。
+11. `candidateScore()` で候補に点数を付ける。
+12. SAFE_STOP条件を判定する。
+13. `selectCandidate()` で暫定候補を選ぶ。
+14. `BehaviorStateMachine::update()` でmodeを安定化する。
+15. modeに合わせてpublish用候補を再生成する。
     - `pass_horizon_publish_mode=overtake_only` では、`PREPARE_OVERTAKE_*` 中だけpublish用候補を `FOLLOW` に差し替える。
     - 内部候補の `PASS_LEFT/RIGHT` は状態機械へ渡しているため、PASS安全周期の蓄積は止まらない。
-15. `PlannerOutputBuilder::build()` でpublish用出力に整形する。
-16. `applyLateralTargetRateLimit()` で横オフセットの急変を抑える。
-17. `rememberPublishedLateralTarget()` で次周期用に記憶する。
+16. `PlannerOutputBuilder::build()` でpublish用出力に整形する。
+17. `applyLateralTargetRateLimit()` で横オフセットの急変を抑える。
+18. `rememberPublishedLateralTarget()` で次周期用に記憶する。
 
 ## 候補生成の流れ
 
@@ -148,6 +149,21 @@ startがendをまたぐ区間にも対応します。
 ## `effectiveWallSoftMargin()`
 
 基本の `wall_soft_margin_m` にsection profileのscaleを掛けた実効値を返します。
+
+## `promoteSlowObstacleChain()`
+
+`parallel_side_candidate` のうち、自車より前方にいて低速/停止している相手を、停止車列の次の回避対象として前方閉塞へ昇格します。
+
+主な条件:
+
+- `slow_obstacle_chain_enabled=true`
+- まだ通常の `nearest_index` がない
+- `parallel_side_delta_s > 0`
+- `parallel_side_delta_s <= slow_obstacle_chain_distance_m`
+- 相手速度が `slow_front_exception_speed_mps` 以下
+
+昇格すると `slow_obstacle_chain_active=true` になり、`nearest_id` / `front_delta_s` / `front_vehicle_speed_mps` もその相手で埋めます。
+これにより、1台目を抜いた後に2台目がfrontではなくparallel-sideとして見えても、既存のPASS候補生成と安全評価に載ります。
 
 ## `shouldYieldBehindSideBySide()`
 

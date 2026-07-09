@@ -90,7 +90,12 @@ class V2XVehicleTracker:
         return {vid: self.predict_positions(vid, t_samples) for vid in self._active}
 
 
-def predictions_to_obstacles(predictions, vehicle_radius: float, obstacle_cls=None):
+def predictions_to_obstacles(
+    predictions,
+    vehicle_radius: float,
+    obstacle_cls=None,
+    min_spacing_m: float = 0.0,
+):
     """Flatten a ``{vehicle_id: [(x, y), ...]}`` mapping into a list of
     circular obstacles consumable by ``multi_purpose_mpc_ros.core.map``.
 
@@ -103,7 +108,16 @@ def predictions_to_obstacles(predictions, vehicle_radius: float, obstacle_cls=No
     if obstacle_cls is None:
         from multi_purpose_mpc_ros.core.map import Obstacle as obstacle_cls
     out = []
+    min_spacing_m = max(0.0, float(min_spacing_m))
     for _vid, points in predictions.items():
+        last_kept = None
         for x, y in points:
+            if (
+                last_kept is not None
+                and min_spacing_m > 0.0
+                and math.hypot(x - last_kept[0], y - last_kept[1]) < min_spacing_m
+            ):
+                continue
             out.append(obstacle_cls(cx=x, cy=y, radius=vehicle_radius))
+            last_kept = (x, y)
     return out
