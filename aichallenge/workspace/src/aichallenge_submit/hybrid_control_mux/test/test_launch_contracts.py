@@ -33,6 +33,10 @@ def test_pure_pursuit_launch_wires_timing_and_vehicle_geometry():
         == "$(var require_solved_mpc_health_for_horizon)"
     )
     assert params["max_mpc_health_age_sec"] == "$(var max_mpc_health_age_sec)"
+    assert (
+        params["require_matching_overtake_horizon_contract"]
+        == "$(var require_matching_overtake_horizon_contract)"
+    )
     assert params["pp_control_delay_sec"] == "$(var pp_control_delay_sec)"
     assert params["steering_time_constant_sec"] == "$(var steering_time_constant_sec)"
     assert params["steering_status_timeout_sec"] == "$(var steering_status_timeout_sec)"
@@ -50,6 +54,10 @@ def test_pure_pursuit_launch_wires_timing_and_vehicle_geometry():
         for element in root.iter("remap")
     }
     assert remaps["input/mpc_predicted_horizon"] == "$(var input_mpc_predicted_horizon)"
+    assert (
+        remaps["input/mpc_predicted_horizon_contract"]
+        == "$(var input_mpc_predicted_horizon_contract)"
+    )
     assert remaps["input/mpc_health"] == "$(var input_mpc_health)"
     assert remaps["input/steering_status"] == "$(var input_steering_status)"
 
@@ -132,14 +140,38 @@ def test_hybrid_delay_aware_mpc_wires_mpc_horizon_to_pure_pursuit():
     }
 
     assert delay_args["output_mpc_predicted_horizon"] == "/hybrid_control/mpc/predicted_horizon"
+    assert (
+        delay_args["output_mpc_predicted_horizon_contract"]
+        == "/hybrid_control/mpc/predicted_horizon_contract"
+    )
     assert delay_args["input_control_cmd_raw"] == "/hybrid_control/mpc/control_cmd_raw"
     assert pp_args["input_mpc_predicted_horizon"] == "/hybrid_control/mpc/predicted_horizon"
+    assert (
+        pp_args["input_mpc_predicted_horizon_contract"]
+        == "/hybrid_control/mpc/predicted_horizon_contract"
+    )
     assert pp_args["input_steering_status"] == "/vehicle/status/steering_status"
     assert pp_args["use_mpc_predicted_horizon"] == "true"
     assert pp_args["max_mpc_horizon_age_sec"] == "0.15"
+    assert pp_args["require_matching_overtake_horizon_contract"] == "true"
     assert pp_args["pp_control_delay_sec"] == "0.0"
     assert pp_args["steering_time_constant_sec"] == "0.30"
     assert pp_args["horizon_curvature_feedforward_gain"] == "0.0"
+
+
+def test_hybrid_delay_aware_mpc_can_realize_planner_brake_assumption():
+    root = _aichallenge_submit_root()
+    with (root / "delay_aware_mpc_ros/config/delay_aware_config.yaml").open() as stream:
+        mpc_config = yaml.safe_load(stream)["mpc"]
+    with (root / "overtake_planner/config/overtake_planner.param.yaml").open() as stream:
+        planner_config = yaml.safe_load(stream)["overtake_planner_node"][
+            "ros__parameters"
+        ]
+
+    # hybrid_delay_aware_mpc passes the MPC command through the mux when it is
+    # healthy. Its deceleration limit must therefore be at least the braking
+    # capability assumed by stationary-obstacle safety prediction.
+    assert mpc_config["a_min"] <= -planner_config["max_brake_decel_mps2"]
 
 
 def test_pure_pursuit_mpc_horizon_keeps_mpc_as_horizon_generator():
@@ -182,13 +214,20 @@ def test_pure_pursuit_mpc_horizon_keeps_mpc_as_horizon_generator():
     assert delay_args["output_mpc_predicted_horizon"] == (
         "/pure_pursuit_mpc_horizon/mpc/predicted_horizon"
     )
+    assert delay_args["output_mpc_predicted_horizon_contract"] == (
+        "/pure_pursuit_mpc_horizon/mpc/predicted_horizon_contract"
+    )
     assert delay_args["overtake_horizon_points"] == "40"
     assert delay_args["overtake_mpc_health_solve_time_warn_ms"] == "200.0"
     assert pp_args["input_mpc_predicted_horizon"] == (
         "/pure_pursuit_mpc_horizon/mpc/predicted_horizon"
     )
+    assert pp_args["input_mpc_predicted_horizon_contract"] == (
+        "/pure_pursuit_mpc_horizon/mpc/predicted_horizon_contract"
+    )
     assert pp_args["require_solved_mpc_health_for_horizon"] == "true"
     assert pp_args["max_mpc_health_age_sec"] == "0.35"
+    assert pp_args["require_matching_overtake_horizon_contract"] == "true"
     assert mux_args["param_file"].endswith("pure_pursuit_mpc_horizon.param.yaml")
     assert mux_args["input_pure_pursuit_cmd"] == (
         "/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd"

@@ -36,6 +36,13 @@ TrajectoryPoint makePoint(double x, double y, double yaw_rad) {
   return point;
 }
 
+TrajectoryPoint makePointWithSpeed(double x, double y, double yaw_rad,
+                                   double speed_mps) {
+  auto point = makePoint(x, y, yaw_rad);
+  point.longitudinal_velocity_mps = speed_mps;
+  return point;
+}
+
 Trajectory makeStraightThenArcTrajectory() {
   constexpr double radius_m = 10.0;
   constexpr double step_rad = 0.10;
@@ -138,6 +145,158 @@ TEST(Lookahead, SmoothingBlendsPreviousAndDesiredDistance) {
   EXPECT_NEAR(
       simple_pure_pursuit::smoothLookaheadDistance(4.0, 8.0, false, 0.25), 4.0,
       1.0e-9);
+}
+
+TEST(Lookahead, ForwardTrajectoryIndexSkipsCurrentAnchor) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 0.0));
+  trajectory.points.push_back(makePointWithSpeed(0.1, 0.0, 0.0, 9.5));
+  trajectory.points.push_back(makePointWithSpeed(0.6, 0.0, 0.0, 9.5));
+
+  const auto idx =
+      simple_pure_pursuit::selectForwardTrajectoryIndex(trajectory, 0, 0.25);
+
+  EXPECT_EQ(idx, 2U);
+  EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 9.5, 1.0e-9);
+}
+
+TEST(Lookahead, ForwardTrajectoryIndexFallsBackToNearestAtEnd) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 8.0));
+
+  const auto idx =
+      simple_pure_pursuit::selectForwardTrajectoryIndex(trajectory, 0, 0.25);
+
+  EXPECT_EQ(idx, 0U);
+}
+
+TEST(Lookahead, MpcHorizonVelocityCapSkipsZeroIndexAnchor) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 0.0));
+  trajectory.points.push_back(makePointWithSpeed(0.1, 0.0, 0.0, 9.5));
+  trajectory.points.push_back(makePointWithSpeed(0.6, 0.0, 0.0, 9.5));
+
+  const auto idx = simple_pure_pursuit::selectMpcHorizonVelocityCapIndex(
+      trajectory, 0, 0.25, true);
+
+  EXPECT_EQ(idx, 2U);
+  EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 9.5, 1.0e-9);
+}
+
+TEST(Lookahead, MpcHorizonVelocityCapKeepsForwardNearestIndex) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 9.5));
+  trajectory.points.push_back(makePointWithSpeed(0.6, 0.0, 0.0, 4.0));
+  trajectory.points.push_back(makePointWithSpeed(1.2, 0.0, 0.0, 9.5));
+
+  const auto idx = simple_pure_pursuit::selectMpcHorizonVelocityCapIndex(
+      trajectory, 1, 0.25, true);
+
+  EXPECT_EQ(idx, 1U);
+  EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 4.0, 1.0e-9);
+}
+
+TEST(Lookahead, MpcHorizonVelocityCapKeepsSolverZeroIndex) {
+  Trajectory trajectory;
+  trajectory.points.push_back(makePointWithSpeed(0.0, 0.0, 0.0, 2.0));
+  trajectory.points.push_back(makePointWithSpeed(0.6, 0.0, 0.0, 9.5));
+
+  const auto idx = simple_pure_pursuit::selectMpcHorizonVelocityCapIndex(
+      trajectory, 0, 0.25, false);
+
+  EXPECT_EQ(idx, 0U);
+  EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 2.0, 1.0e-9);
+}
+
+TEST(LongitudinalOverride, ImmediateSpeedCapRequestsBrakingInSameCycle) {
+  constexpr double current_speed_mps = 4.0;
+  constexpr double planner_speed_cap_mps = 0.2;
+  constexpr double speed_proportional_gain = 1.0;
+
+  const double target_speed_mps = simple_pure_pursuit::applyOvertakeSpeedCap(
+      current_speed_mps, std::optional<double>{planner_speed_cap_mps});
+  const double acceleration_mps2 =
+      simple_pure_pursuit::proportionalLongitudinalAcceleration(
+          target_speed_mps, current_speed_mps, speed_proportional_gain);
+
+  EXPECT_LT(target_speed_mps, current_speed_mps);
+  EXPECT_NEAR(target_speed_mps, planner_speed_cap_mps, 1.0e-9);
+  EXPECT_LT(acceleration_mps2, 0.0);
+}
+
+TEST(HorizonContract, MatchingAbortRecoverySolverHorizonIsUsable) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 42U);
+
+  EXPECT_TRUE(result.usable);
+  EXPECT_EQ(result.reason, "fresh");
+}
+
+TEST(HorizonContract, MismatchedGenerationFallsBackFromMpcHorizon) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 41U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_contract_generation_mismatch");
+}
+
+TEST(HorizonContract, MissingMetadataFallsBackFromMpcHorizon) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, false, std::nullopt, 10.1, 0.5, false, "unknown",
+      0, 0U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_contract_missing");
+}
+
+TEST(HorizonContract, InactiveOverrideRejectsNonzeroSolverContract) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, false, 0, 0U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 42U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_contract_inactive_nonzero");
+}
+
+TEST(HorizonContract, StampMismatchFallsBackFromMpcHorizon) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      false, "solver_prediction", 7, 42U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_contract_stamp_mismatch");
+}
+
+TEST(HorizonContract, SourceModeAndStalenessAreRejected) {
+  const auto source = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "neutral_reference", 7, 42U);
+  const auto mode = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 6, 42U);
+  const auto stale = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{9.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 42U);
+
+  EXPECT_EQ(source.reason, "mpc_horizon_contract_source");
+  EXPECT_EQ(mode.reason, "mpc_horizon_contract_mode_mismatch");
+  EXPECT_EQ(stale.reason, "mpc_horizon_contract_stale");
+}
+
+TEST(HorizonContract, LegacyGenerationAndDisabledStrictGateBehaveSafely) {
+  const auto legacy = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 0U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 0U);
+  const auto disabled = simple_pure_pursuit::evaluateMpcHorizonContract(
+      false, true, 7, 42U, false, std::nullopt, 10.1, 0.5,
+      false, "unknown", 0, 0U);
+
+  EXPECT_FALSE(legacy.usable);
+  EXPECT_EQ(legacy.reason, "mpc_horizon_contract_generation_mismatch");
+  EXPECT_TRUE(disabled.usable);
+  EXPECT_EQ(disabled.reason, "fresh");
 }
 
 TEST(Lookahead, StraightTrajectoryCurvatureIsZero) {

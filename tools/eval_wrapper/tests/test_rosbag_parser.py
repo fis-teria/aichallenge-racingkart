@@ -143,6 +143,8 @@ def test_awsim_section_summary_keeps_previous_lap_exit_time_at_lap_rollover() ->
 def test_decode_ackermann_control_command_from_cdr_bytes() -> None:
     raw = bytearray(48)
     raw[0:4] = b"\x00\x01\x00\x00"
+    struct.pack_into("<i", raw, 4, 123)
+    struct.pack_into("<I", raw, 8, 456)
     struct.pack_into("<f", raw, 20, -0.5)
     struct.pack_into("<f", raw, 24, 1.25)
     struct.pack_into("<f", raw, 36, 7.25)
@@ -153,6 +155,8 @@ def test_decode_ackermann_control_command_from_cdr_bytes() -> None:
 
     assert decoded == {
         "time_sec": 12.5,
+        "command_stamp_sec": 123,
+        "command_stamp_nanosec": 456,
         "target_speed_mps": 7.25,
         "accel_mps2": -0.125,
         "steer_rad": -0.5,

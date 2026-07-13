@@ -20,6 +20,16 @@
       - /delay_aware_mpc/debug
       - /mpc/speed_profile_debug
       - /pure_pursuit/debug
+      # planner request, exact MPC horizon provenance, and mux choice are all
+      # needed to prove planner/MPC trajectory agreement after a run.
+      - /overtake/reference_override
+      - /mpc/predicted_horizon
+      - /mpc/predicted_horizon_contract
+      - /hybrid_control/mpc/predicted_horizon
+      - /hybrid_control/mpc/predicted_horizon_contract
+      - /pure_pursuit_mpc_horizon/mpc/predicted_horizon
+      - /pure_pursuit_mpc_horizon/mpc/predicted_horizon_contract
+      - /hybrid_control_mux/debug
       - /debug/overtake/mode
       - /debug/overtake/metrics
       - /v2x/vehicle_positions

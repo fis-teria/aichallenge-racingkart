@@ -21,6 +21,7 @@ MPC本体の最適化は別で、このplannerは横方向オフセット列と�
 | `finitePositiveOr()` | 正の有限値ならその値、そうでなければfallbackを返す。 |
 | `sideRiskIndex()` | 横並び対象のindexを返す。 |
 | `yieldTargetIndex()` | 譲り対象を返す。前方車を優先し、なければ横並び/parallel side。 |
+| `LongitudinalProfile` | FOLLOW/RECOVERY/YIELD/SAFE_STOPなどの減速候補で、遅れ・制動上限から安全評価用の `s(t)` と `predicted_speed_mps(t)` を作る。公開する `v_ref` は即時cap。 |
 
 ## `CandidateBuilder()`
 
@@ -60,7 +61,7 @@ MPC本体の最適化は別で、このplannerは横方向オフセット列と�
 意味:
 
 `ego.frenet.d` から `left_offset_m` へ、`prepare_distance_m` かけて滑らかに寄ります。
-左に十分なpass gapがあるときだけCoreがこの候補を作ります。
+静的pass gapは診断値です。Coreは壁・相手楕円の時系列安全評価が必要な場合にも候補を作りますが、走行中に反対側PASSへ切り替えるためには使いません。
 
 ### `PASS_RIGHT`
 
@@ -155,16 +156,23 @@ MPC本体の最適化は別で、このplannerは横方向オフセット列と�
 
 ## horizon列生成
 
-各点で次を計算します。
+通常/加速候補は既存の速度cap契約を保ちます。減速候補では、`LongitudinalProfile` が次を同時に作ります。
 
 ```text
 t = i * horizon_dt_sec
-longitudinal_speed = SAFE_STOPならsafe_stop_v_mps、それ以外はmax(0.5, ego.v)
-ds = longitudinal_speed * t
-s = wrapS(ego.s + ds)
-ratio = smoothstep(ds / shift_distance)
+delay中: predicted_v(t) = ego.v
+delay後: predicted_v(t) = max(target_speed, ego.v - max_brake_decel_mps2 * (t - delay))
+s(t) = delay中の等速距離 + delay後の制動距離
+predicted_speed_mps[i] = predicted_v(t)
+v_ref[i] = target_speed
+s = wrapS(ego.s + s(t))
+ratio = smoothstep(s(t) / shift_distance)
 d = start_d + (target_d - start_d) * ratio
 ```
+
+`predicted_speed_mps` と `s(t)` は同じ保守的な遅れ・制動モデルです。対して `v_ref[0]` は下流MPC/PPが毎周期すぐ読む速度capなので、予測上の遅れを入れず即時に目標を要求します。これにより減速要求を毎周期リセットせず、安全評価だけは保守的に保ちます。
+
+`max_brake_decel_mps2` はplannerの保守上限 `1.5 m/s^2` 以下だけを許可します。active launchで使う実制御器がこの想定減速を出せることは、別途ログと設定で確認します。設定が不正なら候補を安全扱いにせず、node起動時にoverride自体を無効化します。
 
 `RECOVERY`, `YIELD_BEHIND`, `SAFE_STOP` では `start_d` を安全コリドー内へclampします。
 MPCへ壁外d列を渡さないためです。

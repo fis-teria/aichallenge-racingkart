@@ -321,11 +321,14 @@ and future_corner_curvature >= corner_side_yield_curvature_m_inv
 and future_wall_clearance_m < required_wall_clearance
 ```
 
-または:
+parallel観測からの譲りでは、狭義の横並びへの接近も必要です。
 
 ```text
-future_side_by_side == true
-and outer_wall_risk == true
+parallel_side_candidate == true
+and future_parallel_interaction == true
+and future_side_by_side == true
+and future_corner_side_by_side == true
+and future_outer_wall_risk == true
 ```
 
 ### 予測モデル
@@ -366,7 +369,7 @@ pred_d(t) = opponent_d
 3. 方向不明または同方向なら、未来予測対象に残す。
 4. 予測時刻 `t = 0.5, 1.0, 1.5` 秒を評価する。
 5. 各時刻で `future_delta_s`, `future_delta_d` を計算する。
-6. 未来でも横並びなら `future_side_by_side=true`。
+6. 狭義の横並びしきい値へ入り、parallel候補なら現在より接近している時だけ `future_side_by_side=true`。
 7. その時刻の自車予定 `d` と相手 `d` から、外側壁余裕を見積もる。
 8. 曲率が高い、または未来の外壁余裕が不足する場合、`YIELD_BEHIND` 候補を優先する。
 
@@ -374,14 +377,11 @@ pred_d(t) = opponent_d
 
 ```text
 future_side_by_side
-and (
-  future_corner_side_by_side
-  or future_outer_wall_risk
-)
+and future_corner_side_by_side
+and future_outer_wall_risk
 ```
 
-`future_outer_wall_risk` は、現在の曲率がまだ小さい直線区間でも有効です。
-横並び維持で相手から離れた結果、未来の壁余裕が `future_side_yield_wall_clearance_m` を下回るなら、早めに `YIELD_BEHIND` へ倒します。
+真の現在横並びは従来どおり壁リスクを保持します。parallel候補からの譲りは、横並びへの接近・コーナー・壁リスクを同時に満たす時だけ `YIELD_BEHIND` へ倒します。
 
 推奨初期値:
 

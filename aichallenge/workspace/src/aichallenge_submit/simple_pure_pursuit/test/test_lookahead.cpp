@@ -208,6 +208,97 @@ TEST(Lookahead, MpcHorizonVelocityCapKeepsSolverZeroIndex) {
   EXPECT_NEAR(trajectory.points.at(idx).longitudinal_velocity_mps, 2.0, 1.0e-9);
 }
 
+TEST(LongitudinalOverride, ImmediateSpeedCapRequestsBrakingInSameCycle) {
+  constexpr double current_speed_mps = 4.0;
+  constexpr double planner_speed_cap_mps = 0.2;
+  constexpr double speed_proportional_gain = 1.0;
+
+  const double target_speed_mps = simple_pure_pursuit::applyOvertakeSpeedCap(
+      current_speed_mps, std::optional<double>{planner_speed_cap_mps});
+  const double acceleration_mps2 =
+      simple_pure_pursuit::proportionalLongitudinalAcceleration(
+          target_speed_mps, current_speed_mps, speed_proportional_gain);
+
+  EXPECT_LT(target_speed_mps, current_speed_mps);
+  EXPECT_NEAR(target_speed_mps, planner_speed_cap_mps, 1.0e-9);
+  EXPECT_LT(acceleration_mps2, 0.0);
+}
+
+TEST(HorizonContract, MatchingAbortRecoverySolverHorizonIsUsable) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 42U);
+
+  EXPECT_TRUE(result.usable);
+  EXPECT_EQ(result.reason, "fresh");
+}
+
+TEST(HorizonContract, MismatchedGenerationFallsBackFromMpcHorizon) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 41U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_contract_generation_mismatch");
+}
+
+TEST(HorizonContract, MissingMetadataFallsBackFromMpcHorizon) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, false, std::nullopt, 10.1, 0.5, false, "unknown",
+      0, 0U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_contract_missing");
+}
+
+TEST(HorizonContract, InactiveOverrideRejectsNonzeroSolverContract) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, false, 0, 0U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 42U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_contract_inactive_nonzero");
+}
+
+TEST(HorizonContract, StampMismatchFallsBackFromMpcHorizon) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      false, "solver_prediction", 7, 42U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_contract_stamp_mismatch");
+}
+
+TEST(HorizonContract, SourceModeAndStalenessAreRejected) {
+  const auto source = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "neutral_reference", 7, 42U);
+  const auto mode = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 6, 42U);
+  const auto stale = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{9.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 42U);
+
+  EXPECT_EQ(source.reason, "mpc_horizon_contract_source");
+  EXPECT_EQ(mode.reason, "mpc_horizon_contract_mode_mismatch");
+  EXPECT_EQ(stale.reason, "mpc_horizon_contract_stale");
+}
+
+TEST(HorizonContract, LegacyGenerationAndDisabledStrictGateBehaveSafely) {
+  const auto legacy = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 0U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 0U);
+  const auto disabled = simple_pure_pursuit::evaluateMpcHorizonContract(
+      false, true, 7, 42U, false, std::nullopt, 10.1, 0.5,
+      false, "unknown", 0, 0U);
+
+  EXPECT_FALSE(legacy.usable);
+  EXPECT_EQ(legacy.reason, "mpc_horizon_contract_generation_mismatch");
+  EXPECT_TRUE(disabled.usable);
+  EXPECT_EQ(disabled.reason, "fresh");
+}
+
 TEST(Lookahead, StraightTrajectoryCurvatureIsZero) {
   Trajectory trajectory;
   for (int i = 0; i < 6; ++i) {

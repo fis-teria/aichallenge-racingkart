@@ -76,14 +76,11 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
       exact_side_target ? out.side_delta_d : out.parallel_side_delta_d;
   const double target_s_dot =
       exact_side_target ? out.side_s_dot_mps : out.parallel_side_s_dot_mps;
-  const double future_side_s_m =
-      exact_side_target
-          ? config_.side_by_side_s_m
-          : std::max(config_.side_by_side_s_m, config_.parallel_side_s_m);
-  const double future_side_margin_m =
-      exact_side_target
-          ? config_.side_margin_m
-          : std::max(config_.side_margin_m, config_.parallel_side_margin_m);
+  // parallel_side_* は観測・debug用の広い窓であり、譲り判断には使わない。
+  const double future_side_s_m = config_.side_by_side_s_m;
+  const double future_side_margin_m = config_.side_margin_m;
+  const double initial_abs_delta_s = std::abs(
+      exact_side_target ? out.side_delta_s : out.parallel_side_delta_s);
 
   const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
   const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
@@ -126,7 +123,12 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
     const double opp_d = opp.frenet.d;
     const double delta_s = signedDeltaS(ego_s, opp_s, frame_.length());
     const double delta_d = opp_d - ego_d;
-    const bool future_side = std::abs(delta_s) < future_side_s_m &&
+    const bool parallel_interaction =
+        exact_side_target ||
+        (std::isfinite(initial_abs_delta_s) &&
+         std::abs(delta_s) + 1.0e-3 < initial_abs_delta_s);
+    const bool future_side = parallel_interaction &&
+                             std::abs(delta_s) < future_side_s_m &&
                              std::abs(delta_d) < future_side_margin_m;
     const double future_curvature =
         maxAbsCurvatureAhead(ego_s, config_.corner_side_yield_lookahead_m);
@@ -145,6 +147,8 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
       // 処理ブロック: 最も壁余裕が小さかった未来状態をdebug用に保持する。
       // 設計意図: なぜ譲りになったかをログ/レポートで後から追えるようにする。
       found_future_side = true;
+      out.future_parallel_interaction =
+          out.future_parallel_interaction || !exact_side_target;
       if (future_corner) {
         found_future_corner = true;
       }
@@ -187,7 +191,8 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
   out.future_side_by_side = found_future_side;
   out.future_corner_side_by_side = found_future_corner;
   out.future_outer_wall_risk = found_outer_wall_risk;
-  if (found_future_side && found_outer_wall_risk) {
+  if (found_future_side && found_outer_wall_risk &&
+      (exact_side_target || found_future_corner)) {
     out.future_yield_required = true;
     if (out.yield_reason.empty()) {
       out.yield_reason = "future_outer_wall_risk";

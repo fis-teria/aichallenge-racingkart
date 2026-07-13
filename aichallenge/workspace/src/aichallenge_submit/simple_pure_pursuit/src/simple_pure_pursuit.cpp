@@ -5,12 +5,14 @@
 #include <motion_utils/motion_utils.hpp>
 #include <tier4_autoware_utils/tier4_autoware_utils.hpp>
 
+#include <builtin_interfaces/msg/time.hpp>
 #include <tf2/utils.h>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -26,6 +28,17 @@ using tier4_autoware_utils::calcYawDeviation;
 namespace {
 constexpr std::size_t kMaxMpcHorizonNearestIndex = 3;
 constexpr double kMpcHorizonVelocityCapForwardArcM = 0.25;
+constexpr std::int64_t kMaxOvertakeOverrideGeneration = 16777215;
+
+std::optional<std::int64_t> finiteIntegerInRange(
+    double value, std::int64_t minimum, std::int64_t maximum) {
+  if (!std::isfinite(value) || std::trunc(value) != value ||
+      value < static_cast<double>(minimum) ||
+      value > static_cast<double>(maximum)) {
+    return std::nullopt;
+  }
+  return static_cast<std::int64_t>(value);
+}
 
 double trajectoryArcLength(const Trajectory &trajectory) {
   if (trajectory.points.size() < 2) {
@@ -126,6 +139,46 @@ std::optional<double> jsonNumberField(const std::string &json,
   }
 }
 
+std::optional<std::int64_t> jsonIntegerField(const std::string &json,
+                                             const std::string &key) {
+  const std::string key_token = "\"" + key + "\"";
+  const auto key_pos = json.find(key_token);
+  if (key_pos == std::string::npos) {
+    return std::nullopt;
+  }
+  const auto colon_pos = json.find(':', key_pos + key_token.size());
+  if (colon_pos == std::string::npos) {
+    return std::nullopt;
+  }
+  std::size_t value_start = colon_pos + 1;
+  while (value_start < json.size() &&
+         std::isspace(static_cast<unsigned char>(json[value_start]))) {
+    ++value_start;
+  }
+  std::size_t value_end = value_start;
+  if (value_end < json.size() && json[value_end] == '-') {
+    ++value_end;
+  }
+  while (value_end < json.size() &&
+         std::isdigit(static_cast<unsigned char>(json[value_end]))) {
+    ++value_end;
+  }
+  if (value_end == value_start ||
+      (json[value_start] == '-' && value_end == value_start + 1)) {
+    return std::nullopt;
+  }
+  if (value_end < json.size() &&
+      (json[value_end] == '.' || json[value_end] == 'e' ||
+       json[value_end] == 'E')) {
+    return std::nullopt;
+  }
+  try {
+    return std::stoll(json.substr(value_start, value_end - value_start));
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
 } // namespace
 
 SimplePurePursuit::SimplePurePursuit()
@@ -168,6 +221,8 @@ SimplePurePursuit::SimplePurePursuit()
           "require_solved_mpc_health_for_horizon", false)),
       max_mpc_health_age_sec_(
           declare_parameter<float>("max_mpc_health_age_sec", 0.30)),
+      require_matching_overtake_horizon_contract_(declare_parameter<bool>(
+          "require_matching_overtake_horizon_contract", false)),
       use_overtake_reference_override_(
           declare_parameter<bool>("use_overtake_reference_override", false)),
       overtake_override_timeout_sec_(
@@ -224,6 +279,11 @@ SimplePurePursuit::SimplePurePursuit()
       [this](const Trajectory::SharedPtr msg) {
         mpc_predicted_horizon_ = msg;
         last_mpc_predicted_horizon_receive_sec_ = steadyNowSec();
+      });
+  sub_mpc_predicted_horizon_contract_ = create_subscription<String>(
+      "input/mpc_predicted_horizon_contract", bv_qos,
+      [this](const String::SharedPtr msg) {
+        onMpcPredictedHorizonContract(msg);
       });
   sub_overtake_override_ = create_subscription<Float32MultiArray>(
       "input/overtake_reference_override", rclcpp::QoS(1),
@@ -315,7 +375,13 @@ void SimplePurePursuit::onTimer() {
       context.overtake_override_applied, overtakeLateralOffset(0),
       longitudinal.overtake_speed_cap_mps, now_sec, context.mpc_horizon_applied,
       longitudinal.mpc_horizon_velocity_cap_applied,
-      longitudinal.mpc_horizon_velocity_cap_mps, context.mpc_horizon_freshness,
+      longitudinal.mpc_horizon_velocity_cap_mps,
+      context.evaluated_horizon_stamp_sec,
+      context.evaluated_horizon_stamp_nanosec,
+      context.applied_horizon_stamp_sec,
+      context.applied_horizon_stamp_nanosec, context.applied_horizon_source,
+      context.applied_horizon_mode_id, context.applied_horizon_generation,
+      context.mpc_horizon_freshness,
       context.source, control_pose);
 
   pub_cmd_->publish(cmd);
@@ -369,6 +435,26 @@ SimplePurePursuit::selectControlTrajectory(
                            ? mpc_predicted_horizon_.get()
                            : trajectory_.get();
   context.source = context.mpc_horizon_applied ? "mpc_horizon" : "trajectory";
+  if (mpc_predicted_horizon_ != nullptr) {
+    context.evaluated_horizon_stamp_sec =
+        mpc_predicted_horizon_->header.stamp.sec;
+    context.evaluated_horizon_stamp_nanosec =
+        mpc_predicted_horizon_->header.stamp.nanosec;
+  }
+  if (context.mpc_horizon_applied && mpc_predicted_horizon_ != nullptr) {
+    context.applied_horizon_stamp_sec = context.evaluated_horizon_stamp_sec;
+    context.applied_horizon_stamp_nanosec =
+        context.evaluated_horizon_stamp_nanosec;
+    if (mpc_horizon_contract_received_ &&
+        context.applied_horizon_stamp_sec == mpc_horizon_contract_stamp_sec_ &&
+        context.applied_horizon_stamp_nanosec ==
+            mpc_horizon_contract_stamp_nanosec_) {
+      context.applied_horizon_source = mpc_horizon_contract_source_;
+      context.applied_horizon_mode_id = mpc_horizon_contract_mode_id_;
+      context.applied_horizon_generation =
+          mpc_horizon_contract_generation_;
+    }
+  }
 
   if (context.trajectory == nullptr || context.trajectory->points.empty()) {
     context.invalid_reason =
@@ -437,12 +523,13 @@ SimplePurePursuit::computeLongitudinalCommand(
   if (const auto overtake_speed_cap = overtakeSpeedCap(0, now_sec)) {
     result.overtake_speed_cap_mps = overtake_speed_cap.value();
     result.target_speed_mps =
-        std::min(result.target_speed_mps, overtake_speed_cap.value());
+        applyOvertakeSpeedCap(result.target_speed_mps, overtake_speed_cap);
   }
 
   result.acceleration_mps2 =
-      speed_proportional_gain_ *
-      (result.target_speed_mps - result.current_speed_mps);
+      proportionalLongitudinalAcceleration(result.target_speed_mps,
+                                            result.current_speed_mps,
+                                            speed_proportional_gain_);
   return result;
 }
 
@@ -723,6 +810,28 @@ SimplePurePursuit::evaluateMpcPredictedHorizon(double now_sec) const {
   }
 
   if (result.usable) {
+    const bool override_active = overtakeOverrideFresh(now_sec);
+    const bool stamp_matches =
+        mpc_predicted_horizon_ && mpc_horizon_contract_received_ &&
+        mpc_predicted_horizon_->header.stamp.sec ==
+            mpc_horizon_contract_stamp_sec_ &&
+        mpc_predicted_horizon_->header.stamp.nanosec ==
+            mpc_horizon_contract_stamp_nanosec_;
+    const auto contract = evaluateMpcHorizonContract(
+        require_matching_overtake_horizon_contract_, override_active,
+        overtake_mode_id_, overtake_override_generation_,
+        mpc_horizon_contract_received_,
+        last_mpc_predicted_horizon_contract_receive_sec_, now_sec,
+        max_mpc_horizon_age_sec_, stamp_matches,
+        mpc_horizon_contract_source_, mpc_horizon_contract_mode_id_,
+        mpc_horizon_contract_generation_);
+    if (!contract.usable) {
+      result.usable = false;
+      result.reason = contract.reason;
+    }
+  }
+
+  if (result.usable) {
     const auto nearest_idx = findNearestIndex(mpc_predicted_horizon_->points,
                                               odometry_->pose.pose.position);
     if (nearest_idx > kMaxMpcHorizonNearestIndex) {
@@ -779,6 +888,22 @@ void SimplePurePursuit::publishStaleDebug(const rclcpp::Time &stamp,
        << "\"mpc_infeasible_count\":" << mpc_health_infeasible_count_ << ","
        << "\"mpc_predicted_horizon_source\":\"" << mpc_predicted_horizon_source_
        << "\","
+       << "\"mpc_horizon_contract_required\":"
+       << (require_matching_overtake_horizon_contract_ ? "true" : "false")
+       << ","
+       << "\"mpc_horizon_contract_received\":"
+       << (mpc_horizon_contract_received_ ? "true" : "false") << ","
+       << "\"mpc_horizon_contract_age_sec\":"
+       << inputAgeSec(last_mpc_predicted_horizon_contract_receive_sec_, now_sec)
+       << ","
+       << "\"mpc_horizon_contract_source\":\""
+       << mpc_horizon_contract_source_ << "\","
+       << "\"mpc_horizon_contract_mode_id\":"
+       << mpc_horizon_contract_mode_id_ << ","
+       << "\"mpc_horizon_contract_generation\":"
+       << mpc_horizon_contract_generation_ << ","
+       << "\"overtake_override_generation\":"
+       << overtake_override_generation_ << ","
        << "\"mpc_horizon_reject_reason\":\"" << horizon.reason << "\"}";
 
   String msg;
@@ -794,14 +919,22 @@ void SimplePurePursuit::onOvertakeOverride(
 
   const double now_sec = steadyNowSec();
   const auto &data = msg->data;
-  if (data.size() < 3 || static_cast<int>(data[0]) != 1) {
+  if (data.size() < 3) {
     clearOvertakeOverride();
     return;
   }
 
-  const int mode_id = static_cast<int>(data[1]);
-  const int n = static_cast<int>(data[2]);
-  if (n <= 0 || mode_id == 0) {
+  const auto valid = finiteIntegerInRange(data[0], 1, 1);
+  const auto mode_id = finiteIntegerInRange(data[1], 0, 255);
+  const auto count_value = finiteIntegerInRange(data[2], 0, 1000);
+  if (!valid.has_value() || !mode_id.has_value() ||
+      !count_value.has_value()) {
+    clearOvertakeOverride();
+    return;
+  }
+  const int mode_id_int = static_cast<int>(mode_id.value());
+  const int n = static_cast<int>(count_value.value());
+  if (n <= 0 || mode_id_int == 0) {
     clearOvertakeOverride();
     last_overtake_override_sec_ = now_sec;
     return;
@@ -809,11 +942,11 @@ void SimplePurePursuit::onOvertakeOverride(
 
   const std::size_t count = static_cast<std::size_t>(n);
   const std::size_t expected = 3 + 2 * count;
-  if (data.size() < expected) {
+  if (data.size() != expected && data.size() != expected + 2) {
     RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "Malformed overtake reference override: len=%zu expected=%zu",
-        data.size(), expected);
+        "Malformed overtake reference override: len=%zu expected=%zu or %zu",
+        data.size(), expected, expected + 2);
     clearOvertakeOverride();
     return;
   }
@@ -823,14 +956,64 @@ void SimplePurePursuit::onOvertakeOverride(
   overtake_lateral_offsets_.reserve(count);
   overtake_speed_caps_.reserve(count);
   for (std::size_t i = 0; i < count; ++i) {
-    overtake_lateral_offsets_.push_back(static_cast<double>(data[3 + i]));
+    const double lateral_offset = static_cast<double>(data[3 + i]);
+    const double speed_cap = static_cast<double>(data[3 + count + i]);
+    if (!std::isfinite(lateral_offset) || !std::isfinite(speed_cap)) {
+      clearOvertakeOverride();
+      return;
+    }
+    overtake_lateral_offsets_.push_back(lateral_offset);
+    overtake_speed_caps_.push_back(speed_cap);
   }
-  for (std::size_t i = 0; i < count; ++i) {
-    overtake_speed_caps_.push_back(static_cast<double>(data[3 + count + i]));
+  overtake_override_generation_ = 0;
+  if (data.size() == expected + 2) {
+    const auto contract_version = finiteIntegerInRange(data[expected], 1, 1);
+    const auto generation = finiteIntegerInRange(
+        data[expected + 1], 1, kMaxOvertakeOverrideGeneration);
+    if (!contract_version.has_value() || !generation.has_value()) {
+      clearOvertakeOverride();
+      return;
+    }
+    overtake_override_generation_ =
+        static_cast<std::uint32_t>(generation.value());
   }
-  overtake_mode_id_ = mode_id;
+  overtake_mode_id_ = mode_id_int;
   overtake_override_active_ = true;
   last_overtake_override_sec_ = now_sec;
+}
+
+void SimplePurePursuit::onMpcPredictedHorizonContract(
+    const String::SharedPtr msg) {
+  const auto version = jsonIntegerField(msg->data, "contract_version");
+  const auto stamp_sec = jsonIntegerField(msg->data, "horizon_stamp_sec");
+  const auto stamp_nanosec =
+      jsonIntegerField(msg->data, "horizon_stamp_nanosec");
+  const auto source = jsonStringField(msg->data, "source");
+  const auto mode_id = jsonIntegerField(msg->data, "mode_id");
+  const auto generation =
+      jsonIntegerField(msg->data, "override_generation");
+  if (!version.has_value() || version.value() != 1 || !stamp_sec.has_value() ||
+      !stamp_nanosec.has_value() || !source.has_value() ||
+      !mode_id.has_value() || !generation.has_value() ||
+      stamp_sec.value() < std::numeric_limits<std::int32_t>::min() ||
+      stamp_sec.value() > std::numeric_limits<std::int32_t>::max() ||
+      stamp_nanosec.value() < 0 || stamp_nanosec.value() >= 1000000000LL ||
+      mode_id.value() < 0 || mode_id.value() > 255 ||
+      generation.value() < 0 ||
+      generation.value() > kMaxOvertakeOverrideGeneration) {
+    mpc_horizon_contract_received_ = false;
+    return;
+  }
+  mpc_horizon_contract_stamp_sec_ =
+      static_cast<std::int32_t>(stamp_sec.value());
+  mpc_horizon_contract_stamp_nanosec_ =
+      static_cast<std::uint32_t>(stamp_nanosec.value());
+  mpc_horizon_contract_source_ = *source;
+  mpc_horizon_contract_mode_id_ = static_cast<int>(mode_id.value());
+  mpc_horizon_contract_generation_ =
+      static_cast<std::uint32_t>(generation.value());
+  mpc_horizon_contract_received_ = true;
+  last_mpc_predicted_horizon_contract_receive_sec_ = steadyNowSec();
 }
 
 void SimplePurePursuit::onMpcHealth(const String::SharedPtr msg) {
@@ -861,6 +1044,7 @@ void SimplePurePursuit::onMpcHealth(const String::SharedPtr msg) {
 void SimplePurePursuit::clearOvertakeOverride() {
   overtake_override_active_ = false;
   overtake_mode_id_ = 0;
+  overtake_override_generation_ = 0;
   overtake_lateral_offsets_.clear();
   overtake_speed_caps_.clear();
   last_overtake_override_sec_ = -1.0e9;
@@ -946,18 +1130,28 @@ void SimplePurePursuit::publishDebug(
     double overtake_lateral_offset_m, double overtake_speed_cap_mps,
     double freshness_now_sec, bool mpc_horizon_applied,
     bool mpc_horizon_velocity_cap_applied, double mpc_horizon_velocity_cap_mps,
+    std::int32_t evaluated_horizon_stamp_sec,
+    std::uint32_t evaluated_horizon_stamp_nanosec,
+    std::int32_t applied_horizon_stamp_sec,
+    std::uint32_t applied_horizon_stamp_nanosec,
+    const std::string &applied_horizon_source, int applied_horizon_mode_id,
+    std::uint32_t applied_horizon_generation,
     const HorizonFreshnessResult &mpc_horizon_freshness,
     const std::string &trajectory_source,
     const ControlPosePrediction &control_pose) {
-  (void)stamp;
   if (debug_publish_period_sec_ <= 0.0 || !pub_debug_) {
     return;
   }
 
-  if (freshness_now_sec - last_debug_publish_sec_ < debug_publish_period_sec_) {
+  if (!mpc_horizon_applied &&
+      freshness_now_sec - last_debug_publish_sec_ < debug_publish_period_sec_) {
     return;
   }
   last_debug_publish_sec_ = freshness_now_sec;
+
+  // rclcpp::Time does not expose ROS message fields directly. Preserve the
+  // command timestamp exactly as it will appear on the wire in debug output.
+  const builtin_interfaces::msg::Time stamp_msg = stamp;
 
   const auto &nearest = control_trajectory.points.at(nearest_traj_point_idx);
   const double ego_x = odometry_->pose.pose.position.x;
@@ -1002,6 +1196,22 @@ void SimplePurePursuit::publishDebug(
        << (mpc_horizon_velocity_cap_applied ? "true" : "false") << ","
        << "\"mpc_horizon_velocity_cap_mps\":" << mpc_horizon_velocity_cap_mps
        << ","
+       << "\"command_stamp_sec\":" << stamp_msg.sec << ","
+       << "\"command_stamp_nanosec\":" << stamp_msg.nanosec << ","
+       << "\"evaluated_horizon_stamp_sec\":"
+       << evaluated_horizon_stamp_sec << ","
+       << "\"evaluated_horizon_stamp_nanosec\":"
+       << evaluated_horizon_stamp_nanosec << ","
+       << "\"applied_horizon_stamp_sec\":" << applied_horizon_stamp_sec
+       << ","
+       << "\"applied_horizon_stamp_nanosec\":"
+       << applied_horizon_stamp_nanosec << ","
+       << "\"applied_horizon_source\":\"" << applied_horizon_source
+       << "\","
+       << "\"applied_horizon_mode_id\":" << applied_horizon_mode_id
+       << ","
+       << "\"applied_horizon_generation\":"
+       << applied_horizon_generation << ","
        << "\"mpc_horizon_age_sec\":" << mpc_horizon_freshness.age_sec << ","
        << "\"mpc_horizon_points\":" << mpc_horizon_freshness.point_count << ","
        << "\"mpc_horizon_start_distance_m\":"
@@ -1015,6 +1225,23 @@ void SimplePurePursuit::publishDebug(
        << "\"mpc_infeasible_count\":" << mpc_health_infeasible_count_ << ","
        << "\"mpc_predicted_horizon_source\":\"" << mpc_predicted_horizon_source_
        << "\","
+       << "\"mpc_horizon_contract_required\":"
+       << (require_matching_overtake_horizon_contract_ ? "true" : "false")
+       << ","
+       << "\"mpc_horizon_contract_received\":"
+       << (mpc_horizon_contract_received_ ? "true" : "false") << ","
+       << "\"mpc_horizon_contract_age_sec\":"
+       << inputAgeSec(last_mpc_predicted_horizon_contract_receive_sec_,
+                      freshness_now_sec)
+       << ","
+       << "\"mpc_horizon_contract_source\":\""
+       << mpc_horizon_contract_source_ << "\","
+       << "\"mpc_horizon_contract_mode_id\":"
+       << mpc_horizon_contract_mode_id_ << ","
+       << "\"mpc_horizon_contract_generation\":"
+       << mpc_horizon_contract_generation_ << ","
+       << "\"overtake_override_generation\":"
+       << overtake_override_generation_ << ","
        << "\"mpc_horizon_reject_reason\":\"" << mpc_horizon_freshness.reason
        << "\","
        << "\"nearest_trajectory_index\":" << nearest_traj_point_idx << ","

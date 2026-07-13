@@ -59,9 +59,24 @@ overtake_planner_node:
     large_lateral_error_v_max_mps: 8.5
     min_pass_gap_m: 1.8
     pass_gap_hysteresis_m: 0.15
+    dynamic_pass_candidate_enabled: true
     yield_speed_margin_mps: 0.60
     yield_min_speed_cap_mps: 9.5
     yield_rejoin_gap_m: 3.0
+    # Planner safety prediction. Keep <= the verified active controller deceleration.
+    # The default hybrid MPC permits -1.0 m/s^2; PP/mux fallback permits -1.5 m/s^2.
+    max_brake_decel_mps2: 1.0
+    longitudinal_response_delay_sec: 0.25
+    stationary_obstacle_speed_threshold_mps: 0.30
+    # 通常ライン復帰は全fresh V2X車両に対するRECOVERY軌道評価が連続で通るまで禁止する。
+    # 壁マージン・安全楕円・MPC health guardを緩める代替ではない。
+    reentry_gate_enabled: true
+    reentry_safe_cycles: 5
+    reentry_min_safety_margin_h: 0.30
+    reentry_evaluation_horizon_sec: 4.0
+    reentry_v2x_snapshot_stale_time_sec: 0.50
+    reentry_hold_v_max_mps: 0.50
+    reentry_require_mpc_health: true
     left_offset_m: 0.80
     right_offset_m: -0.80
     overtake_lateral_profile_mode: "localized_latched"  # legacy / localized_latched

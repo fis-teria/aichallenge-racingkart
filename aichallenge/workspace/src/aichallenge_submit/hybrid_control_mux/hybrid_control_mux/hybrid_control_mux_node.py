@@ -180,7 +180,9 @@ class HybridControlMuxNode(Node):
             fallback_active = decision.fallback_active
             solved_cycles = decision.solved_cycles
 
-        cmd = self._select_command(decision_source, now_sec)
+        selected_input_cmd = self._selected_input_command(decision_source)
+        cmd = self._select_command(
+            decision_source, now_sec, selected_input_cmd)
         steering_result = self._limit_steering(cmd, decision_source, now_sec)
         self.control_pub.publish(cmd)
         self._publish_debug(
@@ -192,6 +194,7 @@ class HybridControlMuxNode(Node):
             mpc_cmd_fresh=mpc_cmd_fresh,
             pure_pursuit_cmd_fresh=pp_cmd_fresh,
             health=health,
+            selected_input_cmd=selected_input_cmd,
             output_cmd=cmd,
             steering_result=steering_result,
         )
@@ -203,12 +206,26 @@ class HybridControlMuxNode(Node):
             )
             self.last_source = decision_source
 
-    def _select_command(self, source: str, now_sec: float) -> AckermannControlCommand:
-        if source == "mpc" and self.mpc_cmd is not None:
-            return self._stamp(copy.deepcopy(self.mpc_cmd), now_sec)
-        if source == "pure_pursuit" and self.pure_pursuit_cmd is not None:
-            return self._fallback_command(copy.deepcopy(self.pure_pursuit_cmd), now_sec)
+    def _select_command(
+        self,
+        source: str,
+        now_sec: float,
+        selected_input_cmd: Optional[AckermannControlCommand],
+    ) -> AckermannControlCommand:
+        if source == "mpc" and selected_input_cmd is not None:
+            return self._stamp(copy.deepcopy(selected_input_cmd), now_sec)
+        if source == "pure_pursuit" and selected_input_cmd is not None:
+            return self._fallback_command(copy.deepcopy(selected_input_cmd), now_sec)
         return self._stop_command(now_sec)
+
+    def _selected_input_command(
+        self, source: str
+    ) -> Optional[AckermannControlCommand]:
+        if source == "mpc":
+            return self.mpc_cmd
+        if source == "pure_pursuit":
+            return self.pure_pursuit_cmd
+        return None
 
     def _fallback_command(
         self, cmd: AckermannControlCommand, now_sec: float
@@ -293,6 +310,7 @@ class HybridControlMuxNode(Node):
         mpc_cmd_fresh: bool,
         pure_pursuit_cmd_fresh: bool,
         health: MpcHealth,
+        selected_input_cmd: Optional[AckermannControlCommand],
         output_cmd: AckermannControlCommand,
         steering_result: SteeringLimitResult,
     ) -> None:
@@ -308,6 +326,7 @@ class HybridControlMuxNode(Node):
                 "controller": "hybrid_control_mux",
                 "primary_source": self.core.config.primary_source,
                 "source": source,
+                "selected_source": source,
                 "fallback_active": fallback_active,
                 "reason": reason,
                 "solved_cycles": solved_cycles,
@@ -317,6 +336,10 @@ class HybridControlMuxNode(Node):
                 "mpc_status": health.status,
                 "mpc_infeasible_count": health.infeasible_count,
                 "mpc_health_age_sec": health.age_sec if math.isfinite(health.age_sec) else None,
+                "selected_input_stamp_sec": self._stamp_sec(selected_input_cmd),
+                "selected_input_stamp_nanosec": self._stamp_nanosec(selected_input_cmd),
+                "output_stamp_sec": self._stamp_sec(output_cmd),
+                "output_stamp_nanosec": self._stamp_nanosec(output_cmd),
                 "output_speed_mps": output_cmd.longitudinal.speed,
                 "output_accel_mps2": output_cmd.longitudinal.acceleration,
                 "output_steer_rad": output_cmd.lateral.steering_tire_angle,
@@ -334,6 +357,18 @@ class HybridControlMuxNode(Node):
     @staticmethod
     def _fresh(last_time_sec: Optional[float], now_sec: float, timeout_sec: float) -> bool:
         return last_time_sec is not None and now_sec - last_time_sec <= timeout_sec
+
+    @staticmethod
+    def _stamp_sec(cmd: Optional[AckermannControlCommand]) -> Optional[int]:
+        if cmd is None:
+            return None
+        return int(cmd.stamp.sec)
+
+    @staticmethod
+    def _stamp_nanosec(cmd: Optional[AckermannControlCommand]) -> Optional[int]:
+        if cmd is None:
+            return None
+        return int(cmd.stamp.nanosec)
 
     @staticmethod
     def _finite_clamp(value: float, lower: float, upper: float) -> float:

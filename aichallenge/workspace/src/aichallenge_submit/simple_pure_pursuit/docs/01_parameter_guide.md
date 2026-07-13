@@ -68,6 +68,7 @@ MPC horizon を使う場合、horizon 上の速度が `external_target_vel` よ�
 | `min_mpc_horizon_arc_length_m` | horizon 全体の最小弧長。 | 短すぎる horizon で lookahead が末端に張り付くのを防ぎます。 |
 | `require_solved_mpc_health_for_horizon` | MPC health が solved の時だけ horizon を使うか。 | PurePursuit主制御では `true` 推奨です。MPC infeasible時は通常trajectoryへ戻せます。 |
 | `max_mpc_health_age_sec` | MPC health を fresh とみなす最大 age。 | MPC debug周期より少し広くします。`0.30`-`0.50` が調整候補です。 |
+| `require_matching_overtake_horizon_contract` | activeなplanner overrideと、MPC horizonのmode/generationが一致する時だけhorizonを採用するか。 | 追い越しを使う`hybrid_delay_aware_mpc`と`pure_pursuit_mpc_horizon`では`true`です。不一致時は通常trajectory+overrideへ戻ります。 |
 
 horizon は以下を満たす時だけ使われます。
 
@@ -80,8 +81,9 @@ horizon は以下を満たす時だけ使われます。
 - 弧長が `min_mpc_horizon_arc_length_m` 以上
 - ego 最近傍 index が先頭から大きくズレていない
 - `require_solved_mpc_health_for_horizon=true` の場合、`/mpc/speed_profile_debug` が fresh で `mpc_status=solved` かつ `mpc_infeasible_count=0`
+- `require_matching_overtake_horizon_contract=true` かつoverride有効時は、`/mpc/predicted_horizon_contract` のstamp、`source=solver_prediction`、mode、generationがplanner requestと一致
 
-MPC側の `/mpc/predicted_horizon` は、`OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK` 中だけ solver の予測結果をpublishします。
+MPC側の `/mpc/predicted_horizon` は、`OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK`, `ABORT_RECOVERY` 中だけ solver の予測結果をpublishします。
 それ以外の通常走行、追従、追い越し準備中は、現在poseとMPC参照pathから作る neutral horizon をpublishします。
 `neutral_horizon_publish_period_sec > 0` の場合、neutral horizon はMPC solve loopから分離され、固定周期のtimerで `fixed_neutral_reference` としてpublishされます。
 neutral horizon の先頭アンカー点は現在poseを表しますが、速度は現在速度ではなく参照path速度を優先して入れます。
@@ -90,7 +92,7 @@ neutral horizon の先頭アンカー点は現在poseを表しますが、速度
 これにより、PP fallbackが通常走行中に古い追い越し横オフセットを追い続けることを避けます。
 
 `pure_pursuit_mpc_horizon` では、MPC側の `predicted_horizon_publish_mode` を `overtake_or_neutral` にします。
-このモードでは `OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK` 中だけsolver予測horizonを出し、それ以外は固定周期のneutral horizonを出します。
+このモードでは `OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK`, `ABORT_RECOVERY` 中だけsolver予測horizonを出し、それ以外は固定周期のneutral horizonを出します。
 Pure Pursuit側はhealth gateでempty/unsolved horizonを採用せず、通常trajectoryとovertake overrideによる走行へ戻ります。
 
 ## 曲率適応lookahead
@@ -142,9 +144,10 @@ MPC horizon が usable な時は、horizon を優先するため通常 trajector
 
 - `trajectory_source`: `trajectory`, `trajectory_overtake_override`, `mpc_horizon`
 - `mpc_horizon_applied`: horizon を実際に使ったか
-- `mpc_horizon_reject_reason`: `disabled`, `missing`, `stale`, `empty`, `short`, `frame_mismatch`, `nonfinite`, `start_distance`, `short_arc`, `nearest_index`, `mpc_health_missing`, `mpc_health_stale`, `mpc_health_infeasible`, `fresh`
+- `mpc_horizon_reject_reason`: 上記に加え、契約不一致時は `mpc_horizon_contract_missing`, `mpc_horizon_contract_stale`, `mpc_horizon_contract_stamp_mismatch`, `mpc_horizon_contract_source`, `mpc_horizon_contract_mode_mismatch`, `mpc_horizon_contract_generation_mismatch`
 - `mpc_horizon_age_sec`, `mpc_horizon_points`, `mpc_horizon_start_distance_m`, `mpc_horizon_arc_length_m`
 - `mpc_health_status`, `mpc_health_age_sec`, `mpc_infeasible_count`, `mpc_predicted_horizon_source`
+- `mpc_horizon_contract_*`, `overtake_override_generation`: horizonの出所とplanner requestが同じsolver解かを確認するための契約情報
 - `lookahead_distance_m`, `path_curvature_1pm`, `target_speed_mps`
 - `control_pose_shifted`, `control_pose_x/y/yaw_rad`, `steering_source`, `steering_age_sec`
 - `pure_pursuit_steering_tire_angle_rad`, `curvature_feedforward_steering_rad`, `signed_path_curvature_1pm`

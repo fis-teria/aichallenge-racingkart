@@ -57,6 +57,8 @@ class DomainResult:
     delay_debug_timeseries: list[dict[str, object]]
     speed_profile_debug_timeseries: list[dict[str, object]]
     overtake_debug_timeseries: list[dict[str, object]]
+    planner_mpc_contract_timeseries: list[dict[str, object]]
+    planner_mpc_contract_point_timeseries: list[dict[str, object]]
     section_summary: list[dict[str, object]]
     awsim_section_summary: list[dict[str, object]]
     corner_summary: list[dict[str, object]]
@@ -142,6 +144,12 @@ def build_domain_result(
         delay_debug_timeseries=[dict(item) for item in rosbag.delay_debug_timeseries],
         speed_profile_debug_timeseries=[dict(item) for item in rosbag.speed_profile_debug_timeseries],
         overtake_debug_timeseries=[dict(item) for item in rosbag.overtake_debug_timeseries],
+        planner_mpc_contract_timeseries=[
+            dict(item) for item in rosbag.planner_mpc_contract_timeseries
+        ],
+        planner_mpc_contract_point_timeseries=[
+            dict(item) for item in rosbag.planner_mpc_contract_point_timeseries
+        ],
         section_summary=[dict(item) for item in rosbag.section_summary],
         awsim_section_summary=[dict(item) for item in rosbag.awsim_section_summary],
         corner_summary=[dict(item) for item in rosbag.corner_summary],
@@ -172,6 +180,10 @@ def write_processed_outputs(
     _write_delay_debug_timeseries(run_id, domains, processed_dir / "delay_aware_debug.csv")
     _write_speed_profile_debug_timeseries(run_id, domains, processed_dir / "speed_profile_debug.csv")
     _write_overtake_debug_timeseries(run_id, domains, processed_dir / "overtake_debug.csv")
+    _write_planner_mpc_contract_timeseries(
+        run_id, domains, processed_dir / "planner_mpc_contract.csv")
+    _write_planner_mpc_contract_point_timeseries(
+        run_id, domains, processed_dir / "planner_mpc_contract_points.csv")
     _write_grade_profile(run_id, domains, processed_dir / "grade_profile.csv")
     _write_motion_log(run_id, domains, processed_dir / "motion_log.csv")
     _write_events(domains, processed_dir / "events.csv")
@@ -457,6 +469,62 @@ def _write_overtake_debug_timeseries(run_id: str, domains: list[DomainResult], p
         "reason",
     ]
     _write_dynamic_timeseries(run_id, domains, path, "overtake_debug_timeseries", preferred)
+
+
+def _write_planner_mpc_contract_timeseries(
+    run_id: str, domains: list[DomainResult], path: Path,
+) -> None:
+    preferred = [
+        "time_sec",
+        "status",
+        "mode_id",
+        "override_generation",
+        "horizon_source",
+        "planner_override_points",
+        "horizon_points",
+        "compared_points",
+        "max_abs_lateral_error_m",
+        "mean_abs_lateral_error_m",
+        "first_mismatch_point_index",
+        "execution_status",
+        "execution_reason",
+        "pp_command_stamp_sec",
+        "pp_command_stamp_nanosec",
+        "mux_output_stamp_sec",
+        "mux_output_stamp_nanosec",
+        "final_command_speed_mps",
+        "final_command_accel_mps2",
+        "final_command_steer_rad",
+        "pp_mpc_horizon_applied",
+        "pp_trajectory_source",
+        "pp_mpc_horizon_reject_reason",
+        "mux_source",
+        "mux_reason",
+        "reference_topic",
+    ]
+    _write_dynamic_timeseries(
+        run_id, domains, path, "planner_mpc_contract_timeseries", preferred)
+
+
+def _write_planner_mpc_contract_point_timeseries(
+    run_id: str, domains: list[DomainResult], path: Path,
+) -> None:
+    preferred = [
+        "time_sec",
+        "mode_id",
+        "override_generation",
+        "point_index",
+        "planner_lateral_offset_m",
+        "mpc_lateral_offset_m",
+        "lateral_error_m",
+        "abs_lateral_error_m",
+        "within_tolerance",
+        "summary_status",
+        "execution_status",
+        "reference_topic",
+    ]
+    _write_dynamic_timeseries(
+        run_id, domains, path, "planner_mpc_contract_point_timeseries", preferred)
 
 
 def _write_dynamic_timeseries(

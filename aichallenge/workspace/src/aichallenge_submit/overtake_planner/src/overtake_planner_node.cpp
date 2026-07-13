@@ -190,6 +190,47 @@ std::string resolveOwnVehicleId(const std::string &configured_id,
   return "d1";
 }
 
+// 入力: 起動時に読み込んだPlannerConfig。
+// 出力: 安全にoverrideを有効化できない理由。問題がなければnullopt。
+// 処理概要: 縦安全予測がplannerの保守的制動上限・有限horizon内にあることを、
+// 起動前に検査して不正設定での介入を止める。実制御器の能力はactive launchで
+// 別途この仮定以上であることを確認する。
+std::optional<std::string>
+invalidLongitudinalSafetyConfig(const PlannerConfig &config) {
+  if (config.horizon_points < 2) {
+    return "horizon_points must be >= 2";
+  }
+  if (!std::isfinite(config.horizon_dt_sec) || config.horizon_dt_sec <= 0.0) {
+    return "horizon_dt_sec must be finite and > 0";
+  }
+  if (!std::isfinite(config.max_brake_decel_mps2) ||
+      config.max_brake_decel_mps2 <= 0.0 ||
+      config.max_brake_decel_mps2 > 1.5) {
+    return "max_brake_decel_mps2 must be finite and in (0, 1.5]";
+  }
+  if (!std::isfinite(config.longitudinal_response_delay_sec) ||
+      config.longitudinal_response_delay_sec < 0.0) {
+    return "longitudinal_response_delay_sec must be finite and >= 0";
+  }
+  if (!std::isfinite(config.stationary_obstacle_speed_threshold_mps) ||
+      config.stationary_obstacle_speed_threshold_mps < 0.0) {
+    return "stationary_obstacle_speed_threshold_mps must be finite and >= 0";
+  }
+  if (config.reentry_gate_enabled &&
+      (config.reentry_safe_cycles < 1 ||
+       !std::isfinite(config.reentry_min_safety_margin_h) ||
+       config.reentry_min_safety_margin_h < config.min_ellipse_h ||
+       !std::isfinite(config.reentry_evaluation_horizon_sec) ||
+       config.reentry_evaluation_horizon_sec <= 0.0 ||
+       !std::isfinite(config.reentry_v2x_snapshot_stale_time_sec) ||
+       config.reentry_v2x_snapshot_stale_time_sec <= 0.0 ||
+       !std::isfinite(config.reentry_hold_v_max_mps) ||
+       config.reentry_hold_v_max_mps <= 0.0)) {
+    return "invalid reentry gate safety parameter";
+  }
+  return std::nullopt;
+}
+
 } // namespace
 
 class OvertakePlannerNode : public rclcpp::Node {
@@ -216,8 +257,10 @@ public:
 
     PlannerConfig config;
     config.enabled = declare_parameter<bool>("enabled", true);
-    config.horizon_points =
-        static_cast<std::size_t>(declare_parameter<int>("horizon_points", 20));
+    const int horizon_points_param = declare_parameter<int>("horizon_points", 20);
+    config.horizon_points = horizon_points_param > 0
+                                ? static_cast<std::size_t>(horizon_points_param)
+                                : 0U;
     config.horizon_dt_sec = declare_parameter<double>("horizon_dt_sec", 0.025);
     config.lookahead_s_m = declare_parameter<double>("lookahead_s_m", 10.0);
     config.follow_trigger_s_m =
@@ -312,12 +355,34 @@ public:
     config.min_pass_gap_m = declare_parameter<double>("min_pass_gap_m", 1.80);
     config.pass_gap_hysteresis_m =
         declare_parameter<double>("pass_gap_hysteresis_m", 0.15);
+    config.dynamic_pass_candidate_enabled =
+        declare_parameter<bool>("dynamic_pass_candidate_enabled", true);
     config.yield_speed_margin_mps =
         declare_parameter<double>("yield_speed_margin_mps", 0.60);
     config.yield_min_speed_cap_mps =
         declare_parameter<double>("yield_min_speed_cap_mps", 0.50);
     config.yield_rejoin_gap_m =
         declare_parameter<double>("yield_rejoin_gap_m", 3.0);
+    config.max_brake_decel_mps2 =
+        declare_parameter<double>("max_brake_decel_mps2", 1.0);
+    config.longitudinal_response_delay_sec =
+        declare_parameter<double>("longitudinal_response_delay_sec", 0.25);
+    config.stationary_obstacle_speed_threshold_mps = declare_parameter<double>(
+        "stationary_obstacle_speed_threshold_mps", 0.30);
+    config.reentry_gate_enabled =
+        declare_parameter<bool>("reentry_gate_enabled", true);
+    config.reentry_safe_cycles =
+        declare_parameter<int>("reentry_safe_cycles", 5);
+    config.reentry_min_safety_margin_h =
+        declare_parameter<double>("reentry_min_safety_margin_h", 0.30);
+    config.reentry_evaluation_horizon_sec =
+        declare_parameter<double>("reentry_evaluation_horizon_sec", 4.0);
+    config.reentry_v2x_snapshot_stale_time_sec = declare_parameter<double>(
+        "reentry_v2x_snapshot_stale_time_sec", 0.50);
+    config.reentry_hold_v_max_mps =
+        declare_parameter<double>("reentry_hold_v_max_mps", 0.50);
+    config.reentry_require_mpc_health =
+        declare_parameter<bool>("reentry_require_mpc_health", true);
     config.left_offset_m = declare_parameter<double>("left_offset_m", 0.80);
     config.right_offset_m = declare_parameter<double>("right_offset_m", -0.80);
     config.overtake_lateral_profile_mode = declare_parameter<std::string>(
@@ -446,6 +511,16 @@ public:
         declare_parameter<double>("safe_stop_release_speed_mps", 0.50);
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 20.0);
 
+    if (const auto invalid_reason = invalidLongitudinalSafetyConfig(config);
+        invalid_reason.has_value()) {
+      RCLCPP_ERROR(
+          get_logger(),
+          "invalid overtake longitudinal safety configuration: %s; disabling "
+          "planner override so the baseline watchdog/controller remains active",
+          invalid_reason->c_str());
+      config.enabled = false;
+    }
+
     FrenetFrame frame;
     std::string error;
     const auto reference_path =
@@ -462,6 +537,12 @@ public:
     config.overtake_permission_rules = readOvertakePermissionRules(
         frame_, overtake_permission_package, overtake_permission_csv);
     mpc_health_stale_time_sec_ = config.mpc_health_stale_time_sec;
+    opponent_stale_time_sec_ = config.opponent_stale_time_sec;
+    reentry_v2x_snapshot_stale_time_sec_ =
+        config.reentry_v2x_snapshot_stale_time_sec;
+    mpc_health_infeasible_count_threshold_ =
+        config.mpc_health_infeasible_count_threshold;
+    mpc_health_solve_time_warn_ms_ = config.mpc_health_solve_time_warn_ms;
     core_ = std::make_unique<OvertakePlannerCore>(frame_, config);
 
     // MPCへ渡すoverride配列と、evalwrapで拾うdebugトピックをpublishする。
@@ -557,6 +638,11 @@ private:
     bool wall_risk_speed_guard_active{false};
     bool mpc_health_speed_guard_active{false};
     bool recovery_speed_guard_active{false};
+    bool reentry_requested{false};
+    bool reentry_permitted{false};
+    int reentry_clear_cycles{0};
+    std::string reentry_reason{};
+    std::string reentry_primary_blocker_id{};
     bool lateral_target_hold_active{false};
     std::string lateral_target_hold_reason{};
     std::string speed_cap_reason{};
@@ -801,6 +887,9 @@ private:
       sample.y = y;
       sample.has_prev = true;
     }
+    // 個々の車両stampだけでは「空配列」と「受信停止」を区別できないため、
+    // 復帰ゲート用に配列heartbeatも保持する。
+    last_v2x_snapshot_sec_ = now().seconds();
   }
 
   // 入力: 現在の自車状態と時刻。
@@ -838,17 +927,81 @@ private:
     return opponents;
   }
 
+  // 入力: 現在時刻、自車、最新MPC health。
+  // 出力: 通常ライン復帰ゲートが使える入力完全性。
+  // 処理概要: V2Xの受信停止を「相手なし」と扱わず、既知の他車の古いstampもfail-closedにする。
+  ReentryInputStatus reentryInputStatus(double now_sec, const EgoState &ego,
+                                        const MpcHealthStatus &health) const {
+    ReentryInputStatus status;
+    const auto fresh = [now_sec](double stamp_sec, double timeout_sec) {
+      return std::isfinite(stamp_sec) && std::isfinite(timeout_sec) &&
+             timeout_sec > 0.0 && now_sec >= stamp_sec &&
+             now_sec - stamp_sec <= timeout_sec;
+    };
+    status.ego_fresh = ego.valid && fresh(ego.stamp_sec, ego_stale_time_sec_);
+    status.v2x_snapshot_fresh =
+        last_v2x_snapshot_sec_.has_value() &&
+        fresh(last_v2x_snapshot_sec_.value(),
+              reentry_v2x_snapshot_stale_time_sec_);
+    status.all_observed_opponents_fresh = true;
+    status.all_observed_opponents_included = true;
+    for (const auto &item : samples_) {
+      const auto &id = item.first;
+      const auto &sample = item.second;
+      if (id == own_vehicle_id_) {
+        continue;
+      }
+      if (!sample.has_prev || !std::isfinite(sample.x) ||
+          !std::isfinite(sample.y) ||
+          !fresh(sample.stamp_sec, opponent_stale_time_sec_)) {
+        status.all_observed_opponents_fresh = false;
+        break;
+      }
+      // 通常のplanner入力では近すぎる観測をself重複対策として除外する。
+      // 復帰だけは未評価の相手を安全とみなさず、gateを閉じる。
+      if (std::hypot(sample.x - ego.x, sample.y - ego.y) <
+          ignore_near_ego_m_) {
+        status.all_observed_opponents_included = false;
+      }
+    }
+    status.reference_valid = !frame_.empty();
+    status.mpc_healthy = health.valid &&
+                        health.infeasible_count <
+                            mpc_health_infeasible_count_threshold_ &&
+                        (!std::isfinite(health.solve_time_ms) ||
+                         health.solve_time_ms < mpc_health_solve_time_warn_ms_) &&
+                        fresh(now_sec - health.age_sec,
+                              mpc_health_stale_time_sec_);
+    return status;
+  }
+
   // 入力: coreが返したPlannerOutput。
   // 出力: /overtake/reference_override へFloat32MultiArrayをpublishする。
   // 処理概要: MPC側の簡易プロトコルに合わせ、mode、点数、横offset列、速度列を1配列に詰める。
   void publishOverride(const PlannerOutput &output) {
     // Float32MultiArrayの簡易プロトコル: [valid, mode_id, n, d[0..n),
-    // v_ref[0..n)]。
+    // v_ref[0..n), contract_version, override_generation]。
+    // 末尾2要素を読まない旧consumerは従来どおり先頭部分だけを使える。
     std_msgs::msg::Float32MultiArray msg;
     const int mode_id = static_cast<int>(output.mode);
     const int n = output.active_override
                       ? static_cast<int>(output.lateral_offsets.size())
                       : 0;
+    const bool payload_changed =
+        output.active_override != last_override_active_ ||
+        mode_id != last_override_mode_id_ ||
+        output.lateral_offsets != last_override_lateral_offsets_ ||
+        output.speed_caps != last_override_speed_caps_;
+    if (payload_changed) {
+      // Float32が全整数を正確に保持できる範囲に収める。0はinactive/旧形式用。
+      override_generation_ = override_generation_ >= 16777215U
+                                 ? 1U
+                                 : override_generation_ + 1U;
+      last_override_active_ = output.active_override;
+      last_override_mode_id_ = mode_id;
+      last_override_lateral_offsets_ = output.lateral_offsets;
+      last_override_speed_caps_ = output.speed_caps;
+    }
     msg.data.push_back(1.0F);
     msg.data.push_back(static_cast<float>(mode_id));
     msg.data.push_back(static_cast<float>(n));
@@ -860,6 +1013,8 @@ private:
       msg.data.push_back(
           static_cast<float>(output.speed_caps[static_cast<std::size_t>(i)]));
     }
+    msg.data.push_back(1.0F);  // contract_version
+    msg.data.push_back(static_cast<float>(override_generation_));
     override_pub_->publish(msg);
   }
 
@@ -962,6 +1117,25 @@ private:
         << jsonNumber(output.blocked_info.slow_obstacle_chain_delta_d) << ","
         << "\"slow_obstacle_chain_speed_mps\":"
         << jsonNumber(output.blocked_info.slow_obstacle_chain_speed_mps) << ","
+        << "\"stationary_front_obstacle\":"
+        << (output.blocked_info.stationary_front_obstacle ? "true" : "false")
+        << ","
+        << "\"stationary_front_id\":\""
+        << output.blocked_info.stationary_front_id << "\","
+        << "\"stationary_front_ttc_sec\":"
+        << jsonNumber(output.blocked_info.stationary_front_ttc_sec) << ","
+        << "\"stationary_front_brake_feasible\":"
+        << (output.blocked_info.stationary_front_brake_feasible ? "true"
+                                                                 : "false")
+        << ","
+        << "\"stationary_front_required_brake_distance_m\":"
+        << jsonNumber(
+               output.blocked_info.stationary_front_required_brake_distance_m)
+        << ","
+        << "\"stationary_front_available_brake_distance_m\":"
+        << jsonNumber(
+               output.blocked_info.stationary_front_available_brake_distance_m)
+        << ","
         << "\"future_side_by_side\":"
         << (output.blocked_info.future_side_by_side ? "true" : "false") << ","
         << "\"future_corner_side_by_side\":"
@@ -980,6 +1154,9 @@ private:
         << ","
         << "\"future_yield_required\":"
         << (output.blocked_info.future_yield_required ? "true" : "false") << ","
+        << "\"future_parallel_interaction\":"
+        << (output.blocked_info.future_parallel_interaction ? "true" : "false")
+        << ","
         << "\"future_prediction_time_sec\":"
         << jsonNumber(output.blocked_info.future_prediction_time_sec) << ","
         << "\"predicted_opponent_s\":"
@@ -1064,6 +1241,22 @@ private:
         << (output.blocked_info.can_pass_left ? "true" : "false") << ","
         << "\"can_pass_right\":"
         << (output.blocked_info.can_pass_right ? "true" : "false") << ","
+        << "\"pass_left_candidate_generated\":"
+        << (output.blocked_info.pass_left_candidate_generated ? "true"
+                                                               : "false")
+        << ","
+        << "\"pass_right_candidate_generated\":"
+        << (output.blocked_info.pass_right_candidate_generated ? "true"
+                                                                : "false")
+        << ","
+        << "\"pass_left_candidate_feasible\":"
+        << (output.blocked_info.pass_left_candidate_feasible ? "true"
+                                                              : "false")
+        << ","
+        << "\"pass_right_candidate_feasible\":"
+        << (output.blocked_info.pass_right_candidate_feasible ? "true"
+                                                               : "false")
+        << ","
         << "\"pass_gap_required_m\":"
         << jsonNumber(output.blocked_info.pass_gap_required_m) << ","
         << "\"pass_decision_frozen\":"
@@ -1111,6 +1304,28 @@ private:
         << (output.lateral_target_hold_active ? "true" : "false") << ","
         << "\"lateral_target_hold_reason\":\""
         << output.lateral_target_hold_reason << "\","
+        << "\"published_lateral_safety_rejected\":"
+        << (output.published_lateral_safety_rejected ? "true" : "false")
+        << ","
+        << "\"reentry_requested\":"
+        << (output.reentry_gate.requested ? "true" : "false") << ","
+        << "\"reentry_permitted\":"
+        << (output.reentry_gate.permitted ? "true" : "false") << ","
+        << "\"reentry_input_complete\":"
+        << (output.reentry_gate.input_complete ? "true" : "false") << ","
+        << "\"reentry_clear_cycles\":" << output.reentry_gate.clear_cycles
+        << ","
+        << "\"reentry_evaluated_opponent_count\":"
+        << output.reentry_gate.evaluated_opponent_count << ","
+        << "\"reentry_reason\":\"" << output.reentry_gate.reason << "\","
+        << "\"reentry_primary_blocker_id\":\""
+        << output.reentry_gate.blocking_vehicle_id << "\","
+        << "\"reentry_min_safety_margin\":"
+        << jsonNumber(output.reentry_gate.min_safety_margin) << ","
+        << "\"reentry_cbf_slack\":"
+        << jsonNumber(output.reentry_gate.cbf_slack) << ","
+        << "\"reentry_blocking_time_sec\":"
+        << jsonNumber(output.reentry_gate.blocking_time_sec) << ","
         << "\"lateral_profile_mode\":\"" << output.lateral_profile_mode
         << "\","
         << "\"maneuver_latch_active\":"
@@ -1240,6 +1455,12 @@ private:
     snapshot.mpc_health_speed_guard_active =
         output.mpc_health_speed_guard_active;
     snapshot.recovery_speed_guard_active = output.recovery_speed_guard_active;
+    snapshot.reentry_requested = output.reentry_gate.requested;
+    snapshot.reentry_permitted = output.reentry_gate.permitted;
+    snapshot.reentry_clear_cycles = output.reentry_gate.clear_cycles;
+    snapshot.reentry_reason = output.reentry_gate.reason;
+    snapshot.reentry_primary_blocker_id =
+        output.reentry_gate.blocking_vehicle_id;
     snapshot.lateral_target_hold_active = output.lateral_target_hold_active;
     snapshot.lateral_target_hold_reason = output.lateral_target_hold_reason;
     snapshot.speed_cap_reason = output.speed_cap_reason;
@@ -1272,6 +1493,7 @@ private:
            snapshot.wall_risk_speed_guard_active ||
            snapshot.mpc_health_speed_guard_active ||
            snapshot.recovery_speed_guard_active ||
+           snapshot.reentry_requested ||
            snapshot.lateral_target_hold_active ||
            !snapshot.straight_overtake_start_allowed ||
            !snapshot.overtake_permission_allowed ||
@@ -1366,6 +1588,12 @@ private:
             previous.mpc_health_speed_guard_active ||
         current.recovery_speed_guard_active !=
             previous.recovery_speed_guard_active ||
+        current.reentry_requested != previous.reentry_requested ||
+        current.reentry_permitted != previous.reentry_permitted ||
+        current.reentry_clear_cycles != previous.reentry_clear_cycles ||
+        current.reentry_reason != previous.reentry_reason ||
+        current.reentry_primary_blocker_id !=
+            previous.reentry_primary_blocker_id ||
         current.lateral_target_hold_active !=
             previous.lateral_target_hold_active ||
         current.lateral_target_hold_reason !=
@@ -1430,6 +1658,8 @@ private:
         "safe_stop_release_count=%d "
         "safe_stop_release_ready=%d speed_only=%d wall_guard=%d mpc_guard=%d "
         "recovery_guard=%d "
+        "reentry_requested=%d reentry_permitted=%d reentry_clear_cycles=%d "
+        "reentry_reason=%s reentry_blocker=%s "
         "speed_cap_reason=%s speed_cap=%.2f section=%s/%s mpc_infeasible=%d "
         "mpc_solve_ms=%.2f reason=%s",
         own_vehicle_id_.c_str(), static_cast<unsigned long>(attempt_id),
@@ -1481,7 +1711,11 @@ private:
         output.safe_stop_release_ready, output.speed_only_fallback_active,
         output.wall_risk_speed_guard_active,
         output.mpc_health_speed_guard_active,
-        output.recovery_speed_guard_active, output.speed_cap_reason.c_str(),
+        output.recovery_speed_guard_active,
+        output.reentry_gate.requested, output.reentry_gate.permitted,
+        output.reentry_gate.clear_cycles, output.reentry_gate.reason.c_str(),
+        output.reentry_gate.blocking_vehicle_id.c_str(),
+        output.speed_cap_reason.c_str(),
         output.applied_speed_cap_mps, output.active_section.name.c_str(),
         output.active_section.profile.c_str(),
         output.mpc_health.infeasible_count, output.mpc_health.solve_time_ms,
@@ -1511,8 +1745,10 @@ private:
     }
 
     const auto opponents = collectOpponents(ego, now_sec);
+    const auto mpc_health = currentMpcHealth(now_sec);
+    const auto reentry_input = reentryInputStatus(now_sec, ego, mpc_health);
     const auto output =
-        core_->update(now_sec, ego, opponents, currentMpcHealth(now_sec));
+        core_->update(now_sec, ego, opponents, mpc_health, reentry_input);
     const auto attempt_id = updateAttemptId(output.mode);
     publishOverride(output);
     publishDebug(output, ego, attempt_id);
@@ -1527,15 +1763,25 @@ private:
   double ignore_near_ego_m_{1.0};
   double position_jump_threshold_m_{5.0};
   double ego_stale_time_sec_{0.50};
+  double opponent_stale_time_sec_{0.50};
+  double reentry_v2x_snapshot_stale_time_sec_{0.50};
   double control_rate_hz_{20.0};
   double mpc_health_stale_time_sec_{0.60};
+  int mpc_health_infeasible_count_threshold_{1};
+  double mpc_health_solve_time_warn_ms_{80.0};
   MpcHealthStatus mpc_health_{};
   std::optional<double> last_mpc_health_sec_;
+  std::optional<double> last_v2x_snapshot_sec_;
   BehaviorMode last_mode_{BehaviorMode::FREE_RUN};
   DecisionLogSnapshot last_decision_log_snapshot_{};
   bool has_decision_log_snapshot_{false};
   bool attempt_active_{false};
   std::uint64_t current_attempt_id_{0};
+  bool last_override_active_{false};
+  int last_override_mode_id_{0};
+  std::vector<double> last_override_lateral_offsets_;
+  std::vector<double> last_override_speed_caps_;
+  std::uint32_t override_generation_{0};
 
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr override_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub_;

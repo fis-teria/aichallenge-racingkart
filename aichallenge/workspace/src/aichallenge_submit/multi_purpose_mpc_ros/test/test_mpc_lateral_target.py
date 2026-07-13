@@ -101,16 +101,35 @@ def test_overtake_lateral_override_uses_snapshot_if_callback_clears(monkeypatch)
 def test_overtake_override_snapshot_keeps_lateral_and_speed_same_generation():
     mpc = make_mpc(lateral_target_mode="reference_path")
     mpc.set_overtake_reference_override([0.2, 0.4], [3.0, 4.0], mode_id=3)
-    mode_id, lateral_offsets, speed_caps = mpc._overtake_override_snapshot()
+    mpc.set_overtake_reference_override(
+        [0.2, 0.4], [3.0, 4.0], mode_id=3, generation=12)
+    mode_id, generation, lateral_offsets, speed_caps = (
+        mpc._overtake_override_snapshot())
 
     mpc.set_overtake_reference_override([-0.5, -0.6], [1.0, 1.5], mode_id=4)
 
     assert mode_id == 3
+    assert generation == 12
     assert mpc._overtake_lateral_reference(
         2, np.array([1.0, 1.0]), np.array([-1.0, -1.0]),
         lateral_offsets) == pytest.approx([0.2, 0.4])
     assert mpc._overtake_speed_cap(0, speed_caps) == pytest.approx(3.0)
     assert mpc._overtake_speed_cap(1, speed_caps) == pytest.approx(4.0)
+
+
+def test_prediction_contract_snapshot_keeps_mode_and_generation_together():
+    mpc = make_mpc()
+    mpc.set_overtake_reference_override(
+        [0.3], [2.0], mode_id=7, generation=42)
+
+    mode_id, generation, _offsets, _speed_caps = (
+        mpc._overtake_override_snapshot())
+    mpc._last_problem_prediction_contract = (mode_id, generation)
+    mpc.set_overtake_reference_override(
+        [-0.3], [1.0], mode_id=4, generation=43)
+    mpc.current_prediction_contract = mpc._last_problem_prediction_contract
+
+    assert mpc.current_prediction_contract == (7, 42)
 
 
 def test_overtake_speed_cap_returns_none_for_invalid_values():

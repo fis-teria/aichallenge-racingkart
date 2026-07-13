@@ -23,7 +23,7 @@ flowchart LR
 `/overtake/reference_override` の配列形式は次です。
 
 ```text
-[valid, mode_id, n, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1]]
+[valid, mode_id, n, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1], contract_version, override_generation]
 ```
 
 | 要素 | 意味 |
@@ -33,6 +33,8 @@ flowchart LR
 | `n` | overrideが有効ならhorizon点数、無効なら0。 |
 | `d[]` | Frenet横方向オフセット列。 |
 | `v_ref[]` | 各horizon点の速度上限列。 |
+| `contract_version` | 現在は`1`。先頭部分しか読まない旧consumerとの互換性を保つ。 |
+| `override_generation` | payload変更時に増える世代。MPCが解いたhorizonとplanner requestの一致確認に使う。 |
 
 ## ソースの責務マップ
 

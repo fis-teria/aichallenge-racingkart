@@ -68,7 +68,9 @@ mpc:
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
   R: [1000000.0, 10.0]
-  a_min: 0 # m/s^2
+  # hybrid_delay_aware_mpcではMPCが最終commandになる。停止障害物への
+  # overtake overrideが仮定する1.0 m/s^2の制動を拒否しないこと。
+  a_min: -1.0 # m/s^2
   a_max: 3.0 # m/s^2
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 1.0 # rad/s

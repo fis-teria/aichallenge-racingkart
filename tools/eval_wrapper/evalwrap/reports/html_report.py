@@ -82,6 +82,8 @@ def generate_run_report(run_dir: Path, manifest: dict[str, Any], metrics: dict[s
         _link("../processed/delay_aware_debug.csv", "delay_aware_debug.csv"),
         _link("../processed/speed_profile_debug.csv", "speed_profile_debug.csv"),
         _link("../processed/overtake_debug.csv", "overtake_debug.csv"),
+        _link("../processed/planner_mpc_contract.csv", "planner_mpc_contract.csv"),
+        _link("../processed/planner_mpc_contract_points.csv", "planner_mpc_contract_points.csv"),
         _link("../processed/overtake_metrics.json", "overtake_metrics.json"),
         _link("../processed/overtake_attempts.csv", "overtake_attempts.csv"),
         _link("../processed/overtake_timeseries.csv", "overtake_timeseries.csv"),

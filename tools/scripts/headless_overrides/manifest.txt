@@ -9,6 +9,7 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/ai
 aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/package.xml
 aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/core/MPC.py
 aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/mpc_controller.py
+aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/overtake_contract.py
 aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/speed_profile.py
 aichallenge/workspace/src/aichallenge_submit/simple_pure_pursuit/CMakeLists.txt
 aichallenge/workspace/src/aichallenge_submit/simple_pure_pursuit/package.xml

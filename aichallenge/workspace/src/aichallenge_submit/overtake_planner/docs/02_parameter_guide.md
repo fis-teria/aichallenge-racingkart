@@ -52,9 +52,9 @@ YAMLに書かれている値が優先されるため、現在の実走値は「�
 |---|---:|---:|---|
 | `side_by_side_s_m` | `4.0` | `4.0` | 狭義の横並び前後範囲。 |
 | `side_margin_m` | `1.20` | `1.20` | 狭義の横並び横幅。広げすぎると通常の横並びが過敏になる。 |
-| `parallel_side_detection_enabled` | `true` | `true` | 広めの並走候補を未来予測へ渡す。 |
-| `parallel_side_s_m` | `12.0` | `12.0` | 広めの並走候補の前後範囲。 |
-| `parallel_side_margin_m` | `4.0` | `4.0` | 広めの並走候補の横幅。 |
+| `parallel_side_detection_enabled` | `true` | `true` | 広めの並走候補をdebug/予測の入力として記録する。単独では譲り根拠にしない。 |
+| `parallel_side_s_m` | `12.0` | `12.0` | 広めの並走候補の前後範囲。行動判定には `side_by_side_s_m` を使う。 |
+| `parallel_side_margin_m` | `4.0` | `4.0` | 広めの並走候補の横幅。行動判定には `side_margin_m` を使う。 |
 
 カーブで追い越し開始してほしくない場合:
 
@@ -75,11 +75,11 @@ ref velocity区間を元に追い越し開始を許可/禁止したい場合:
 | `default_overtake_allowed` | `true` | `true` | CSVに該当しない区間で追い越し開始を許すか。 |
 | `overtake_permission_lookahead_m` | `8.0` | `8.0` | 近い将来の不可区間も見て追い越し開始を止める距離。 |
 | `slow_front_exception_enabled` | `true` | `true` | 不可区間でも前方車が停止/低速なら例外的にPASS開始を許す。 |
-| `slow_front_exception_speed_mps` | `1.0` | `1.0` | 停止/低速とみなす前方車速度。 |
-| `slow_front_exception_distance_m` | `8.0` | `8.0` | 低速例外を許す前方距離。 |
-| `slow_front_exception_required_cycles` | `3` | `3` | 低速例外に必要な連続判定周期数。 |
-| `slow_obstacle_chain_enabled` | `true` | `true` | 1台目通過後に2台目が `parallel_side` として見える停止車列を前方閉塞へ昇格する。 |
-| `slow_obstacle_chain_distance_m` | `12.0` | `12.0` | 停止車列として昇格するparallel-side前方距離。 |
+| `slow_front_exception_speed_mps` | `1.0` | `1.0` | 低速前走車の診断用しきい値。曲線・追い越し禁止区間の開始gateは迂回しない。 |
+| `slow_front_exception_distance_m` | `8.0` | `8.0` | 低速前走車の診断対象距離。 |
+| `slow_front_exception_required_cycles` | `3` | `3` | 低速前走車を連続判定する周期数。 |
+| `slow_obstacle_chain_enabled` | `true` | `true` | 同一コリドー内かつ接近中の低速parallel車だけを前方閉塞へ昇格する。 |
+| `slow_obstacle_chain_distance_m` | `12.0` | `12.0` | 停止車列として昇格を検討する最大前方距離。 |
 
 CSV例:
 
@@ -155,15 +155,30 @@ s9,335,1,true
 |---|---:|---:|---|
 | `min_pass_gap_m` | `1.8` | `1.80` | 左右に必要な追い越し空間。上げるとPASS候補が減る。 |
 | `pass_gap_hysteresis_m` | `0.15` | `0.15` | 既に追い越し中の方向だけ、必要gapを少し緩める。 |
+| `dynamic_pass_candidate_enabled` | `true` | `true` | 静的gapが狭くても左右PASS候補を生成し、楕円・壁の時系列安全評価で最終判定する。 |
 | `safety_ellipse_b_m` | `1.8` | `1.8` | pass gap必要量にも効く横方向安全幅。 |
 | `min_ellipse_h` | `0.20` | `0.20` | pass gap必要量と他車安全評価に効く余裕。 |
+
+`can_pass_left/right` は静的gapの診断値です。`dynamic_pass_candidate_enabled=true` の実運用では、PASS開始は候補の時系列安全評価、直線gate、追い越し許可区間をすべて満たす時だけです。すでにPASS中は反対側へ横切って切り替えず、現在側の候補がunsafeならYIELD/RECOVERYへ戻ります。
+
+### 停止障害物と制動予測
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `max_brake_decel_mps2` | `1.0` | `1.0` | `s(t)` 評価に使う想定減速度。plannerの保守上限 `1.5 m/s^2` を超えてはいけない。 |
+| `longitudinal_response_delay_sec` | `0.25` | `0.25` | 減速指令から実減速までの保守的な遅れ。上げると必要停止距離が増える。 |
+| `stationary_obstacle_speed_threshold_mps` | `0.30` | `0.30` | 前方停止障害物として分類する相手速度上限。 |
+
+停止障害物では、遅れ後に最大制動した最遠到達距離で `s(t)` と `predicted_speed_mps(t)` を作ります。一方、MPC/PPへ出す `v_ref[0]` は目標capです。下流は先頭値を各周期に直接消費するため、予測用の遅れを `v_ref` に入れると制動要求が毎周期先送りになるからです。安全評価は保守的な遅れを保持したまま、速度capだけを即時に要求します。FOLLOW/YIELDの必要制動距離が安全楕円を除いた前方距離を超える場合は通常候補から外し、SAFE_STOPまたは既存speed-only fallbackへ倒します。
+
+起動時に `horizon_points >= 2`、有限かつ正の `horizon_dt_sec`、`0 < max_brake_decel_mps2 <= 1.5`、有限かつ非負の遅れ・停止車閾値を検証します。不正ならerrorを出してplanner overrideを無効化し、baseline controller/watchdogに委ねます。`max_brake_decel_mps2` を変える前には、実際に選ばれるcontrol mode（Pure Pursuit / mux / MPC）の制動可能値がこの想定以上であることをログと設定で確認します。
 
 `pass_gap_reason` は `ok`, `left_gap_narrow`, `right_gap_narrow`, `both_gap_narrow`, `no_target`, `large_lateral_error` を見ます。
 
 ## FutureSideBySideRiskAnalyzer
 
-`FutureSideBySideRiskAnalyzer` は、現在の `side_by_side` または `parallel_side_candidate` が短時間後のコーナーで壁余裕を失うかを先読みします。
-危険なら `future_yield_required=true` とし、`YIELD_BEHIND` を優先しやすくします。
+`FutureSideBySideRiskAnalyzer` は、現在の `side_by_side`、または実際に接近して狭義の横並びへ入る `parallel_side_candidate` が短時間後のコーナーで壁余裕を失うかを先読みします。
+広いparallel観測だけでは `future_yield_required=true` にしません。
 
 | パラメータ | 現在値 | fallback | 変更すると何が変わるか |
 |---|---:|---:|---|

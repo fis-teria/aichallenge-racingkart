@@ -46,6 +46,8 @@ bool SafetyEvaluator::evaluate(
   candidate.cbf_slack = 0.0;
   candidate.active_safety_constraint_count = 0;
   candidate.reject_reason.clear();
+  candidate.blocking_opponent_id.clear();
+  candidate.blocking_time_sec = std::numeric_limits<double>::quiet_NaN();
 
   // 処理ブロック: 壁との安全余裕を先に確認する。
   // 設計意図: 壁違反は相手車有無に関係なく危険なので、計算量の大きい相手車評価より前に落とす。
@@ -77,6 +79,10 @@ bool SafetyEvaluator::evaluate(
         candidate.feasible = false;
         candidate.cbf_slack = config_.min_ellipse_h - margin;
         candidate.reject_reason = "opponent_collision";
+        candidate.blocking_opponent_id = pred.id;
+        if (i < candidate.t.size()) {
+          candidate.blocking_time_sec = candidate.t[i];
+        }
         return false;
       }
     }

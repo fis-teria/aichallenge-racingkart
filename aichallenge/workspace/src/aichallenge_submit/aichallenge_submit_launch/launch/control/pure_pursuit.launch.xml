@@ -5,6 +5,7 @@
   <arg name="input_kinematics" default="/localization/kinematic_state"/>
   <arg name="input_trajectory" default="/planning/scenario_planning/trajectory"/>
   <arg name="input_mpc_predicted_horizon" default="/mpc/predicted_horizon"/>
+  <arg name="input_mpc_predicted_horizon_contract" default="/mpc/predicted_horizon_contract"/>
   <arg name="input_mpc_health" default="/mpc/speed_profile_debug"/>
   <arg name="input_steering_status" default="/vehicle/status/steering_status"/>
   <arg name="output_control_cmd" default="/control/command/control_cmd"/>
@@ -27,6 +28,7 @@
   <arg name="min_mpc_horizon_arc_length_m" default="10.0"/>
   <arg name="require_solved_mpc_health_for_horizon" default="false"/>
   <arg name="max_mpc_health_age_sec" default="0.30"/>
+  <arg name="require_matching_overtake_horizon_contract" default="false"/>
   <arg name="lookahead_gain" default="0.5"/>
   <arg name="lookahead_min_distance" default="1.5"/>
   <arg name="curvature_adaptive_lookahead_enabled" default="true"/>
@@ -67,6 +69,7 @@
     <param name="min_mpc_horizon_arc_length_m" value="$(var min_mpc_horizon_arc_length_m)"/>
     <param name="require_solved_mpc_health_for_horizon" value="$(var require_solved_mpc_health_for_horizon)"/>
     <param name="max_mpc_health_age_sec" value="$(var max_mpc_health_age_sec)"/>
+    <param name="require_matching_overtake_horizon_contract" value="$(var require_matching_overtake_horizon_contract)"/>
     <param name="lookahead_gain" value="$(var lookahead_gain)"/>
     <param name="lookahead_min_distance" value="$(var lookahead_min_distance)"/>
     <param name="curvature_adaptive_lookahead_enabled" value="$(var curvature_adaptive_lookahead_enabled)"/>
@@ -89,6 +92,7 @@
     <remap from="input/kinematics" to="$(var input_kinematics)"/>
     <remap from="input/trajectory" to="$(var input_trajectory)"/>
     <remap from="input/mpc_predicted_horizon" to="$(var input_mpc_predicted_horizon)"/>
+    <remap from="input/mpc_predicted_horizon_contract" to="$(var input_mpc_predicted_horizon_contract)"/>
     <remap from="input/mpc_health" to="$(var input_mpc_health)"/>
     <remap from="input/steering_status" to="$(var input_steering_status)"/>
     <remap from="input/overtake_reference_override" to="$(var input_overtake_reference_override)"/>

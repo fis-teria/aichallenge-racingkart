@@ -183,6 +183,12 @@ MPCへpublishする横オフセット列の1周期あたり変化量を制限し
 
 SAFE_STOPでは止める意図を優先し、このrate limitはかけません。
 
+## `revalidatePublishedLateral()`
+
+PASS候補だけは、rate limit/hold後に実際にpublishする `d[]` をCartesianへ戻し、元候補と同じ時刻列・壁余裕・相手楕円で再評価します。
+
+ここでunsafeならPASS overrideを消して通常走行へ戻すことはしません。同じ周期で `ABORT_RECOVERY` の候補を安全評価してpublishし、RECOVERYもunsafeなら既存のspeed-only fallbackを使います。
+
 ## `rememberPublishedLateralTarget()`
 
 前回publishした横オフセット列を記憶します。

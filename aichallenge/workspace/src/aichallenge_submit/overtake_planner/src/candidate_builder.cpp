@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace overtake_planner {
 
@@ -46,6 +47,16 @@ int yieldTargetIndex(const BlockedInfo &info) {
 constexpr double kSideDirectionEpsilon = 0.05;
 constexpr double kOutsideCorridorRecoveryShiftScale = 0.5;
 
+// 入力: 候補種別。
+// 出力: 速度capまでの減速到達可能性を安全評価へ反映すべきならtrue。
+// 処理概要: PASS/FASTESTは下流の加速を仮定せず現速度で予測し、追従/譲り/停止だけ減速モデルを使う。
+bool usesBrakingProfile(CandidateType type) {
+  return type == CandidateType::FOLLOW || type == CandidateType::RECOVERY ||
+         type == CandidateType::SIDE_BY_SIDE_KEEP ||
+         type == CandidateType::YIELD_BEHIND ||
+         type == CandidateType::SAFE_STOP;
+}
+
 } // namespace
 
 // 入力: Frenet変換器とplanner設定。
@@ -54,6 +65,104 @@ constexpr double kOutsideCorridorRecoveryShiftScale = 0.5;
 CandidateBuilder::CandidateBuilder(const FrenetFrame &frame,
                                    const PlannerConfig &config)
     : frame_(frame), config_(config) {}
+
+// 入力: 予測時刻[sec]。
+// 出力: 下流制御の遅れと減速上限を反映した、保守的な前進距離[m]。
+// 処理概要: 速度capそのものではなく、応答遅れ後に最大制動だけが掛かる最遠到達距離を積分する。
+double CandidateBuilder::LongitudinalProfile::distanceAt(double t_sec) const {
+  const double t = std::max(0.0, t_sec);
+  const double initial_speed = std::max(0.0, initial_speed_mps);
+  const double target_speed =
+      std::clamp(target_speed_mps, 0.0, initial_speed);
+  if (target_speed >= initial_speed || !valid || brake_decel_mps2 <= 0.0) {
+    return initial_speed * t;
+  }
+
+  const double delay = std::max(0.0, response_delay_sec);
+  if (t <= delay) {
+    return initial_speed * t;
+  }
+  const double braking_time = t - delay;
+  const double required_braking_time =
+      (initial_speed - target_speed) / brake_decel_mps2;
+  if (braking_time <= required_braking_time) {
+    return initial_speed * delay + initial_speed * braking_time -
+           0.5 * brake_decel_mps2 * braking_time * braking_time;
+  }
+  const double braking_distance =
+      initial_speed * required_braking_time -
+      0.5 * brake_decel_mps2 * required_braking_time * required_braking_time;
+  return initial_speed * delay + braking_distance +
+         target_speed * (braking_time - required_braking_time);
+}
+
+// 入力: 予測時刻[sec]。
+// 出力: 同じ遅れ・減速度モデルで、その時刻に到達可能と仮定する速度[m/s]。
+// 処理概要: s(t) と整合する予測速度を返す。下流へ出すv_refは毎周期index 0を
+// 直ちに消費するため、この予測値とは分離して即時capを渡す。
+double CandidateBuilder::LongitudinalProfile::speedAt(double t_sec) const {
+  const double initial_speed = std::max(0.0, initial_speed_mps);
+  const double target_speed =
+      std::clamp(target_speed_mps, 0.0, initial_speed);
+  if (!braking_requested || !valid || brake_decel_mps2 <= 0.0) {
+    return initial_speed;
+  }
+
+  const double braking_time = std::max(0.0, t_sec - response_delay_sec);
+  return std::max(target_speed,
+                  initial_speed - brake_decel_mps2 * braking_time);
+}
+
+// 入力: 目標速度[m/s]。
+// 出力: 応答遅れを含め、その目標速度まで減速するのに必要な距離[m]。
+// 処理概要: 前方停止車との間隔をdebugへ出すため、候補と同じ制動モデルを使う。
+double CandidateBuilder::LongitudinalProfile::requiredDistanceTo(
+    double target_speed_mps) const {
+  const double initial_speed = std::max(0.0, initial_speed_mps);
+  const double target_speed =
+      std::clamp(target_speed_mps, 0.0, initial_speed);
+  if (target_speed >= initial_speed) {
+    return 0.0;
+  }
+  if (!valid || brake_decel_mps2 <= 0.0) {
+    return std::numeric_limits<double>::infinity();
+  }
+  return initial_speed * std::max(0.0, response_delay_sec) +
+         (initial_speed * initial_speed - target_speed * target_speed) /
+             (2.0 * brake_decel_mps2);
+}
+
+// 入力: 候補種別、自車状態、速度cap[m/s]。
+// 出力: 候補安全評価で使う縦方向到達可能性プロファイル。
+// 処理概要: 過大な制動能力を仮定しないため、plannerの1.5 m/s^2保守上限内の
+// 設定値だけを採用する。不正値は減速候補を無効化する。
+CandidateBuilder::LongitudinalProfile
+CandidateBuilder::makeLongitudinalProfile(CandidateType type,
+                                          const EgoState &ego,
+                                          double speed_cap_mps) const {
+  LongitudinalProfile profile;
+  profile.initial_speed_mps = std::max(0.0, ego.v);
+  profile.target_speed_mps =
+      std::clamp(speed_cap_mps, 0.0, profile.initial_speed_mps);
+  const bool braking_requested =
+      usesBrakingProfile(type) &&
+      profile.target_speed_mps + 1.0e-6 < profile.initial_speed_mps;
+  profile.braking_requested = braking_requested;
+  if (!braking_requested) {
+    return profile;
+  }
+  if (!std::isfinite(config_.max_brake_decel_mps2) ||
+      config_.max_brake_decel_mps2 <= 0.0 ||
+      config_.max_brake_decel_mps2 > 1.5 ||
+      !std::isfinite(config_.longitudinal_response_delay_sec) ||
+      config_.longitudinal_response_delay_sec < 0.0) {
+    profile.valid = false;
+    return profile;
+  }
+  profile.brake_decel_mps2 = config_.max_brake_decel_mps2;
+  profile.response_delay_sec = config_.longitudinal_response_delay_sec;
+  return profile;
+}
 
 // 入力: 候補種別、自車状態、閉塞判定、相手車一覧、任意の局所横プロファイル。
 // 出力: Frenet/Cartesianのhorizon点と速度上限を持つCandidateTrajectory。
@@ -72,6 +181,7 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
   candidate.x.reserve(config_.horizon_points);
   candidate.y.reserve(config_.horizon_points);
   candidate.yaw.reserve(config_.horizon_points);
+  candidate.predicted_speed_mps.reserve(config_.horizon_points);
   candidate.v_ref.reserve(config_.horizon_points);
 
   double target_d = 0.0;
@@ -92,8 +202,13 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
   } else if (type == CandidateType::FOLLOW) {
     target_d = 0.0;
   } else if (type == CandidateType::RECOVERY) {
-    target_d = 0.0;
-    if (outside_safe_corridor && !blocked_info.side_by_side) {
+    // 復帰ゲートが閉じている時は、通常ラインへ寄せず現在の安全コリドー内横位置を維持する。
+    // 中心復帰を止めた直後にbase trajectoryへfall throughしないための内部holdである。
+    target_d = blocked_info.reentry_hold_active
+                   ? std::clamp(ego.frenet.d, lower_d, upper_d)
+                   : 0.0;
+    if (!blocked_info.reentry_hold_active && outside_safe_corridor &&
+        !blocked_info.side_by_side) {
       const double base_distance =
           std::min(finitePositiveOr(config_.merge_distance_m, 12.0),
                    finitePositiveOr(config_.prepare_distance_m,
@@ -172,6 +287,12 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     speed_cap = ego_wall_clearance < 0.0
                     ? config_.wall_margin_recovery_v_max_mps
                     : config_.recovery_v_max_mps;
+    if (blocked_info.reentry_hold_active) {
+      speed_cap = std::min(
+          speed_cap,
+          finitePositiveOr(config_.reentry_hold_v_max_mps,
+                           config_.opponent_collision_fallback_v_max_mps));
+    }
   } else if (type == CandidateType::SIDE_BY_SIDE_KEEP) {
     speed_cap = config_.side_by_side_speed_cap_mps;
     if (blocked_info.side_index >= 0) {
@@ -198,6 +319,13 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     if (corner_yield && config_.corner_yield_v_max_mps > 0.0) {
       speed_cap = std::min(speed_cap, config_.corner_yield_v_max_mps);
     }
+    if (blocked_info.stationary_front_obstacle) {
+      // 停止障害物へ譲る時は、通常の高速yield下限を使わず確実に減速要求を出す。
+      speed_cap = std::min(
+          std::max(0.0, ego.v),
+          std::max(std::max(1.0e-3, config_.safe_stop_v_mps),
+                   config_.yield_speed_margin_mps));
+    }
   } else if (type == CandidateType::SAFE_STOP) {
     speed_cap = std::max(1.0e-3, config_.safe_stop_v_mps);
   }
@@ -217,16 +345,25 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     speed_cap = std::min(speed_cap, config_.large_lateral_error_v_max_mps);
   }
 
+  const LongitudinalProfile longitudinal_profile =
+      makeLongitudinalProfile(type, ego, speed_cap);
+  candidate.longitudinal_profile_valid = longitudinal_profile.valid;
+  candidate.assumed_brake_decel_mps2 = longitudinal_profile.brake_decel_mps2;
+  candidate.response_delay_sec = longitudinal_profile.response_delay_sec;
+  candidate.required_brake_distance_m =
+      longitudinal_profile.requiredDistanceTo(speed_cap);
+  if (blocked_info.stationary_front_obstacle &&
+      std::isfinite(blocked_info.front_delta_s)) {
+    candidate.available_brake_distance_m = std::max(
+        0.0, blocked_info.front_delta_s - config_.safety_ellipse_a_m);
+  }
+
   // 処理ブロック: 時間horizonごとのs,d,x,y,yaw,v_refを生成する。
   // 設計意図: MPC入力は固定長配列なので、候補評価とpublishで同じhorizon列を再利用できる形にする。
   for (std::size_t i = 0; i < config_.horizon_points; ++i) {
     // 候補ごとの速度想定でs列を作り、smoothstepで横方向を急変させない。
     const double t = static_cast<double>(i) * config_.horizon_dt_sec;
-    const double longitudinal_speed =
-        type == CandidateType::SAFE_STOP
-            ? std::max(1.0e-3, config_.safe_stop_v_mps)
-            : std::max(0.5, ego.v);
-    const double ds = longitudinal_speed * t;
+    const double ds = longitudinal_profile.distanceAt(t);
     const double s = frame_.wrapS(ego.frenet.s + ds);
     double start_d = ego.frenet.d;
     if (type == CandidateType::RECOVERY ||
@@ -267,6 +404,11 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
     candidate.x.push_back(p.x);
     candidate.y.push_back(p.y);
     candidate.yaw.push_back(p.yaw);
+    // s(t) は応答遅れと制動上限を含む最遠到達可能性で安全評価する。一方で
+    // 下流MPC/PPは各周期にv_ref[0]を目標速度へ直接使うため、予測速度をv_refへ
+    // 出すと遅れが毎周期リセットされる。安全予測は保持したまま、速度capは即時に
+    // 要求する。実制動が予測より早ければ保守側となる。
+    candidate.predicted_speed_mps.push_back(longitudinal_profile.speedAt(t));
     candidate.v_ref.push_back(speed_cap);
   }
 

@@ -51,6 +51,8 @@ def test_write_processed_outputs_writes_grade_profile_and_motion_log(tmp_path: P
         delay_debug_timeseries=[],
         speed_profile_debug_timeseries=[],
         overtake_debug_timeseries=[],
+        planner_mpc_contract_timeseries=[],
+        planner_mpc_contract_point_timeseries=[],
         section_summary=[],
         awsim_section_summary=[],
         corner_summary=[],
@@ -71,3 +73,5 @@ def test_write_processed_outputs_writes_grade_profile_and_motion_log(tmp_path: P
     assert motion_rows[0]["grade_percent"] == ""
     assert motion_rows[1]["grade_percent"] == "4.5"
     assert motion_rows[1]["grade_source"] == "odometry"
+    assert (tmp_path / "planner_mpc_contract.csv").exists()
+    assert (tmp_path / "planner_mpc_contract_points.csv").exists()

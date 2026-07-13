@@ -59,14 +59,16 @@ ROSノードは `overtake_planner_node` です。
 `/overtake/reference_override` の配列形式:
 
 ```text
-[valid, mode_id, n, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1]]
+[valid, mode_id, n, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1], contract_version, override_generation]
 ```
 
 - `valid`: 現状は常に `1.0`
 - `mode_id`: `BehaviorMode` の整数値
 - `n`: overrideが有効ならhorizon点数、無効なら0
 - `d`: Frenet横方向オフセット列
-- `v_ref`: 各点の速度上限列
+- `v_ref`: 各点の即時速度上限列。応答遅れ・制動上限を含む安全予測は `s(t)` と `predicted_speed_mps` に分離する
+- `contract_version`: 現在は `1`。旧consumerは末尾を読まず従来形式として扱える
+- `override_generation`: payloadが変わった時に更新する1以上の世代。MPC solver horizonがどのplanner requestで解かれたかをPP/eval解析が照合する
 
 ## 主要データ構造
 
@@ -265,6 +267,7 @@ MPCへ渡す候補軌道です。
 速度だけを落とす `SPEED_GUARD` では、横オフセットを中心線 `d=0` へ0埋めせず、現在の横位置を保持します。
 その後、`OvertakePlannerCore` が前回publishした横オフセット列との差分を `lateral_target_max_step_m` で制限します。
 高速カーブ中の `YIELD_BEHIND`, `ABORT_RECOVERY`, `SAFE_STOP`, `SPEED_GUARD` では、rate limit後の横オフセット列を `high_speed_curve_lateral_hold_*` 条件でholdし、低速化またはカーブ脱出まで短周期の再選択を抑えます。
+PASSでは、この最終 `d[]` を再度SafetyEvaluatorへ通します。unsafeならoverrideを無効化して通常速度へ戻さず、同じ周期にRECOVERY、さらに不可ならspeed-only fallbackを出します。
 
 `BlockedRiskAnalyzer` と `FutureSideBySideRiskAnalyzer` への責務分割そのものでは、新しいYAMLパラメータは追加していません。
 この文書では、分割前から入っているfuture side prediction、parallel side、straight-only gate、speed guard、MPC health guard系のパラメータもあわせて説明しています。
@@ -409,6 +412,10 @@ h = (x_body / safety_ellipse_a_m)^2
 ## 速度上限
 
 候補ごとに `v_ref` が変わります。
+
+FOLLOW、RECOVERY、SIDE_BY_SIDE_KEEP、YIELD_BEHIND、SAFE_STOPで目標速度が現在速度より低い場合も、公開する `v_ref[0]` は目標capです。下流MPC/PPが各周期に `v_ref[0]` を直接読むため、ここに応答遅れを載せると減速要求が毎周期リセットされるからです。
+
+安全評価用の `s(t)` と `predicted_speed_mps(t)` には、`longitudinal_response_delay_sec` の等速区間と、その後 `max_brake_decel_mps2` を超えない制動を残します。従って予測上の最遠到達距離を甘くせず、実際の速度capだけを即時に要求します。
 
 - `FASTEST`
   - `v_passthrough_mps`

@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from evalwrap.analysis.planner_mpc_contract import (
+    compare_planner_and_mpc_horizons,
+    contract_metrics,
+)
+
 
 DEFAULT_THRESHOLDS = {
     "low_speed_mps": 0.5,
@@ -65,6 +70,25 @@ OVERTAKE_MODE_TOPICS = {
 OVERTAKE_METRICS_TOPICS = {
     "/debug/overtake/metrics",
 }
+OVERTAKE_REFERENCE_OVERRIDE_TOPICS = {
+    "/overtake/reference_override",
+}
+MPC_PREDICTED_HORIZON_TOPICS = {
+    "/mpc/predicted_horizon",
+    "/hybrid_control/mpc/predicted_horizon",
+    "/pure_pursuit_mpc_horizon/mpc/predicted_horizon",
+}
+MPC_PREDICTED_HORIZON_CONTRACT_TOPICS = {
+    "/mpc/predicted_horizon_contract",
+    "/hybrid_control/mpc/predicted_horizon_contract",
+    "/pure_pursuit_mpc_horizon/mpc/predicted_horizon_contract",
+}
+PURE_PURSUIT_DEBUG_TOPICS = {
+    "/pure_pursuit/debug",
+}
+HYBRID_CONTROL_MUX_DEBUG_TOPICS = {
+    "/hybrid_control_mux/debug",
+}
 ACKERMANN_CONTROL_COMMAND_TYPE = "autoware_auto_control_msgs/msg/AckermannControlCommand"
 RawDecoder = Callable[[bytes, float], dict[str, float | None] | None]
 PathPoint = tuple[float, float, float | None]
@@ -81,6 +105,8 @@ class ParsedRosbag:
     delay_debug_timeseries: list[dict[str, object]] = field(default_factory=list)
     speed_profile_debug_timeseries: list[dict[str, object]] = field(default_factory=list)
     overtake_debug_timeseries: list[dict[str, object]] = field(default_factory=list)
+    planner_mpc_contract_timeseries: list[dict[str, object]] = field(default_factory=list)
+    planner_mpc_contract_point_timeseries: list[dict[str, object]] = field(default_factory=list)
     section_summary: list[dict[str, float | int | None]] = field(default_factory=list)
     awsim_section_summary: list[dict[str, float | int | None]] = field(default_factory=list)
     corner_summary: list[dict[str, float | int | str | None]] = field(default_factory=list)
@@ -147,6 +173,12 @@ def parse_rosbag(
     delay_debug: list[dict[str, object]] = []
     speed_profile_debug: list[dict[str, object]] = []
     overtake_debug: list[dict[str, object]] = []
+    overtake_overrides: list[dict[str, object]] = []
+    mpc_horizons: list[dict[str, object]] = []
+    mpc_horizon_contracts: list[dict[str, object]] = []
+    pure_pursuit_debug: list[dict[str, object]] = []
+    hybrid_control_mux_debug: list[dict[str, object]] = []
+    trajectory_history: list[dict[str, object]] = []
     trajectory_points: list[PathPoint] = []
     trajectory_source: str | None = None
     raw_decode_failed_topics: set[str] = set()
@@ -203,15 +235,48 @@ def parse_rosbag(
             row = _extract_json_debug(msg, time_sec)
             if row is not None:
                 overtake_debug.append(row)
+        elif topic_name in OVERTAKE_REFERENCE_OVERRIDE_TOPICS:
+            row = _extract_overtake_reference_override(msg, time_sec)
+            if row is not None:
+                overtake_overrides.append(row)
+        elif topic_name in MPC_PREDICTED_HORIZON_TOPICS:
+            row = _extract_horizon_snapshot(msg, time_sec, topic_name)
+            if row is not None:
+                mpc_horizons.append(row)
+        elif topic_name in MPC_PREDICTED_HORIZON_CONTRACT_TOPICS:
+            row = _extract_json_debug(msg, time_sec)
+            if row is not None:
+                mpc_horizon_contracts.append(row)
+        elif topic_name in PURE_PURSUIT_DEBUG_TOPICS:
+            row = _extract_json_debug(msg, time_sec)
+            if row is not None:
+                pure_pursuit_debug.append(row)
+        elif topic_name in HYBRID_CONTROL_MUX_DEBUG_TOPICS:
+            row = _extract_json_debug(msg, time_sec)
+            if row is not None:
+                hybrid_control_mux_debug.append(row)
         elif topic_name in TRAJECTORY_TOPICS:
             points = _extract_trajectory_points(msg)
             if points:
                 trajectory_points = points
                 trajectory_source = topic_name
+                trajectory_history.append(
+                    {"time_sec": time_sec, "topic": topic_name, "points": points}
+                )
 
     if not trajectory_points and fallback_trajectory_points:
         trajectory_points = _normalize_trajectory_points(fallback_trajectory_points)
         trajectory_source = fallback_trajectory_source or "fallback"
+
+    contract_rows, contract_point_rows = compare_planner_and_mpc_horizons(
+        overrides=overtake_overrides,
+        horizons=mpc_horizons,
+        contracts=mpc_horizon_contracts,
+        reference_history=trajectory_history,
+        pure_pursuit_debug=pure_pursuit_debug,
+        mux_debug=hybrid_control_mux_debug,
+        final_control_commands=control,
+    )
 
     return build_analysis_from_series(
         odometry=odometry,
@@ -228,6 +293,8 @@ def parse_rosbag(
         trajectory_source=trajectory_source,
         thresholds=thresholds,
         warnings=warnings,
+        planner_mpc_contract_timeseries=contract_rows,
+        planner_mpc_contract_point_timeseries=contract_point_rows,
     )
 
 
@@ -247,6 +314,8 @@ def build_analysis_from_series(
     trajectory_source: str | None = None,
     thresholds: dict[str, float] | None = None,
     warnings: list[str] | None = None,
+    planner_mpc_contract_timeseries: list[dict[str, object]] | None = None,
+    planner_mpc_contract_point_timeseries: list[dict[str, object]] | None = None,
 ) -> ParsedRosbag:
     merged_thresholds = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     sync_tolerance = float(merged_thresholds["sync_tolerance_sec"])
@@ -260,6 +329,10 @@ def build_analysis_from_series(
     delay_debug = _sorted_debug_rows(delay_debug or [])
     speed_profile_debug = _sorted_debug_rows(speed_profile_debug or [])
     overtake_debug = _sorted_debug_rows(overtake_debug or [])
+    planner_mpc_contract_timeseries = _sorted_debug_rows(
+        planner_mpc_contract_timeseries or [])
+    planner_mpc_contract_point_timeseries = _sorted_debug_rows(
+        planner_mpc_contract_point_timeseries or [])
     trajectory_points = _normalize_trajectory_points(trajectory_points or [])
 
     vehicle_rows = _merge_vehicle_rows(odometry, velocity_status, acceleration, steering_status, sync_tolerance)
@@ -272,17 +345,21 @@ def build_analysis_from_series(
         trajectory_profile = None
         trajectory_reference = []
 
-    if not vehicle_rows and not control_rows and not awsim_status and not overtake_debug:
+    if (not vehicle_rows and not control_rows and not awsim_status and
+            not overtake_debug and not planner_mpc_contract_timeseries):
         return ParsedRosbag(
             available=False,
             reason="rosbag parsed but no usable time-series samples were found",
             warnings=warnings or [],
             overtake_debug_timeseries=overtake_debug,
+            planner_mpc_contract_timeseries=planner_mpc_contract_timeseries,
+            planner_mpc_contract_point_timeseries=planner_mpc_contract_point_timeseries,
         )
 
     _attach_distance_and_sections(vehicle_rows, int(merged_thresholds["section_count"]))
     _attach_odometry_grade(vehicle_rows, merged_thresholds)
     metrics = _compute_metrics(vehicle_rows, control_rows, merged_thresholds)
+    metrics.update(contract_metrics(planner_mpc_contract_timeseries))
     events = _detect_events(vehicle_rows, control_rows, metrics, merged_thresholds)
     sections = _build_section_summary(vehicle_rows, events)
     awsim_sections = _build_awsim_section_summary(awsim_status, vehicle_rows)
@@ -296,6 +373,8 @@ def build_analysis_from_series(
         delay_debug_timeseries=delay_debug,
         speed_profile_debug_timeseries=speed_profile_debug,
         overtake_debug_timeseries=overtake_debug,
+        planner_mpc_contract_timeseries=planner_mpc_contract_timeseries,
+        planner_mpc_contract_point_timeseries=planner_mpc_contract_point_timeseries,
         section_summary=sections,
         awsim_section_summary=awsim_sections,
         corner_summary=corners,
@@ -363,6 +442,11 @@ def _target_topics(topic_types: dict[str, str]) -> set[str]:
         | SPEED_PROFILE_DEBUG_TOPICS
         | OVERTAKE_MODE_TOPICS
         | OVERTAKE_METRICS_TOPICS
+        | OVERTAKE_REFERENCE_OVERRIDE_TOPICS
+        | MPC_PREDICTED_HORIZON_TOPICS
+        | MPC_PREDICTED_HORIZON_CONTRACT_TOPICS
+        | PURE_PURSUIT_DEBUG_TOPICS
+        | HYBRID_CONTROL_MUX_DEBUG_TOPICS
     )
     return set(topic_types).intersection(supported)
 
@@ -381,6 +465,8 @@ def _extract_odometry(msg: Any, time_sec: float) -> dict[str, float | None]:
 def _extract_control_cmd(msg: Any, time_sec: float) -> dict[str, float | None]:
     return {
         "time_sec": time_sec,
+        "command_stamp_sec": _get_nested_float(msg, "stamp.sec"),
+        "command_stamp_nanosec": _get_nested_float(msg, "stamp.nanosec"),
         "target_speed_mps": _get_nested_float(msg, "longitudinal.speed"),
         "accel_mps2": _get_nested_float(msg, "longitudinal.acceleration"),
         "steer_rad": _get_nested_float(msg, "lateral.steering_tire_angle"),
@@ -400,6 +486,8 @@ def _decode_ackermann_control_command(raw: bytes, time_sec: float) -> dict[str, 
     if len(raw) < 48:
         return None
     try:
+        command_stamp_sec = struct.unpack_from("<i", raw, 4)[0]
+        command_stamp_nanosec = struct.unpack_from("<I", raw, 8)[0]
         steering = struct.unpack_from("<f", raw, 20)[0]
         target_speed = struct.unpack_from("<f", raw, 36)[0]
         acceleration = struct.unpack_from("<f", raw, 40)[0]
@@ -407,6 +495,8 @@ def _decode_ackermann_control_command(raw: bytes, time_sec: float) -> dict[str, 
         return None
     return {
         "time_sec": time_sec,
+        "command_stamp_sec": command_stamp_sec,
+        "command_stamp_nanosec": command_stamp_nanosec,
         "target_speed_mps": target_speed,
         "accel_mps2": acceleration,
         "steer_rad": steering,
@@ -485,6 +575,64 @@ def _extract_trajectory_points(msg: Any) -> list[PathPoint]:
         if x is not None and y is not None:
             result.append((x, y, z))
     return result
+
+
+def _extract_horizon_snapshot(
+    msg: Any, time_sec: float, topic_name: str,
+) -> dict[str, object] | None:
+    points = _extract_trajectory_points(msg)
+    stamp_sec = _get_nested_float(msg, "header.stamp.sec")
+    stamp_nanosec = _get_nested_float(msg, "header.stamp.nanosec")
+    if stamp_sec is None or stamp_nanosec is None:
+        return None
+    return {
+        "time_sec": time_sec,
+        "topic": topic_name,
+        "stamp_sec": int(stamp_sec),
+        "stamp_nanosec": int(stamp_nanosec),
+        "points": points,
+    }
+
+
+def _extract_overtake_reference_override(
+    msg: Any, time_sec: float,
+) -> dict[str, object] | None:
+    data = getattr(msg, "data", None)
+    if not isinstance(data, Sequence) or len(data) < 3:
+        return None
+    valid = _finite_float(data[0])
+    mode_id = _finite_float(data[1])
+    count_value = _finite_float(data[2])
+    if (valid != 1.0 or mode_id is None or not mode_id.is_integer() or
+            mode_id < 0.0 or mode_id > 255.0 or count_value is None):
+        return None
+    count = int(count_value)
+    if count < 0 or count > 1000 or count != count_value:
+        return None
+    expected = 3 + 2 * count
+    if len(data) not in {expected, expected + 2}:
+        return None
+    lateral_offsets = [_finite_float(value) for value in data[3:3 + count]]
+    speed_caps = [_finite_float(value) for value in data[3 + count:expected]]
+    if any(value is None for value in lateral_offsets + speed_caps):
+        return None
+    generation = 0
+    if len(data) == expected + 2:
+        if _finite_float(data[expected]) != 1.0:
+            return None
+        candidate = _finite_float(data[expected + 1])
+        if (candidate is None or not candidate.is_integer() or
+                not 0 < candidate <= 16777215):
+            return None
+        generation = int(candidate)
+    return {
+        "time_sec": time_sec,
+        "active": count > 0 and int(mode_id) != 0,
+        "mode_id": int(mode_id),
+        "override_generation": generation,
+        "lateral_offsets_m": lateral_offsets,
+        "speed_caps_mps": speed_caps,
+    }
 
 
 def _normalize_trajectory_points(points: list[Sequence[float | None]]) -> list[PathPoint]:

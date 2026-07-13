@@ -22,6 +22,7 @@
   <arg name="output_control_cmd" default="/control/command/control_cmd"/>
   <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
   <arg name="output_mpc_predicted_horizon" default="/mpc/predicted_horizon"/>
+  <arg name="output_mpc_predicted_horizon_contract" default="/mpc/predicted_horizon_contract"/>
   <arg name="overtake_horizon_points" default="50"/>
   <arg name="overtake_mpc_health_solve_time_warn_ms" default="80.0"/>
 
@@ -58,6 +59,7 @@
     <remap from="/control/command/control_cmd" to="$(var output_control_cmd)"/>
     <remap from="/control/command/control_cmd_raw" to="$(var output_raw_control_cmd)"/>
     <remap from="/mpc/predicted_horizon" to="$(var output_mpc_predicted_horizon)"/>
+    <remap from="/mpc/predicted_horizon_contract" to="$(var output_mpc_predicted_horizon_contract)"/>
   </node>
 
   <group if="$(var use_overtake_planner)">

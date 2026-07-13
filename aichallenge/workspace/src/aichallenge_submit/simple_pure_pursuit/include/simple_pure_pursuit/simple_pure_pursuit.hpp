@@ -9,6 +9,7 @@
 #include <autoware_auto_planning_msgs/msg/trajectory_point.hpp>
 #include <autoware_auto_vehicle_msgs/msg/steering_report.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -43,6 +44,7 @@ public:
   rclcpp::Subscription<Odometry>::SharedPtr sub_kinematics_;
   rclcpp::Subscription<Trajectory>::SharedPtr sub_trajectory_;
   rclcpp::Subscription<Trajectory>::SharedPtr sub_mpc_predicted_horizon_;
+  rclcpp::Subscription<String>::SharedPtr sub_mpc_predicted_horizon_contract_;
   rclcpp::Subscription<Float32MultiArray>::SharedPtr sub_overtake_override_;
   rclcpp::Subscription<SteeringReport>::SharedPtr sub_steering_status_;
   rclcpp::Subscription<String>::SharedPtr sub_mpc_health_;
@@ -63,12 +65,19 @@ public:
   std::optional<double> last_odometry_receive_sec_;
   std::optional<double> last_trajectory_receive_sec_;
   std::optional<double> last_mpc_predicted_horizon_receive_sec_;
+  std::optional<double> last_mpc_predicted_horizon_contract_receive_sec_;
   std::optional<double> last_steering_status_receive_sec_;
   std::optional<double> last_mpc_health_receive_sec_;
   double latest_steering_status_rad_{0.0};
   std::string mpc_health_status_{"missing"};
   int mpc_health_infeasible_count_{0};
   std::string mpc_predicted_horizon_source_{"unknown"};
+  bool mpc_horizon_contract_received_{false};
+  std::int32_t mpc_horizon_contract_stamp_sec_{0};
+  std::uint32_t mpc_horizon_contract_stamp_nanosec_{0};
+  std::string mpc_horizon_contract_source_{"unknown"};
+  int mpc_horizon_contract_mode_id_{0};
+  std::uint32_t mpc_horizon_contract_generation_{0};
 
   // pure pursuit parameters
   const double wheel_base_;
@@ -91,6 +100,7 @@ public:
   const double min_mpc_horizon_arc_length_m_;
   const bool require_solved_mpc_health_for_horizon_;
   const double max_mpc_health_age_sec_;
+  const bool require_matching_overtake_horizon_contract_;
   const bool use_overtake_reference_override_;
   const double overtake_override_timeout_sec_;
   const bool curvature_adaptive_lookahead_enabled_;
@@ -113,6 +123,7 @@ public:
   double smoothed_lookahead_distance_{0.0};
   bool overtake_override_active_{false};
   int overtake_mode_id_{0};
+  std::uint32_t overtake_override_generation_{0};
   double last_overtake_override_sec_{-1.0e9};
   std::vector<double> overtake_lateral_offsets_;
   std::vector<double> overtake_speed_caps_;
@@ -140,6 +151,13 @@ private:
     const Trajectory *trajectory{nullptr};
     std::size_t nearest_index{0};
     bool mpc_horizon_applied{false};
+    std::int32_t evaluated_horizon_stamp_sec{0};
+    std::uint32_t evaluated_horizon_stamp_nanosec{0};
+    std::int32_t applied_horizon_stamp_sec{0};
+    std::uint32_t applied_horizon_stamp_nanosec{0};
+    std::string applied_horizon_source{"none"};
+    int applied_horizon_mode_id{0};
+    std::uint32_t applied_horizon_generation{0};
     bool overtake_override_applied{false};
     std::string source{"trajectory"};
     HorizonFreshnessResult mpc_horizon_freshness{};
@@ -203,6 +221,7 @@ private:
   void publishStaleDebug(const rclcpp::Time &stamp,
                          const FreshnessResult &freshness);
   void onOvertakeOverride(const Float32MultiArray::SharedPtr msg);
+  void onMpcPredictedHorizonContract(const String::SharedPtr msg);
   void onMpcHealth(const String::SharedPtr msg);
   double mpcHealthAgeSec(double now_sec) const;
   void clearOvertakeOverride();
@@ -229,6 +248,13 @@ private:
                double overtake_speed_cap_mps, double freshness_now_sec,
                bool mpc_horizon_applied, bool mpc_horizon_velocity_cap_applied,
                double mpc_horizon_velocity_cap_mps,
+               std::int32_t evaluated_horizon_stamp_sec,
+               std::uint32_t evaluated_horizon_stamp_nanosec,
+               std::int32_t applied_horizon_stamp_sec,
+               std::uint32_t applied_horizon_stamp_nanosec,
+               const std::string &applied_horizon_source,
+               int applied_horizon_mode_id,
+               std::uint32_t applied_horizon_generation,
                const HorizonFreshnessResult &mpc_horizon_freshness,
                const std::string &trajectory_source,
                const ControlPosePrediction &control_pose);

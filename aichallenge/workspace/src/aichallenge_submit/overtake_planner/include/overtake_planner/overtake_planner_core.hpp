@@ -19,7 +19,9 @@ public:
   // 1制御周期の中核処理。障害判定、候補生成、安全評価、状態遷移をまとめて行う。
   PlannerOutput update(double now_sec, const EgoState &ego,
                        const std::vector<OpponentState> &opponents,
-                       const MpcHealthStatus &mpc_health = MpcHealthStatus{});
+                       const MpcHealthStatus &mpc_health = MpcHealthStatus{},
+                       const ReentryInputStatus &reentry_input =
+                           ReentryInputStatus{});
 
   BehaviorMode mode() const { return mode_; }
 
@@ -27,12 +29,23 @@ private:
   // V2Xで受けた他車位置を短いhorizonだけ等速予測する。
   std::vector<PredictedOpponent>
   predictOpponents(const std::vector<OpponentState> &opponents,
-                   double now_sec) const;
+                   double now_sec,
+                   const std::vector<double> *time_points = nullptr) const;
   // FASTEST/FOLLOW/PASS/RECOVERYそれぞれの横オフセット列と速度上限を作る。
   CandidateTrajectory
   makeCandidate(CandidateType type, const EgoState &ego,
                 const BlockedInfo &blocked_info,
                 const std::vector<OpponentState> &opponents) const;
+  CandidateTrajectory makeReentryEvaluationCandidate(
+      const EgoState &ego, const BlockedInfo &blocked_info,
+      const std::vector<OpponentState> &opponents) const;
+  ReentryGateResult evaluateReentryGate(
+      double now_sec, const EgoState &ego, const BlockedInfo &blocked_info,
+      const std::vector<OpponentState> &opponents,
+      const MpcHealthStatus &mpc_health,
+      const ReentryInputStatus &reentry_input);
+  void updateReentryPhase(const EgoState &ego);
+  bool reentryRequested(const EgoState &ego) const;
   // 安全で目的に合う候補を、スコアが最小のものとして選ぶ。
   CandidateTrajectory
   selectCandidate(std::vector<CandidateTrajectory> &candidates) const;
@@ -51,6 +64,13 @@ private:
   bool
   promoteSlowObstacleChain(BlockedInfo &blocked,
                            const std::vector<OpponentState> &opponents) const;
+  void classifyStationaryFrontObstacle(
+      double now_sec, const EgoState &ego, BlockedInfo &blocked,
+      const std::vector<OpponentState> &opponents) const;
+  bool revalidatePublishedLateral(const PlannerOutput &output,
+                                  const CandidateTrajectory &base_candidate,
+                                  const std::vector<PredictedOpponent>
+                                      &predictions) const;
   bool updateSlowFrontException(const BlockedInfo &blocked);
   bool shouldSuppressSafeStopForStartGrace(double now_sec,
                                            const EgoState &ego,
@@ -88,6 +108,9 @@ private:
   double first_valid_update_sec_{std::numeric_limits<double>::quiet_NaN()};
   double first_motion_update_sec_{std::numeric_limits<double>::quiet_NaN()};
   int safe_stop_trigger_count_{0};
+  int reentry_clear_cycles_{0};
+  bool reentry_lockout_active_{false};
+  bool reentry_phase_active_{false};
   int slow_front_exception_count_{0};
   bool leader_priority_hold_active_{false};
   std::string leader_priority_hold_id_{};

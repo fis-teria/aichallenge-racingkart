@@ -56,6 +56,9 @@ from multi_purpose_mpc_ros.speed_profile import (
     apply_combined_speed_profile,
     combine_speed_profile,
 )
+from multi_purpose_mpc_ros.overtake_contract import (
+    parse_overtake_reference_override,
+)
 from multi_purpose_mpc_ros_msgs.msg import AckermannControlBoostCommand, PathConstraints, BorderCells
 from multi_purpose_mpc_ros.tools.reference_velocity_configulator import ReferenceVelocityConfigulator
 
@@ -67,12 +70,13 @@ GRAVITY_MPS2 = 9.80665
 OVERTAKE_LEFT_MODE_ID = 4
 OVERTAKE_RIGHT_MODE_ID = 5
 MERGE_BACK_MODE_ID = 6
+ABORT_RECOVERY_MODE_ID = 7
 OVERTAKE_HORIZON_MODE_IDS = {
     OVERTAKE_LEFT_MODE_ID,
     OVERTAKE_RIGHT_MODE_ID,
     MERGE_BACK_MODE_ID,
+    ABORT_RECOVERY_MODE_ID,
 }
-
 def array_to_ackermann_control_command(stamp, u: np.ndarray, acc: float) -> AckermannControlCommand:
     msg = AckermannControlCommand()
     msg.stamp = stamp
@@ -865,6 +869,8 @@ class MPCController(Node):
             MarkerArray, "/planning/scenario_planning/lane_driving/motion_planning/obstacle_stop_planner/virtual_wall", 1)
         self._mpc_pred_trajectory_pub = self.create_publisher(
             Trajectory, "/mpc/predicted_horizon", 1)
+        self._mpc_predicted_horizon_contract_pub = self.create_publisher(
+            String, "/mpc/predicted_horizon_contract", 1)
 
         latching_qos = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         # NOTE:評価環境での可視化のためにダミーのトピック名を使用
@@ -985,27 +991,21 @@ class MPCController(Node):
 
     def _overtake_override_callback(self, msg: Float32MultiArray):
         data = list(msg.data)
-        if len(data) < 3 or int(data[0]) != 1:
+        override = parse_overtake_reference_override(data)
+        if override is None:
+            self.get_logger().warn(
+                "Malformed overtake override payload",
+                throttle_duration_sec=1.0)
             self._mpc.clear_overtake_reference_override()
             self._last_overtake_override_sec = None
             return
-
-        mode_id = int(data[1])
-        n = int(data[2])
-        expected = 3 + 2 * n
-        if n <= 0 or mode_id == 0:
+        if override.point_count <= 0 or override.mode_id == 0:
             self._mpc.clear_overtake_reference_override()
             self._last_overtake_override_sec = self.get_clock().now().nanoseconds / 1e9
             return
-        if len(data) < expected:
-            self.get_logger().warn(
-                f"Malformed overtake override: len={len(data)} expected={expected}",
-                throttle_duration_sec=1.0)
-            return
-
-        lateral_offsets = data[3:3 + n]
-        speed_caps = data[3 + n:3 + 2 * n]
-        self._mpc.set_overtake_reference_override(lateral_offsets, speed_caps, mode_id)
+        self._mpc.set_overtake_reference_override(
+            override.lateral_offsets, override.speed_caps, override.mode_id,
+            override.generation)
         self._last_overtake_override_sec = self.get_clock().now().nanoseconds / 1e9
 
     def _clear_stale_overtake_override(self, now) -> None:
@@ -1109,17 +1109,15 @@ class MPCController(Node):
                 return
             neutral_trajectory = self._build_neutral_predicted_horizon(stamp)
             if len(neutral_trajectory.points) >= 2:
-                self._last_mpc_predicted_horizon_source = "neutral_reference"
-                self._mpc_pred_trajectory_pub.publish(neutral_trajectory)
+                self._publish_predicted_horizon(
+                    neutral_trajectory, "neutral_reference")
                 return
-            self._last_mpc_predicted_horizon_source = "empty"
-            self._mpc_pred_trajectory_pub.publish(trajectory)
+            self._publish_predicted_horizon(trajectory, "empty")
             return
 
         predicted = getattr(self._mpc, "current_prediction_trajectory", None)
         if self._last_mpc_status != "solved" or not self._enable_control or not predicted:
-            self._last_mpc_predicted_horizon_source = "empty"
-            self._mpc_pred_trajectory_pub.publish(trajectory)
+            self._publish_predicted_horizon(trajectory, "empty")
             return
 
         for x, y, yaw, speed_mps in predicted:
@@ -1137,13 +1135,35 @@ class MPCController(Node):
             trajectory.points.append(point)
 
         if len(trajectory.points) >= 2:
-            self._last_mpc_predicted_horizon_source = "solver_prediction"
-            self._mpc_pred_trajectory_pub.publish(trajectory)
+            mode_id, generation = getattr(
+                self._mpc, "current_prediction_contract", (0, 0))
+            self._publish_predicted_horizon(
+                trajectory, "solver_prediction", int(mode_id), int(generation))
         else:
             empty_trajectory = Trajectory()
             empty_trajectory.header = trajectory.header
-            self._last_mpc_predicted_horizon_source = "empty"
-            self._mpc_pred_trajectory_pub.publish(empty_trajectory)
+            self._publish_predicted_horizon(empty_trajectory, "empty")
+
+    def _publish_predicted_horizon(
+            self, trajectory: Trajectory, source: str, mode_id: int = 0,
+            generation: int = 0) -> None:
+        """Publish each horizon with immutable solver/override provenance."""
+        self._last_mpc_predicted_horizon_source = source
+        self._mpc_pred_trajectory_pub.publish(trajectory)
+        contract = String()
+        stamp = trajectory.header.stamp
+        contract.data = json.dumps(
+            {
+                "contract_version": 1,
+                "horizon_stamp_sec": int(stamp.sec),
+                "horizon_stamp_nanosec": int(stamp.nanosec),
+                "source": source,
+                "mode_id": int(mode_id),
+                "override_generation": int(generation),
+            },
+            separators=(",", ":"),
+        )
+        self._mpc_predicted_horizon_contract_pub.publish(contract)
 
     def _should_publish_overtake_prediction_horizon(self) -> bool:
         mode_id = int(getattr(self._mpc, "overtake_mode_id", 0) or 0)
@@ -1155,7 +1175,8 @@ class MPCController(Node):
         ).strip().lower()
         if mode == "solver_when_solved":
             return True
-        return self._should_publish_overtake_prediction_horizon()
+        mode_id, _ = getattr(self._mpc, "current_prediction_contract", (0, 0))
+        return int(mode_id) in OVERTAKE_HORIZON_MODE_IDS
 
     def _fixed_neutral_horizon_enabled(self) -> bool:
         mode = str(
@@ -1198,11 +1219,11 @@ class MPCController(Node):
         if cached is None:
             cached = Trajectory()
             cached.header.frame_id = "map"
-            self._last_mpc_predicted_horizon_source = "fixed_neutral_empty"
+            source = "fixed_neutral_empty"
         else:
-            self._last_mpc_predicted_horizon_source = "fixed_neutral_reference"
+            source = "fixed_neutral_reference"
         cached.header.stamp = now.to_msg()
-        self._mpc_pred_trajectory_pub.publish(cached)
+        self._publish_predicted_horizon(cached, source)
 
     def _build_neutral_predicted_horizon(self, stamp) -> Trajectory:
         trajectory = Trajectory()

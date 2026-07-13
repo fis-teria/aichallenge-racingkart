@@ -32,8 +32,17 @@ bool isRightPassMode(BehaviorMode mode) {
 // 出力: 現在走っている側のpass gapが失われたならtrue。
 // 処理概要: 追い越し中に走行中の側が塞がれた場合、YIELD/復帰候補を追加するトリガにする。
 bool currentPassGapLost(BehaviorMode mode, const BlockedInfo &blocked_info) {
-  return (isLeftPassMode(mode) && !blocked_info.can_pass_left) ||
-         (isRightPassMode(mode) && !blocked_info.can_pass_right);
+  if (isLeftPassMode(mode)) {
+    return blocked_info.pass_left_candidate_generated
+               ? !blocked_info.pass_left_candidate_feasible
+               : !blocked_info.can_pass_left;
+  }
+  if (isRightPassMode(mode)) {
+    return blocked_info.pass_right_candidate_generated
+               ? !blocked_info.pass_right_candidate_feasible
+               : !blocked_info.can_pass_right;
+  }
+  return false;
 }
 
 // 入力: CandidateType。
@@ -72,7 +81,8 @@ bool hasLateralStabilizationRisk(const PlannerOutput &output) {
          output.speed_only_fallback_active ||
          output.wall_risk_speed_guard_active ||
          output.mpc_health_speed_guard_active ||
-         output.recovery_speed_guard_active;
+         output.recovery_speed_guard_active ||
+         (output.reentry_gate.requested && !output.reentry_gate.permitted);
 }
 
 // 入力: PlannerConfig。
@@ -183,16 +193,78 @@ OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame,
 PlannerOutput
 OvertakePlannerCore::update(double now_sec, const EgoState &ego,
                             const std::vector<OpponentState> &opponents,
-                            const MpcHealthStatus &mpc_health) {
+                            const MpcHealthStatus &mpc_health,
+                            const ReentryInputStatus &reentry_input) {
   // デフォルトはMPCの元参照をそのまま使う。安全に判断できる時だけoverrideを有効化する。
   PlannerOutput output;
   output.lateral_offsets.assign(config_.horizon_points, 0.0);
   output.speed_caps.assign(config_.horizon_points, config_.v_passthrough_mps);
 
-  if (!config_.enabled || !ego.valid || frame_.empty()) {
-    // 自車状態や参照線が無いとFrenet判断ができないので、何も介入しない。
+  if (!config_.enabled || frame_.empty()) {
+    // planner無効化または参照線欠損時は、既存契約どおりoverrideを出さない。
     mode_ = BehaviorMode::FREE_RUN;
     safe_stop_trigger_count_ = 0;
+    reentry_clear_cycles_ = 0;
+    reentry_lockout_active_ = false;
+    reentry_phase_active_ = false;
+    slow_front_exception_count_ = 0;
+    leader_priority_hold_active_ = false;
+    leader_priority_hold_id_.clear();
+    leader_priority_hold_until_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
+    last_published_lateral_offsets_.clear();
+    last_published_lateral_target_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
+    high_speed_curve_lateral_hold_active_ = false;
+    high_speed_curve_lateral_hold_offsets_.clear();
+    high_speed_curve_lateral_hold_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
+    clearLocalizedLateralProfile();
+    output.mode = mode_;
+    output.reason = "disabled_or_invalid";
+    return output;
+  }
+  if (!ego.valid) {
+    // 復帰/lockout中に自己状態が欠けても、overrideを消して通常ラインへ
+    // fall throughしない。最後に安全にpublishした横列を低速で維持する。
+    const bool reentry_context = config_.reentry_gate_enabled &&
+                                 (reentry_lockout_active_ ||
+                                  mode_ != BehaviorMode::FREE_RUN);
+    if (reentry_context) {
+      reentry_lockout_active_ = true;
+      reentry_phase_active_ = true;
+      reentry_clear_cycles_ = 0;
+      mode_ = BehaviorMode::ABORT_RECOVERY;
+      output.mode = mode_;
+      output.selected = CandidateType::RECOVERY;
+      output.blocked_info.reentry_hold_active = true;
+      output.reentry_gate.requested = true;
+      output.reentry_gate.permitted = false;
+      output.reentry_gate.input_complete = false;
+      output.reentry_gate.reason = "stale_ego";
+      if (!last_published_lateral_offsets_.empty()) {
+        output.active_override = true;
+        output.lateral_offsets = last_published_lateral_offsets_;
+        output.speed_caps.assign(
+            output.lateral_offsets.size(),
+            std::max(1.0e-3, config_.reentry_hold_v_max_mps));
+        output.target_lateral_offset_m = output.lateral_offsets.back();
+        output.applied_speed_cap_mps = config_.reentry_hold_v_max_mps;
+        output.speed_cap_reason = "reentry_stale_ego_hold";
+        output.reason = "reentry_stale_ego_hold";
+      } else {
+        // 初回の有効override前は保持すべき安全横列が無いため、値を捏造しない。
+        // Node/controller側の既存stale watchdogへ明示的に委譲する。
+        output.reason = "reentry_stale_ego_no_hold_reference";
+      }
+      return output;
+    }
+
+    // 復帰文脈でない自己状態欠損は従来どおりplanner overrideを無効化する。
+    mode_ = BehaviorMode::FREE_RUN;
+    safe_stop_trigger_count_ = 0;
+    reentry_clear_cycles_ = 0;
+    reentry_phase_active_ = false;
     slow_front_exception_count_ = 0;
     leader_priority_hold_active_ = false;
     leader_priority_hold_id_.clear();
@@ -227,6 +299,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   BlockedInfo blocked = blocked_risk_.detectBlocked(ego, opponents, now_sec);
   const auto predictions = predictOpponents(opponents, now_sec);
   promoteSlowObstacleChain(blocked, opponents);
+  classifyStationaryFrontObstacle(now_sec, ego, blocked, opponents);
   blocked =
       blocked_risk_.evaluatePassGap(blocked, opponents, predictions, mode_);
   blocked.overtake_permission_allowed =
@@ -256,10 +329,6 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       config_.slow_front_exception_enabled && front_low_speed_by_distance;
   blocked.slow_front_exception_active = updateSlowFrontException(blocked);
   blocked.slow_front_exception_count = slow_front_exception_count_;
-  if (!blocked.overtake_permission_allowed &&
-      blocked.slow_front_exception_active) {
-    blocked.overtake_permission_reason = "slow_front_exception";
-  }
   // 処理ブロック: 追い越し開始gateとコーナー横並びリスクを判定する。
   // 設計意図: コーナー入口で新規追い越しを始めない一方、既に横並びなら譲りや維持へ誘導する。
   blocked.corner_abs_curvature =
@@ -292,14 +361,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   } else {
     straight_overtake_start_allowed_ = true;
   }
-  if (!blocked.straight_overtake_start_allowed &&
-      blocked.slow_front_exception_active && blocked.blocked) {
-    blocked.straight_overtake_start_allowed = true;
-    blocked.overtake_start_gate_reason = "slow_front_exception_curve";
-  }
-  const bool permission_start_allowed =
-      blocked.overtake_permission_allowed ||
-      blocked.slow_front_exception_active;
+  const bool permission_start_allowed = blocked.overtake_permission_allowed;
   if (!permission_start_allowed) {
     straight_overtake_start_allowed_ = false;
     blocked.straight_overtake_start_allowed = false;
@@ -346,6 +408,18 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       blocked.pass_gap_reason = "large_lateral_error";
     }
   }
+  // 通常ラインへの復帰は、d2を抜いた事実や単一front gapでは許可しない。
+  // 実際にpublishするRECOVERY形状を全fresh相手車両へ評価し、未許可なら現在dを保持する。
+  updateReentryPhase(ego);
+  ReentryGateResult reentry_gate = evaluateReentryGate(
+      now_sec, ego, blocked, opponents, mpc_health, reentry_input);
+  if (reentry_gate.requested && !reentry_gate.permitted) {
+    // dが中心付近まで到達する前にmodeだけFREE_RUNへ戻っても、次周期以降に
+    // 復帰ゲートを必ず継続するためlockoutを残す。
+    reentry_lockout_active_ = true;
+    reentry_phase_active_ = true;
+    blocked.reentry_hold_active = true;
+  }
   // 処理ブロック: 局所回避プロファイルのラッチ状態を更新する。
   // 設計意図: PASS候補の横ラインが相手位置の短周期変動で揺れないよう、対象sと回避区間を保持する。
   updateLocalizedLateralProfile(now_sec, ego, blocked, opponents);
@@ -372,18 +446,27 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     if (blocked.blocked) {
       candidates.push_back(
           makeCandidate(CandidateType::FOLLOW, ego, blocked, opponents));
-      if (blocked.can_pass_left) {
+      // 静的gapは診断値として残し、左右の物理的安全性は各候補を同じSafetyEvaluatorで判定する。
+      // 追い越し中は反対側のPASS候補を作らない。同じ側の安全性が失われたら
+      // 横切って切り替えず、YIELD/RECOVERYへ戻す。
+      const bool evaluate_left_pass =
+          !isRightPassMode(mode_) &&
+          (blocked.can_pass_left || config_.dynamic_pass_candidate_enabled);
+      const bool evaluate_right_pass =
+          !isLeftPassMode(mode_) &&
+          (blocked.can_pass_right || config_.dynamic_pass_candidate_enabled);
+      if (evaluate_left_pass) {
         candidates.push_back(
             makeCandidate(CandidateType::PASS_LEFT, ego, blocked, opponents));
+        blocked.pass_left_candidate_generated = true;
       }
-      if (blocked.can_pass_right) {
+      if (evaluate_right_pass) {
         candidates.push_back(
             makeCandidate(CandidateType::PASS_RIGHT, ego, blocked, opponents));
+        blocked.pass_right_candidate_generated = true;
       }
-      if (!blocked.can_pass_left && !blocked.can_pass_right) {
-        candidates.push_back(makeCandidate(CandidateType::YIELD_BEHIND, ego,
-                                           blocked, opponents));
-      }
+      candidates.push_back(
+          makeCandidate(CandidateType::YIELD_BEHIND, ego, blocked, opponents));
     }
   }
   if (currentPassGapLost(mode_, blocked)) {
@@ -395,10 +478,24 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     candidates.push_back(
         makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents));
   }
+  if (!freeze_overtake_decisions && isLeftPassMode(mode_) &&
+      !blocked.pass_left_candidate_generated) {
+    // 前方閉塞が一時的に解けても、走行中PASSの継続可否は同じ時系列安全評価で確認する。
+    candidates.push_back(
+        makeCandidate(CandidateType::PASS_LEFT, ego, blocked, opponents));
+    blocked.pass_left_candidate_generated = true;
+  }
+  if (!freeze_overtake_decisions && isRightPassMode(mode_) &&
+      !blocked.pass_right_candidate_generated) {
+    candidates.push_back(
+        makeCandidate(CandidateType::PASS_RIGHT, ego, blocked, opponents));
+    blocked.pass_right_candidate_generated = true;
+  }
   const bool needs_safe_stop_fallback_check =
       config_.safe_stop_enabled &&
       (blocked.blocked || blocked.side_by_side ||
-       blocked.future_yield_required || currentPassGapLost(mode_, blocked));
+       blocked.parallel_side_candidate || blocked.future_yield_required ||
+       currentPassGapLost(mode_, blocked));
   const bool has_recovery_candidate =
       std::any_of(candidates.begin(), candidates.end(),
                   [](const CandidateTrajectory &candidate) {
@@ -413,8 +510,40 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   // 処理ブロック: 全候補を安全評価してscoreを付ける。
   // 設計意図: 先にfeasibleを確定し、その後で追い越し意欲やfallback優先度を比較する。
   for (auto &candidate : candidates) {
-    // 壁/他車との安全余裕を見てから、目的に応じたスコアを付ける。
+    // 壁/他車との安全余裕を見てから、減速モデルが有効かも同時に確認する。
     safety_.evaluate(candidate, predictions);
+    if (!candidate.longitudinal_profile_valid) {
+      candidate.feasible = false;
+      candidate.reject_reason = "invalid_longitudinal_brake_model";
+    }
+    const bool stationary_braking_shortfall =
+        blocked.stationary_front_obstacle &&
+        (candidate.type == CandidateType::FOLLOW ||
+         candidate.type == CandidateType::YIELD_BEHIND) &&
+        candidate.required_brake_distance_m >
+            candidate.available_brake_distance_m;
+    if (stationary_braking_shortfall) {
+      // 評価horizon内だけ安全に見えても、停止余裕が尽きる追従/譲りは通常候補に採用しない。
+      candidate.feasible = false;
+      candidate.reject_reason = "insufficient_braking_distance";
+    }
+    if (candidate.type == CandidateType::PASS_LEFT) {
+      blocked.pass_left_candidate_feasible = candidate.feasible;
+    } else if (candidate.type == CandidateType::PASS_RIGHT) {
+      blocked.pass_right_candidate_feasible = candidate.feasible;
+    } else if (candidate.type == CandidateType::FOLLOW &&
+               blocked.stationary_front_obstacle) {
+      blocked.stationary_front_required_brake_distance_m =
+          candidate.required_brake_distance_m;
+      blocked.stationary_front_available_brake_distance_m =
+          candidate.available_brake_distance_m;
+      blocked.stationary_front_brake_feasible =
+          candidate.longitudinal_profile_valid && candidate.feasible &&
+          candidate.required_brake_distance_m <=
+              candidate.available_brake_distance_m;
+    }
+  }
+  for (auto &candidate : candidates) {
     candidate.score = candidateScore(candidate, blocked);
     if (freeze_overtake_decisions) {
       candidate.score =
@@ -429,9 +558,9 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   const bool safe_stop_base_condition =
       config_.safe_stop_enabled &&
       (blocked.blocked || blocked.side_by_side ||
-       blocked.future_yield_required || currentPassGapLost(mode_, blocked)) &&
-      !blocked.can_pass_left && !blocked.can_pass_right && no_feasible_pass &&
-      no_feasible_fallback;
+       blocked.parallel_side_candidate || blocked.future_yield_required ||
+       currentPassGapLost(mode_, blocked)) &&
+      no_feasible_pass && no_feasible_fallback;
   const bool start_grace_active =
       safe_stop_base_condition &&
       shouldSuppressSafeStopForStartGrace(now_sec, ego, blocked);
@@ -470,6 +599,10 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     safe_stop_candidate =
         makeCandidate(CandidateType::SAFE_STOP, ego, blocked, opponents);
     safety_.evaluate(safe_stop_candidate, predictions);
+    if (!safe_stop_candidate.longitudinal_profile_valid) {
+      safe_stop_candidate.feasible = false;
+      safe_stop_candidate.reject_reason = "invalid_longitudinal_brake_model";
+    }
     safe_stop_candidate.score = candidateScore(safe_stop_candidate, blocked);
     safe_stop_context.candidate_feasible = safe_stop_candidate.feasible;
     safe_stop_context.reason = safe_stop_candidate.feasible
@@ -479,6 +612,24 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
       candidates.push_back(safe_stop_candidate);
     } else if (!safe_stop_candidate.feasible) {
       safe_stop_candidate_infeasible = true;
+    }
+  }
+  if (safe_stop_candidate_infeasible) {
+    // 一度でも停止候補が不成立になった復帰文脈は、次周期に相手予測が欠けただけで
+    // 通常ラインへ戻らないようlockoutする。解除は復帰ゲートの連続clear条件だけ。
+    reentry_lockout_active_ = true;
+    reentry_clear_cycles_ = 0;
+    if (reentry_gate.requested) {
+      reentry_gate.permitted = false;
+      reentry_gate.clear_cycles = 0;
+      reentry_gate.reason = "safe_stop_infeasible";
+      reentry_gate.blocking_vehicle_id =
+          safe_stop_candidate.blocking_opponent_id;
+      reentry_gate.min_safety_margin = safe_stop_candidate.min_safety_margin;
+      reentry_gate.cbf_slack = safe_stop_candidate.cbf_slack;
+      reentry_gate.blocking_time_sec =
+          safe_stop_candidate.blocking_time_sec;
+      blocked.reentry_hold_active = true;
     }
   }
 
@@ -502,6 +653,23 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   // 候補選択だけで急にモードを切り替えず、状態機械で保持時間や継続条件をかける。
   mode_ = state_machine_.update(now_sec, mode_, selected.type, blocked,
                                 selected.feasible, safe_stop_context);
+  // PASS実行中は回避開始を復帰と誤認しない。一方この周期にMERGE/YIELD/RECOVERYへ
+  // 遷移した場合は、中心方向の候補をpublishする前に同じgateを必ず通す。
+  updateReentryPhase(ego);
+  if (!reentry_gate.requested && reentryRequested(ego)) {
+    reentry_gate = evaluateReentryGate(now_sec, ego, blocked, opponents,
+                                       mpc_health, reentry_input);
+    if (reentry_gate.requested && !reentry_gate.permitted) {
+      reentry_lockout_active_ = true;
+      reentry_phase_active_ = true;
+      blocked.reentry_hold_active = true;
+    }
+  }
+  if (reentry_gate.requested && !reentry_gate.permitted) {
+    // 状態機械がblocked/frontだけを見てFREE_RUNへ戻る経路を、復帰ゲートで閉じる。
+    // ABORT_RECOVERYのRECOVERY候補はreentry_hold_activeにより中心方向へ動かない。
+    mode_ = BehaviorMode::ABORT_RECOVERY;
+  }
   const bool yield_lateral_hold =
       config_.yield_release_lateral_error_m >= 0.0 &&
       std::abs(ego.frenet.d) > config_.yield_release_lateral_error_m;
@@ -588,6 +756,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
           state_machine_.safeStopReleaseCount(), wall_soft_margin,
           active_section, mpc_health});
   output_built.start_grace_active = start_grace_active;
+  output_built.reentry_gate = reentry_gate;
   output_built.lateral_profile_mode = config_.overtake_lateral_profile_mode;
   output_built.maneuver_latch_active = localized_lateral_profile_.active;
   if (localized_lateral_profile_.active) {
@@ -612,6 +781,44 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
   }
   applyLateralTargetRateLimit(now_sec, output_built);
   applyHighSpeedCurveLateralHold(now_sec, ego, output_built);
+  if (!revalidatePublishedLateral(output_built, output_selected, predictions)) {
+    // publish直前のrate limit/holdで形が変わったPASS軌道を、そのままMPCへ渡さない。
+    // overrideを消して通常走行へ戻すと、停止障害物の前で再加速し得るため、
+    // 同じ周期にRECOVERYを安全評価してpublishする。RECOVERYも不可なら
+    // PlannerOutputBuilderの既存speed-only fallbackへ必ず渡す。
+    mode_ = BehaviorMode::ABORT_RECOVERY;
+    high_speed_curve_lateral_hold_active_ = false;
+    high_speed_curve_lateral_hold_offsets_.clear();
+    high_speed_curve_lateral_hold_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
+    // 既存のPASS再評価失敗は従来どおり中心へRECOVERYする。復帰ゲートが
+    // 有効な通常ライン復帰だけ、横位置を保持して二次衝突を防ぐ。
+    blocked.reentry_hold_active = reentry_gate.requested;
+    reentry_clear_cycles_ = 0;
+    reentry_lockout_active_ = true;
+    if (reentry_gate.requested) {
+      reentry_gate.permitted = false;
+      reentry_gate.clear_cycles = 0;
+      reentry_gate.reason = "published_reentry_safety_reject";
+    }
+    CandidateTrajectory recovery =
+        makeCandidate(CandidateType::RECOVERY, ego, blocked, opponents);
+    safety_.evaluate(recovery, predictions);
+    if (!recovery.longitudinal_profile_valid) {
+      recovery.feasible = false;
+      recovery.reject_reason = "invalid_longitudinal_brake_model";
+    }
+    output_built = PlannerOutputBuilder(config_).build(PlannerOutputBuildInput{
+        mode_, ego, recovery, blocked, safe_stop_context, safe_stop_candidate,
+        safe_stop_candidate_infeasible, safe_stop_trigger_count_,
+        state_machine_.safeStopHoldCount(), state_machine_.safeStopReleaseCount(),
+        wall_soft_margin, active_section, mpc_health});
+    output_built.reason = recovery.feasible
+                              ? "published_lateral_safety_reject_recovery"
+                              : "published_lateral_safety_reject_speed_only";
+    output_built.published_lateral_safety_rejected = true;
+    output_built.reentry_gate = reentry_gate;
+  }
   rememberPublishedLateralTarget(now_sec, output_built);
   return output_built;
 }
@@ -620,18 +827,26 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
 // 出力: 各相手車の等速予測軌道。
 // 処理概要: V2X速度推定を使い、planner horizon上の相手位置をFrenet/Cartesianで並べる。
 std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
-    const std::vector<OpponentState> &opponents, double now_sec) const {
+    const std::vector<OpponentState> &opponents, double now_sec,
+    const std::vector<double> *time_points) const {
   // V2X位置から推定した速度を使い、短いhorizonでは等速直線運動として予測する。
   std::vector<PredictedOpponent> out;
   for (const auto &opp : opponents) {
-    if (!opp.valid ||
+    if (!opp.valid || !std::isfinite(opp.stamp_sec) || now_sec < opp.stamp_sec ||
         now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
       continue;
     }
     PredictedOpponent pred;
     pred.id = opp.id;
-    for (std::size_t i = 0; i < config_.horizon_points; ++i) {
-      const double t = static_cast<double>(i) * config_.horizon_dt_sec;
+    const std::size_t count =
+        time_points == nullptr ? config_.horizon_points : time_points->size();
+    for (std::size_t i = 0; i < count; ++i) {
+      const double t = time_points == nullptr
+                           ? static_cast<double>(i) * config_.horizon_dt_sec
+                           : (*time_points)[i];
+      if (!std::isfinite(t) || t < 0.0) {
+        continue;
+      }
       const double x = opp.x + opp.vx * t;
       const double y = opp.y + opp.vy * t;
       const auto fr = frame_.cartesianToFrenet(x, y, 0.0);
@@ -644,6 +859,164 @@ std::vector<PredictedOpponent> OvertakePlannerCore::predictOpponents(
     out.push_back(std::move(pred));
   }
   return out;
+}
+
+// 入力: 自車、現在のBlockedInfo、相手車一覧。
+// 出力: publish用horizonより長い、通常ラインまで戻るRECOVERY評価軌道。
+// 処理概要: 短いMPC horizonだけが安全でも、merge終端で他車へ入る復帰を許可しない。
+CandidateTrajectory OvertakePlannerCore::makeReentryEvaluationCandidate(
+    const EgoState &ego, const BlockedInfo &blocked_info,
+    const std::vector<OpponentState> &opponents) const {
+  PlannerConfig evaluation_config = config_;
+  const double dt_sec = std::max(1.0e-3, config_.horizon_dt_sec);
+  const double horizon_sec = std::max(
+      static_cast<double>(config_.horizon_points) * dt_sec,
+      std::max(0.0, config_.reentry_evaluation_horizon_sec));
+  evaluation_config.horizon_points = std::max<std::size_t>(
+      config_.horizon_points,
+      static_cast<std::size_t>(std::ceil(horizon_sec / dt_sec)) + 1U);
+  // 実行時のRECOVERYが横誤差のrelease閾値で一時的に保持されていても、
+  // ゲート評価は「通常ラインへ実際に戻る」最悪ケースを必ず検査する。
+  evaluation_config.recovery_release_lateral_error_m = 0.0;
+  BlockedInfo evaluation_blocked = blocked_info;
+  evaluation_blocked.reentry_hold_active = false;
+  return CandidateBuilder(frame_, evaluation_config)
+      .makeCandidate(CandidateType::RECOVERY, ego, evaluation_blocked,
+                     opponents, nullptr);
+}
+
+// 入力: 自車状態。
+// 出力: 現在のmodeで通常ラインへの横移動を始める/継続する必要があるならtrue。
+// 処理概要: 通常走行や完全に中心へ戻った状態までV2X欠損で固定しないよう、復帰文脈だけを選ぶ。
+bool OvertakePlannerCore::reentryRequested(const EgoState &ego) const {
+  // PASSの横移動開始を中心線復帰と誤認しない。復帰phaseへ入った後はFREE_RUNへ
+  // modeだけが変わっても、中心へ戻り切るまで同じgateを継続する。
+  if (reentry_lockout_active_) {
+    return true;
+  }
+  return reentry_phase_active_ && std::isfinite(ego.frenet.d) &&
+         std::abs(ego.frenet.d) > 1.0e-3;
+}
+
+// 入力: 現在の自車横位置と直前/遷移後のbehavior mode。
+// 出力: なし。通常ライン復帰を開始した文脈をラッチする。
+// 処理概要: PASSの外向き横移動は除外し、YIELD/FOLLOW/RECOVERYからFREE_RUNへ
+// 遷移しても中心復帰が終わるまでgate適用を失わない。
+void OvertakePlannerCore::updateReentryPhase(const EgoState &ego) {
+  if (reentry_lockout_active_) {
+    reentry_phase_active_ = true;
+    return;
+  }
+  if (!std::isfinite(ego.frenet.d) || std::abs(ego.frenet.d) <= 1.0e-3) {
+    reentry_phase_active_ = false;
+    return;
+  }
+  // PASS準備・実行中は回避側へ出る途中なので、ここでRECOVERY評価を開始しない。
+  if (isPassMode(mode_)) {
+    return;
+  }
+  // FREE_RUN外の横ずれはすべて通常ライン復帰の候補を持ち得る。FREE_RUNで
+  // 横ずれが残る場合は、以前にlatchedしたphaseだけを継続する。
+  if (mode_ != BehaviorMode::FREE_RUN) {
+    reentry_phase_active_ = true;
+  }
+}
+
+// 入力: 現在時刻、自車、周辺車、MPC health、Node側の入力鮮度状態。
+// 出力: 通常ライン復帰を許可できるかと、拒否理由・ブロッカー。
+// 処理概要: 全fresh相手の予測と復帰終端までの候補を同じSafetyEvaluatorで照合し、
+// 連続安全周期を満たすまでfail-closedにする。
+ReentryGateResult OvertakePlannerCore::evaluateReentryGate(
+    double now_sec, const EgoState &ego, const BlockedInfo &blocked_info,
+    const std::vector<OpponentState> &opponents,
+    const MpcHealthStatus &mpc_health,
+    const ReentryInputStatus &reentry_input) {
+  (void)mpc_health;
+  ReentryGateResult gate;
+  gate.requested = config_.reentry_gate_enabled && reentryRequested(ego);
+  if (!gate.requested) {
+    reentry_clear_cycles_ = 0;
+    return gate;
+  }
+
+  const bool mpc_input_ready =
+      !config_.reentry_require_mpc_health || reentry_input.mpc_healthy;
+  gate.input_complete = reentry_input.ego_fresh &&
+                        reentry_input.v2x_snapshot_fresh &&
+                        reentry_input.all_observed_opponents_fresh &&
+                        reentry_input.all_observed_opponents_included &&
+                        reentry_input.reference_valid && mpc_input_ready;
+  if (!gate.input_complete) {
+    reentry_clear_cycles_ = 0;
+    gate.reason = !reentry_input.ego_fresh
+                      ? "stale_ego"
+                      : !reentry_input.v2x_snapshot_fresh
+                            ? "stale_v2x_snapshot"
+                            : !reentry_input.all_observed_opponents_fresh
+                                  ? "stale_reentry_opponent"
+                                  : !reentry_input
+                                            .all_observed_opponents_included
+                                        ? "untracked_reentry_opponent"
+                                  : !reentry_input.reference_valid
+                                        ? "invalid_reference"
+                                        : "unhealthy_mpc";
+    gate.clear_cycles = reentry_clear_cycles_;
+    return gate;
+  }
+
+  const auto reentry_candidate =
+      makeReentryEvaluationCandidate(ego, blocked_info, opponents);
+  const auto predictions =
+      predictOpponents(opponents, now_sec, &reentry_candidate.t);
+  gate.evaluated_opponent_count = static_cast<int>(predictions.size());
+  if (predictions.size() != opponents.size() ||
+      reentry_candidate.t.empty() ||
+      reentry_candidate.x.size() != reentry_candidate.t.size() ||
+      reentry_candidate.y.size() != reentry_candidate.t.size() ||
+      reentry_candidate.yaw.size() != reentry_candidate.t.size()) {
+    reentry_clear_cycles_ = 0;
+    gate.reason = "incomplete_reentry_prediction";
+    gate.clear_cycles = reentry_clear_cycles_;
+    return gate;
+  }
+
+  CandidateTrajectory evaluated = reentry_candidate;
+  safety_.evaluate(evaluated, predictions);
+  gate.min_safety_margin = evaluated.min_safety_margin;
+  gate.cbf_slack = evaluated.cbf_slack;
+  gate.blocking_vehicle_id = evaluated.blocking_opponent_id;
+  gate.blocking_time_sec = evaluated.blocking_time_sec;
+  if (!evaluated.longitudinal_profile_valid) {
+    reentry_clear_cycles_ = 0;
+    gate.reason = "invalid_longitudinal_brake_model";
+  } else if (!evaluated.feasible) {
+    reentry_clear_cycles_ = 0;
+    gate.reason = evaluated.reject_reason;
+  } else if (std::isnan(evaluated.min_safety_margin) ||
+             evaluated.min_safety_margin <
+                 config_.reentry_min_safety_margin_h) {
+    reentry_clear_cycles_ = 0;
+    gate.reason = "reentry_margin_below_threshold";
+  } else if (evaluated.cbf_slack > 0.0) {
+    reentry_clear_cycles_ = 0;
+    gate.reason = "reentry_cbf_slack";
+  } else {
+    ++reentry_clear_cycles_;
+    gate.clear_cycles = reentry_clear_cycles_;
+    const int required_cycles = std::max(1, config_.reentry_safe_cycles);
+    gate.permitted = reentry_clear_cycles_ >= required_cycles;
+    gate.reason = gate.permitted ? "reentry_clear" : "reentry_clear_pending";
+    if (gate.permitted) {
+      reentry_lockout_active_ = false;
+    }
+    return gate;
+  }
+
+  gate.clear_cycles = reentry_clear_cycles_;
+  if (reentry_lockout_active_ && gate.reason.empty()) {
+    gate.reason = "reentry_lockout";
+  }
+  return gate;
 }
 
 // 入力: 候補種別、自車状態、BlockedInfo、相手車一覧。
@@ -910,6 +1283,14 @@ bool OvertakePlannerCore::promoteSlowObstacleChain(
           std::max(0.0, config_.slow_obstacle_chain_distance_m)) {
     return false;
   }
+  // 12 m / 4 m のparallel観測だけで前方閉塞へ昇格させない。同じ走行コリドーへ
+  // 入り、実際に接近している低速車だけを停止車列として扱う。
+  if (std::abs(blocked.parallel_side_delta_d) >
+          std::max(0.0, config_.same_corridor_width_m) ||
+      !std::isfinite(blocked.parallel_side_rel_v) ||
+      blocked.parallel_side_rel_v <= 0.0) {
+    return false;
+  }
 
   const auto &target =
       opponents[static_cast<std::size_t>(blocked.parallel_side_index)];
@@ -935,6 +1316,86 @@ bool OvertakePlannerCore::promoteSlowObstacleChain(
   blocked.front_direction_known = blocked.parallel_side_direction_known;
   blocked.front_same_direction = blocked.parallel_side_same_direction;
   return true;
+}
+
+// 入力: 現在時刻、自車、前方判定、相手車一覧。
+// 出力: なし。停止/ほぼ停止した前方車だけをBlockedInfoへ明示する。
+// 処理概要: parallel観測と分離し、fresh・同方向・前方・同一コリドー・有限TTCを満たす場合だけ分類する。
+void OvertakePlannerCore::classifyStationaryFrontObstacle(
+    double now_sec, const EgoState &ego, BlockedInfo &blocked,
+    const std::vector<OpponentState> &opponents) const {
+  blocked.stationary_front_obstacle = false;
+  blocked.stationary_front_id.clear();
+  blocked.stationary_front_ttc_sec = std::numeric_limits<double>::infinity();
+  if (blocked.nearest_index < 0 ||
+      static_cast<std::size_t>(blocked.nearest_index) >= opponents.size() ||
+      !std::isfinite(blocked.front_delta_s) || blocked.front_delta_s <= 0.0 ||
+      !std::isfinite(blocked.front_delta_d) ||
+      std::abs(blocked.front_delta_d) >
+          std::max(0.0, config_.same_corridor_width_m) ||
+      !std::isfinite(blocked.front_rel_v) || blocked.front_rel_v <= 0.0 ||
+      (blocked.front_direction_known && !blocked.front_same_direction)) {
+    return;
+  }
+  const auto &target =
+      opponents[static_cast<std::size_t>(blocked.nearest_index)];
+  if (!target.valid || !std::isfinite(target.stamp_sec) ||
+      now_sec < target.stamp_sec ||
+      now_sec - target.stamp_sec > config_.opponent_stale_time_sec ||
+      !std::isfinite(target.v) ||
+      target.v > std::max(0.0, config_.stationary_obstacle_speed_threshold_mps)) {
+    return;
+  }
+  const double ttc_sec = blocked.front_delta_s / blocked.front_rel_v;
+  if (!std::isfinite(ttc_sec) || ttc_sec <= 0.0) {
+    return;
+  }
+  // egoを参照していることを明示し、NaN/負速度が分類を通らないようにする。
+  if (!std::isfinite(ego.v) || ego.v < 0.0) {
+    return;
+  }
+  blocked.stationary_front_obstacle = true;
+  blocked.stationary_front_id = target.id;
+  blocked.stationary_front_ttc_sec = ttc_sec;
+}
+
+// 入力: publish直前のPlannerOutput、基準候補、相手予測。
+// 出力: 実際にpublishする横offset列が安全ならtrue。
+// 処理概要: rate limit/hold後のd列をCartesianへ再構成し、候補評価時と同じ楕円・壁制約で再評価する。
+bool OvertakePlannerCore::revalidatePublishedLateral(
+    const PlannerOutput &output, const CandidateTrajectory &base_candidate,
+    const std::vector<PredictedOpponent> &predictions) const {
+  // PASSだけでなく、通常ラインへ戻るRECOVERYもrate limit/hold後の形を再評価する。
+  // SAFE_STOP・速度のみfallbackはそれぞれ専用の安全/下流fallback経路を維持する。
+  const bool reentry_recovery =
+      output.reentry_gate.requested &&
+      base_candidate.type == CandidateType::RECOVERY;
+  if (!output.active_override ||
+      (!isPassCandidate(base_candidate.type) && !reentry_recovery)) {
+    return true;
+  }
+  if (!base_candidate.longitudinal_profile_valid) {
+    return false;
+  }
+  if (output.lateral_offsets.empty() ||
+      output.lateral_offsets.size() != base_candidate.s.size()) {
+    return false;
+  }
+  CandidateTrajectory published = base_candidate;
+  published.d = output.lateral_offsets;
+  published.x.clear();
+  published.y.clear();
+  published.yaw.clear();
+  published.x.reserve(published.s.size());
+  published.y.reserve(published.s.size());
+  published.yaw.reserve(published.s.size());
+  for (std::size_t i = 0; i < published.s.size(); ++i) {
+    const auto point = frame_.frenetToCartesian(published.s[i], published.d[i]);
+    published.x.push_back(point.x);
+    published.y.push_back(point.y);
+    published.yaw.push_back(point.yaw);
+  }
+  return safety_.evaluate(published, predictions);
 }
 
 // 入力: 現在のBlockedInfo。
@@ -1118,6 +1579,13 @@ OvertakePlannerCore::preferredPassType(const BlockedInfo &blocked) const {
   if (blocked.can_pass_right) {
     return CandidateType::PASS_RIGHT;
   }
+  if (blocked.blocked && blocked.straight_overtake_start_allowed &&
+      blocked.overtake_permission_allowed) {
+    // 静的gapが両側とも狭くても、候補安全評価用の局所プロファイルは広い診断側へ固定する。
+    return blocked.left_pass_gap_m >= blocked.right_pass_gap_m
+               ? CandidateType::PASS_LEFT
+               : CandidateType::PASS_RIGHT;
+  }
   return CandidateType::FASTEST;
 }
 
@@ -1142,6 +1610,11 @@ void OvertakePlannerCore::updateLocalizedLateralProfile(
     double now_sec, const EgoState &ego, const BlockedInfo &blocked,
     const std::vector<OpponentState> &opponents) {
   if (!localizedLateralProfileEnabled()) {
+    clearLocalizedLateralProfile();
+    return;
+  }
+  if (!blocked.blocked && !blocked.side_by_side && !isPassMode(mode_)) {
+    // 広いparallel観測だけではPASS文脈を作らず、局所回避プロファイルもラッチしない。
     clearLocalizedLateralProfile();
     return;
   }
@@ -1288,6 +1761,16 @@ void OvertakePlannerCore::applyHighSpeedCurveLateralHold(
   output.lateral_target_hold_active = false;
   output.lateral_target_hold_reason.clear();
 
+  if (output.reentry_gate.requested && !output.reentry_gate.permitted) {
+    // 以前のカーブhold列が中心方向を向いていても、復帰ゲート閉鎖中の
+    // 現在d保持候補を上書きしてはならない。
+    high_speed_curve_lateral_hold_active_ = false;
+    high_speed_curve_lateral_hold_offsets_.clear();
+    high_speed_curve_lateral_hold_sec_ =
+        std::numeric_limits<double>::quiet_NaN();
+    return;
+  }
+
   if (!config_.high_speed_curve_lateral_hold_enabled) {
     high_speed_curve_lateral_hold_active_ = false;
     high_speed_curve_lateral_hold_offsets_.clear();
@@ -1356,6 +1839,11 @@ void OvertakePlannerCore::applyHighSpeedCurveLateralHold(
 // 処理概要: publish周期ごとのtarget d急変を抑え、MPCへ滑らかな参照を渡す。
 void OvertakePlannerCore::applyLateralTargetRateLimit(double now_sec,
                                                       PlannerOutput &output) {
+  if (output.reentry_gate.requested && !output.reentry_gate.permitted) {
+    // 前周期の通常ライン向けoffsetを混ぜると、hold中でも横方向に進む。
+    // ゲート拒否時のRECOVERYはCandidateBuilderが生成した現在d保持列をそのまま使う。
+    return;
+  }
   if (!output.active_override || output.lateral_offsets.empty() ||
       config_.lateral_target_max_step_m <= 0.0 ||
       last_published_lateral_offsets_.empty() ||

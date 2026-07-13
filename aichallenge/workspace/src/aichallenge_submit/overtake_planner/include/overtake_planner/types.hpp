@@ -95,6 +95,9 @@ struct CandidateTrajectory {
   std::vector<double> x;
   std::vector<double> y;
   std::vector<double> yaw;
+  // 安全評価用の到達可能速度。v_refとは別に、応答遅れと制動上限を含む。
+  std::vector<double> predicted_speed_mps;
+  // 下流MPC/PPへの即時速度上限。各周期で先頭要素が直ちに消費される。
   std::vector<double> v_ref;
   bool feasible{true};
   double score{0.0};
@@ -102,6 +105,14 @@ struct CandidateTrajectory {
   double cbf_slack{0.0};
   int active_safety_constraint_count{0};
   std::string reject_reason{};
+  std::string blocking_opponent_id{};
+  double blocking_time_sec{std::numeric_limits<double>::quiet_NaN()};
+  // s(t) に使った減速到達可能性。v_refの即時capとは独立して安全判定する。
+  bool longitudinal_profile_valid{true};
+  double assumed_brake_decel_mps2{0.0};
+  double response_delay_sec{0.0};
+  double required_brake_distance_m{std::numeric_limits<double>::infinity()};
+  double available_brake_distance_m{std::numeric_limits<double>::infinity()};
 };
 
 struct LocalizedLateralProfile {
@@ -157,10 +168,20 @@ struct BlockedInfo {
   double slow_obstacle_chain_delta_d{0.0};
   double slow_obstacle_chain_speed_mps{
       std::numeric_limits<double>::quiet_NaN()};
+  // parallel観測とは分離した、前方で停止またはほぼ停止している対象の判定。
+  bool stationary_front_obstacle{false};
+  std::string stationary_front_id{};
+  double stationary_front_ttc_sec{std::numeric_limits<double>::infinity()};
+  bool stationary_front_brake_feasible{false};
+  double stationary_front_required_brake_distance_m{
+      std::numeric_limits<double>::infinity()};
+  double stationary_front_available_brake_distance_m{
+      std::numeric_limits<double>::infinity()};
   bool future_side_by_side{false};
   bool future_corner_side_by_side{false};
   bool future_outer_wall_risk{false};
   bool future_yield_required{false};
+  bool future_parallel_interaction{false};
   double future_delta_s{std::numeric_limits<double>::infinity()};
   double future_delta_d{0.0};
   double future_wall_clearance_m{std::numeric_limits<double>::infinity()};
@@ -176,6 +197,13 @@ struct BlockedInfo {
   double right_pass_gap_m{std::numeric_limits<double>::infinity()};
   bool can_pass_left{false};
   bool can_pass_right{false};
+  // can_pass_* は静的gap診断値。実際の開始可否は候補安全評価の結果で判断する。
+  bool pass_left_candidate_generated{false};
+  bool pass_right_candidate_generated{false};
+  bool pass_left_candidate_feasible{false};
+  bool pass_right_candidate_feasible{false};
+  // 復帰ゲートが閉じている間はRECOVERY候補を中心線へ動かさず、現在横位置を保持する。
+  bool reentry_hold_active{false};
   double pass_gap_required_m{0.0};
   double corner_abs_curvature{0.0};
   bool straight_overtake_start_allowed{true};
@@ -214,6 +242,31 @@ struct MpcHealthStatus {
   int infeasible_count{0};
   double solve_time_ms{std::numeric_limits<double>::quiet_NaN()};
   double age_sec{std::numeric_limits<double>::infinity()};
+};
+
+struct ReentryInputStatus {
+  // Node側で検証した復帰判断の入力完全性。falseは「安全」とは解釈しない。
+  bool ego_fresh{false};
+  bool v2x_snapshot_fresh{false};
+  bool all_observed_opponents_fresh{false};
+  // collectOpponents()から除外された近接他車が無いこと。falseは未評価車両あり。
+  bool all_observed_opponents_included{false};
+  bool reference_valid{false};
+  bool mpc_healthy{false};
+};
+
+struct ReentryGateResult {
+  // 通常ラインへ戻る候補を全相手車両に対して評価した結果。
+  bool requested{false};
+  bool permitted{false};
+  bool input_complete{false};
+  int clear_cycles{0};
+  int evaluated_opponent_count{0};
+  std::string reason{};
+  std::string blocking_vehicle_id{};
+  double min_safety_margin{std::numeric_limits<double>::infinity()};
+  double cbf_slack{0.0};
+  double blocking_time_sec{std::numeric_limits<double>::quiet_NaN()};
 };
 
 struct SectionSafetyRule {
@@ -301,9 +354,23 @@ struct PlannerConfig {
   double large_lateral_error_v_max_mps{2.5};
   double min_pass_gap_m{1.80};
   double pass_gap_hysteresis_m{0.15};
+  // falseなら旧来の静的gap gateだけを使う。評価fixture比較用で、実運用はtrue。
+  bool dynamic_pass_candidate_enabled{true};
   double yield_speed_margin_mps{0.60};
   double yield_min_speed_cap_mps{0.50};
   double yield_rejoin_gap_m{3.0};
+  // 実際の下流制御より強い制動は安全評価に使わない。現行mux clampは1.5 m/s^2。
+  double max_brake_decel_mps2{1.0};
+  double longitudinal_response_delay_sec{0.25};
+  double stationary_obstacle_speed_threshold_mps{0.30};
+  // 通常ライン復帰を複数車両に対してfail-closedで許可するための設定。
+  bool reentry_gate_enabled{true};
+  int reentry_safe_cycles{5};
+  double reentry_min_safety_margin_h{0.30};
+  double reentry_evaluation_horizon_sec{4.0};
+  double reentry_v2x_snapshot_stale_time_sec{0.50};
+  double reentry_hold_v_max_mps{0.50};
+  bool reentry_require_mpc_health{true};
   double left_offset_m{0.80};
   double right_offset_m{-0.80};
   std::string overtake_lateral_profile_mode{"legacy"};
@@ -400,6 +467,8 @@ struct PlannerOutput {
   bool recovery_speed_guard_active{false};
   bool lateral_target_hold_active{false};
   std::string lateral_target_hold_reason{};
+  bool published_lateral_safety_rejected{false};
+  ReentryGateResult reentry_gate{};
   std::string lateral_profile_mode{"legacy"};
   bool maneuver_latch_active{false};
   std::string maneuver_latch_target_id{};
