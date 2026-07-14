@@ -424,7 +424,7 @@ same_direction_min_s_dot_mps: 0.05
 | `side_yield_s_m` | `0.30` | 相手が前に出た時点で譲る。微小なs差だけで譲り続けないよう余裕を残す。 |
 | `side_by_side_target_gap_m` | `0.75` | 横並び維持で壁側へ逃げすぎる力を弱める。 |
 | `corner_yield_v_max_mps` | `3.0` | コーナー横並びの譲り速度を抑える。 |
-| `speed_only_fallback_v_max_mps` | `3.0` | unsafe候補を横方向に復活させず速度だけ落とす。 |
+| `speed_only_fallback_v_max_mps` | `1.0` | unsafe候補を横方向に復活させず速度だけ落とす。 |
 | `opponent_collision_fallback_v_max_mps` | `0.5` | `opponent_collision` で横候補がunsafeな場合の安全ゲート向け低速cap。 |
 | `wall_soft_margin_m` | `0.25` | 壁リスク速度ガードを始めるソフト余裕。 |
 | `mpc_health_v_max_mps` | `3.0` | MPC health悪化またはstale時の速度上限。 |

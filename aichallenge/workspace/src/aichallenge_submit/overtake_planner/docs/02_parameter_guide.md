@@ -154,7 +154,7 @@ s9,335,1,true
 | パラメータ | 現在値 | fallback | 変更すると何が変わるか |
 |---|---:|---:|---|
 | `min_pass_gap_m` | `1.8` | `1.80` | 左右に必要な追い越し空間。上げるとPASS候補が減る。 |
-| `pass_gap_hysteresis_m` | `0.15` | `0.15` | 既に追い越し中の方向だけ、必要gapを少し緩める。 |
+| `pass_gap_hysteresis_m` | `0.25` | `0.25` | 既に追い越し中の方向だけ、必要gapを少し緩める。 |
 | `dynamic_pass_candidate_enabled` | `true` | `true` | 静的gapが狭くても左右PASS候補を生成し、楕円・壁の時系列安全評価で最終判定する。 |
 | `safety_ellipse_b_m` | `1.8` | `1.8` | pass gap必要量にも効く横方向安全幅。 |
 | `min_ellipse_h` | `0.20` | `0.20` | pass gap必要量と他車安全評価に効く余裕。 |
@@ -219,8 +219,8 @@ s9,335,1,true
 
 | パラメータ | 現在値 | fallback | 変更すると何が変わるか |
 |---|---:|---:|---|
-| `left_offset_m` | `0.80` | `0.80` | 左追い越し時の目標d。 |
-| `right_offset_m` | `-0.80` | `-0.80` | 右追い越し時の目標d。 |
+| `left_offset_m` | `0.70` | `0.70` | 左追い越し時の目標d。 |
+| `right_offset_m` | `-0.70` | `-0.70` | 右追い越し時の目標d。 |
 | `overtake_lateral_profile_mode` | `localized_latched` | `legacy` | `localized_latched` では停止車列の対象sと回避区間を保持し、通過直後に中心へ戻りすぎるのを抑える。 |
 | `pass_horizon_publish_mode` | `overtake_only` | `prepare_and_overtake` | `overtake_only` では `PREPARE_OVERTAKE_*` 中に内部PASS判定だけ進め、MPCへはFOLLOW horizonを出す。 |
 | `prepare_distance_m` | `8.0` | `8.0` | PASS目標dへ移る距離。上げると横移動が穏やか。 |
@@ -301,7 +301,7 @@ upper_d = d_max_m - min_wall_margin_m
 | パラメータ | 現在値 | fallback | 変更すると何が変わるか |
 |---|---:|---:|---|
 | `speed_only_fallback_enabled` | `true` | `true` | unsafeな横方向候補やSAFE_STOP infeasible時に速度only fallbackを出す。 |
-| `speed_only_fallback_v_max_mps` | `3.0` | `3.0` | 速度only fallbackの上限。 |
+| `speed_only_fallback_v_max_mps` | `1.0` | `1.0` | 速度only fallbackの上限。 |
 | `opponent_collision_fallback_v_max_mps` | `0.5` | `0.5` | `opponent_collision` で横候補がunsafeな場合だけ使う低速上限。後続車や優先権なしの膠着ではこちらを使う。 |
 | `side_by_side_leader_priority_enabled` | `true` | `true` | 横並び/並走で自車が明確に先行している場合だけ、SAFE_STOP要求と `opponent_collision` fallbackの低速固定を緩める。安全評価自体は無効化しない。 |
 | `side_by_side_leader_priority_enter_s_m` | `1.0` | `1.0` | 先行車扱いへ入るために必要な、相手が後方にいる距離。`side_delta_s <= -enter` または `parallel_side_delta_s <= -enter` で入る。 |

@@ -41,6 +41,16 @@ bool isPassCandidate(CandidateType selected) {
          selected == CandidateType::PASS_RIGHT;
 }
 
+// 入力: 現在modeと選択候補。
+// 出力: 現在の追い越し方向と同じPASS候補ならtrue。
+// 処理概要: 複数の低速/停止車両を連続して抜く間、timeoutだけで中止復帰へ落とさない。
+bool selectedMatchesCurrentPass(BehaviorMode current, CandidateType selected) {
+  return (current == BehaviorMode::OVERTAKE_LEFT &&
+          selected == CandidateType::PASS_LEFT) ||
+         (current == BehaviorMode::OVERTAKE_RIGHT &&
+          selected == CandidateType::PASS_RIGHT);
+}
+
 } // namespace
 
 // 入力: planner設定。
@@ -338,6 +348,10 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;
     } else if (blocked_info.side_by_side) {
+      next = current;
+    } else if (selectedMatchesCurrentPass(current, selected)) {
+      // PASS候補が同じ方向でまだ安全なら、停止車列や長い回避区間の途中で
+      // abort_timeout_secだけを理由にABORT_RECOVERYへ落とさない。
       next = current;
     } else if (blocked_info.front_delta_s > config_.merge_front_gap_m &&
                !blocked_info.blocked) {

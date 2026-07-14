@@ -28,6 +28,13 @@ bool isRightPassMode(BehaviorMode mode) {
          mode == BehaviorMode::OVERTAKE_RIGHT;
 }
 
+// 入力: 現在mode。
+// 出力: 左右どちらかの追い越し準備/実行中ならtrue。
+// 処理概要: 追い越し中だけ中心線基準ではなく、追い越し目標基準の横誤差も許容する。
+bool isAnyPassMode(BehaviorMode mode) {
+  return isLeftPassMode(mode) || isRightPassMode(mode);
+}
+
 // 入力: 現在modeと左右pass可否を含むBlockedInfo。
 // 出力: 現在走っている側のpass gapが失われたならtrue。
 // 処理概要: 追い越し中に走行中の側が塞がれた場合、YIELD/復帰候補を追加するトリガにする。
@@ -158,6 +165,47 @@ bool isPrepareOvertakeMode(BehaviorMode mode) {
 // 処理概要: 内部PASS評価とMPCへ出すhorizonを分離するための切替を読む。
 bool publishPassHorizonInPrepare(const PlannerConfig &config) {
   return config.pass_horizon_publish_mode != "overtake_only";
+}
+
+// 入力: planner設定、現在mode、ラッチ済み局所プロファイル。
+// 出力: 現在の追い越し方向が目標にしているd。非PASS文脈ならNaN。
+// 処理概要: 横ずれ判定で「中心から離れたこと」自体を異常扱いしないため、PASS目標dを参照する。
+double passTargetForMode(const PlannerConfig &config, BehaviorMode mode,
+                         const LocalizedLateralProfile &profile) {
+  if (!isAnyPassMode(mode)) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if (profile.active &&
+      ((isLeftPassMode(mode) && profile.pass_type == CandidateType::PASS_LEFT) ||
+       (isRightPassMode(mode) &&
+        profile.pass_type == CandidateType::PASS_RIGHT)) &&
+      std::isfinite(profile.target_d_m)) {
+    return profile.target_d_m;
+  }
+  if (isLeftPassMode(mode)) {
+    return config.left_offset_m;
+  }
+  if (isRightPassMode(mode)) {
+    return config.right_offset_m;
+  }
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
+// 入力: planner設定、現在mode、自車、ラッチ済み局所プロファイル。
+// 出力: large_lateral_error判定に使う横誤差[m]。
+// 処理概要: 非追い越し時は従来どおり中心線基準、追い越し中は中心線とPASS目標の近い方を使う。
+double lateralErrorForPassAwareFreeze(const PlannerConfig &config,
+                                      BehaviorMode mode, const EgoState &ego,
+                                      const LocalizedLateralProfile &profile) {
+  if (!std::isfinite(ego.frenet.d)) {
+    return std::numeric_limits<double>::infinity();
+  }
+  double error = std::abs(ego.frenet.d);
+  const double pass_target_d = passTargetForMode(config, mode, profile);
+  if (std::isfinite(pass_target_d)) {
+    error = std::min(error, std::abs(ego.frenet.d - pass_target_d));
+  }
+  return error;
 }
 
 // 入力: 候補集合とBlockedInfo。
@@ -390,9 +438,12 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     }
   }
   updateLeaderPriority(now_sec, blocked);
+  const double pass_aware_lateral_error =
+      lateralErrorForPassAwareFreeze(config_, mode_, ego,
+                                     localized_lateral_profile_);
   const bool large_lateral_error =
       config_.large_lateral_error_threshold_m >= 0.0 &&
-      std::abs(ego.frenet.d) > config_.large_lateral_error_threshold_m;
+      pass_aware_lateral_error > config_.large_lateral_error_threshold_m;
   const bool freeze_overtake_decisions =
       large_lateral_error &&
       (blocked.ego_wall_clearance_m < wall_soft_margin || blocked.blocked ||
@@ -1283,10 +1334,16 @@ bool OvertakePlannerCore::promoteSlowObstacleChain(
           std::max(0.0, config_.slow_obstacle_chain_distance_m)) {
     return false;
   }
-  // 12 m / 4 m のparallel観測だけで前方閉塞へ昇格させない。同じ走行コリドーへ
-  // 入り、実際に接近している低速車だけを停止車列として扱う。
+  // 通常時は同じ走行コリドー内だけ昇格する。一方で既に追い越し側へ出ている時は、
+  // 2台目以降が横に離れて見えるため、parallel検出幅まで停止車列として扱う。
+  const bool pass_chain_context =
+      isAnyPassMode(mode_) || localized_lateral_profile_.active ||
+      reentry_lockout_active_;
+  const double chain_lateral_limit =
+      pass_chain_context ? config_.parallel_side_margin_m
+                         : config_.same_corridor_width_m;
   if (std::abs(blocked.parallel_side_delta_d) >
-          std::max(0.0, config_.same_corridor_width_m) ||
+          std::max(0.0, chain_lateral_limit) ||
       !std::isfinite(blocked.parallel_side_rel_v) ||
       blocked.parallel_side_rel_v <= 0.0) {
     return false;

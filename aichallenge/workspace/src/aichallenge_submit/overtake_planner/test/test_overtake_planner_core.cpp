@@ -104,7 +104,7 @@ overtake_planner::PlannerConfig makeConfig() {
   config.side_by_side_shift_distance_m = 2.0;
   config.side_by_side_speed_cap_mps = 4.5;
   config.min_pass_gap_m = 1.45;
-  config.pass_gap_hysteresis_m = 0.15;
+  config.pass_gap_hysteresis_m = 0.25;
   // 既存fixtureは静的gapの回帰確認用。動的候補評価は専用fixtureで明示的に有効化する。
   config.dynamic_pass_candidate_enabled = false;
   // 既存fixtureは個別の追い越し/停止判定を対象にする。復帰ゲート専用fixtureだけを
@@ -904,6 +904,31 @@ TEST(OvertakePlannerCore, LargeLateralErrorPreservesExistingPassGapReason) {
   EXPECT_EQ(output.blocked_info.pass_gap_reason, "both_gap_narrow");
   EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
   EXPECT_EQ(output.selected, overtake_planner::CandidateType::RECOVERY);
+}
+
+TEST(OvertakePlannerCore, ActivePassTargetDoesNotFreezeAsLargeLateralError) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.large_lateral_error_threshold_m = 0.60;
+  config.left_offset_m = 0.70;
+  config.min_pass_gap_m = 0.2;
+  config.safety_ellipse_b_m = 0.1;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto first_opponent = makeOpponent(frame, 13.0, -0.6);
+  const auto prepare = core.update(0.1, ego, {first_opponent});
+  ASSERT_EQ(prepare.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+
+  const auto shifted_ego = makeEgo(frame, 5.0, config.left_offset_m);
+  const auto output = core.update(0.2, shifted_ego, {first_opponent});
+
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
+  EXPECT_FALSE(output.blocked_info.pass_decision_frozen);
+  EXPECT_NE(output.blocked_info.pass_decision_freeze_reason,
+            "large_lateral_error");
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::PASS_LEFT);
 }
 
 TEST(OvertakePlannerCore, WallMarginRecoveryDoesNotReleaseToFastestTooEarly) {
@@ -2369,6 +2394,39 @@ TEST(OvertakePlannerCore,
   EXPECT_TRUE(output.blocked_info.can_pass_right);
   EXPECT_TRUE(output.blocked_info.pass_left_candidate_generated);
   EXPECT_TRUE(output.blocked_info.pass_left_candidate_feasible);
+}
+
+TEST(OvertakePlannerCore,
+     ActivePassPromotesOffsetSlowObstacleChainAndKeepsPassing) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.dynamic_pass_candidate_enabled = true;
+  config.large_lateral_error_threshold_m = 0.60;
+  config.left_offset_m = 0.70;
+  config.min_pass_gap_m = 0.2;
+  config.safety_ellipse_b_m = 0.1;
+  overtake_planner::OvertakePlannerCore core(frame, config);
+
+  const auto ego = makeEgo(frame, 5.0, 0.0);
+  const auto first_opponent = makeOpponent(frame, 13.0, -0.6);
+  const auto prepare = core.update(0.1, ego, {first_opponent});
+  ASSERT_EQ(prepare.mode,
+            overtake_planner::BehaviorMode::PREPARE_OVERTAKE_LEFT);
+
+  auto second_static = makeOpponent(frame, 13.0, -0.5);
+  second_static.id = "d3";
+  second_static.vx = 0.0;
+  second_static.v = 0.0;
+  const auto shifted_ego = makeEgo(frame, 5.0, config.left_offset_m);
+  const auto output = core.update(0.2, shifted_ego, {second_static});
+
+  EXPECT_TRUE(output.blocked_info.parallel_side_candidate);
+  EXPECT_TRUE(output.blocked_info.slow_obstacle_chain_active);
+  EXPECT_TRUE(output.blocked_info.blocked);
+  EXPECT_EQ(output.blocked_info.nearest_id, "d3");
+  EXPECT_FALSE(output.blocked_info.pass_decision_frozen);
+  EXPECT_EQ(output.mode, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
+  EXPECT_EQ(output.selected, overtake_planner::CandidateType::PASS_LEFT);
 }
 
 TEST(OvertakePlannerCore,

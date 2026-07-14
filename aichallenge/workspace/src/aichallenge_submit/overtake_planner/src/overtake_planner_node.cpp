@@ -354,7 +354,7 @@ public:
         declare_parameter<double>("large_lateral_error_v_max_mps", 2.5);
     config.min_pass_gap_m = declare_parameter<double>("min_pass_gap_m", 1.80);
     config.pass_gap_hysteresis_m =
-        declare_parameter<double>("pass_gap_hysteresis_m", 0.15);
+        declare_parameter<double>("pass_gap_hysteresis_m", 0.25);
     config.dynamic_pass_candidate_enabled =
         declare_parameter<bool>("dynamic_pass_candidate_enabled", true);
     config.yield_speed_margin_mps =
@@ -383,8 +383,8 @@ public:
         declare_parameter<double>("reentry_hold_v_max_mps", 0.50);
     config.reentry_require_mpc_health =
         declare_parameter<bool>("reentry_require_mpc_health", true);
-    config.left_offset_m = declare_parameter<double>("left_offset_m", 0.80);
-    config.right_offset_m = declare_parameter<double>("right_offset_m", -0.80);
+    config.left_offset_m = declare_parameter<double>("left_offset_m", 0.70);
+    config.right_offset_m = declare_parameter<double>("right_offset_m", -0.70);
     config.overtake_lateral_profile_mode = declare_parameter<std::string>(
         "overtake_lateral_profile_mode", "legacy");
     config.pass_horizon_publish_mode = declare_parameter<std::string>(
@@ -453,7 +453,7 @@ public:
     config.speed_only_fallback_enabled =
         declare_parameter<bool>("speed_only_fallback_enabled", true);
     config.speed_only_fallback_v_max_mps =
-        declare_parameter<double>("speed_only_fallback_v_max_mps", 3.0);
+        declare_parameter<double>("speed_only_fallback_v_max_mps", 1.0);
     config.opponent_collision_fallback_v_max_mps = declare_parameter<double>(
         "opponent_collision_fallback_v_max_mps", 0.5);
     config.side_by_side_leader_priority_enabled =

@@ -353,7 +353,7 @@ struct PlannerConfig {
   double large_lateral_error_threshold_m{0.60};
   double large_lateral_error_v_max_mps{2.5};
   double min_pass_gap_m{1.80};
-  double pass_gap_hysteresis_m{0.15};
+  double pass_gap_hysteresis_m{0.25};
   // falseなら旧来の静的gap gateだけを使う。評価fixture比較用で、実運用はtrue。
   bool dynamic_pass_candidate_enabled{true};
   double yield_speed_margin_mps{0.60};
@@ -371,8 +371,8 @@ struct PlannerConfig {
   double reentry_v2x_snapshot_stale_time_sec{0.50};
   double reentry_hold_v_max_mps{0.50};
   bool reentry_require_mpc_health{true};
-  double left_offset_m{0.80};
-  double right_offset_m{-0.80};
+  double left_offset_m{0.70};
+  double right_offset_m{-0.70};
   std::string overtake_lateral_profile_mode{"legacy"};
   std::string pass_horizon_publish_mode{"prepare_and_overtake"};
   double localized_avoidance_start_before_target_m{6.0};
@@ -406,7 +406,7 @@ struct PlannerConfig {
   double high_speed_curve_lateral_hold_release_speed_mps{2.5};
   double high_speed_curve_lateral_hold_release_curvature_m_inv{0.025};
   bool speed_only_fallback_enabled{true};
-  double speed_only_fallback_v_max_mps{3.0};
+  double speed_only_fallback_v_max_mps{1.0};
   double opponent_collision_fallback_v_max_mps{0.5};
   bool side_by_side_leader_priority_enabled{true};
   double side_by_side_leader_priority_enter_s_m{1.0};

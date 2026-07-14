@@ -58,7 +58,7 @@ overtake_planner_node:
     large_lateral_error_threshold_m: 0.60
     large_lateral_error_v_max_mps: 8.5
     min_pass_gap_m: 1.8
-    pass_gap_hysteresis_m: 0.15
+    pass_gap_hysteresis_m: 0.25
     dynamic_pass_candidate_enabled: true
     yield_speed_margin_mps: 0.60
     yield_min_speed_cap_mps: 9.5
@@ -77,8 +77,8 @@ overtake_planner_node:
     reentry_v2x_snapshot_stale_time_sec: 0.50
     reentry_hold_v_max_mps: 0.50
     reentry_require_mpc_health: true
-    left_offset_m: 0.80
-    right_offset_m: -0.80
+    left_offset_m: 0.70
+    right_offset_m: -0.70
     overtake_lateral_profile_mode: "localized_latched"  # legacy / localized_latched
     pass_horizon_publish_mode: "overtake_only"  # prepare_and_overtake / overtake_only
     localized_avoidance_start_before_target_m: 6.0
@@ -111,7 +111,7 @@ overtake_planner_node:
     high_speed_curve_lateral_hold_release_speed_mps: 2.5
     high_speed_curve_lateral_hold_release_curvature_m_inv: 0.025
     speed_only_fallback_enabled: true
-    speed_only_fallback_v_max_mps: 3.0
+    speed_only_fallback_v_max_mps: 1.0
     opponent_collision_fallback_v_max_mps: 0.5
     side_by_side_leader_priority_enabled: true
     side_by_side_leader_priority_enter_s_m: 1.0

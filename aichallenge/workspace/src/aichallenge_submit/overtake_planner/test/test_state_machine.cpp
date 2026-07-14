@@ -139,6 +139,23 @@ TEST(BehaviorStateMachine, CurvedStartGateDoesNotAbortActiveOvertake)
   EXPECT_EQ(next, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
 }
 
+TEST(BehaviorStateMachine, FeasibleSameSidePassIgnoresAbortTimeout)
+{
+  overtake_planner::PlannerConfig config;
+  config.abort_timeout_sec = 1.0;
+  overtake_planner::BehaviorStateMachine sm(config);
+
+  overtake_planner::BlockedInfo info;
+  info.blocked = true;
+  info.front_delta_s = 3.0;
+
+  const auto next = sm.update(
+    5.0, overtake_planner::BehaviorMode::OVERTAKE_LEFT,
+    overtake_planner::CandidateType::PASS_LEFT, info, true);
+
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
+}
+
 TEST(BehaviorStateMachine, FeasibleRecoveryFromFreeRunEntersAbortRecovery)
 {
   overtake_planner::PlannerConfig config;
