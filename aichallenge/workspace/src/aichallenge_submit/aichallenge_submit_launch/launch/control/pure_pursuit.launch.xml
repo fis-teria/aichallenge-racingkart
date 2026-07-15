@@ -2,14 +2,19 @@
 <launch>
   <arg name="simulation" default="true"/>
   <arg name="use_sim_time" default="true"/>
+  <arg name="node_name" default="simple_pure_pursuit_node"/>
   <arg name="input_kinematics" default="/localization/kinematic_state"/>
   <arg name="input_trajectory" default="/planning/scenario_planning/trajectory"/>
   <arg name="input_mpc_predicted_horizon" default="/mpc/predicted_horizon"/>
   <arg name="input_mpc_predicted_horizon_contract" default="/mpc/predicted_horizon_contract"/>
   <arg name="input_mpc_health" default="/mpc/speed_profile_debug"/>
   <arg name="input_steering_status" default="/vehicle/status/steering_status"/>
+  <arg name="input_recovery_status" default="/wall_recovery/status"/>
   <arg name="output_control_cmd" default="/control/command/control_cmd"/>
   <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
+  <arg name="output_recovery_control_cmd" default="/hybrid_control/recovery/control_cmd"/>
+  <arg name="output_debug" default="/pure_pursuit/debug"/>
+  <arg name="output_lookahead_point" default="/control/debug/lookahead_point"/>
   <arg name="use_external_target_vel" default="false"/>
   <arg name="external_target_vel" default="9.5"/>
   <arg name="wheel_base" default="1.087"/>
@@ -29,6 +34,8 @@
   <arg name="require_solved_mpc_health_for_horizon" default="false"/>
   <arg name="max_mpc_health_age_sec" default="0.30"/>
   <arg name="require_matching_overtake_horizon_contract" default="false"/>
+  <arg name="recovery_mode" default="false"/>
+  <arg name="recovery_status_timeout_sec" default="0.20"/>
   <arg name="lookahead_gain" default="0.5"/>
   <arg name="lookahead_min_distance" default="1.5"/>
   <arg name="curvature_adaptive_lookahead_enabled" default="true"/>
@@ -50,7 +57,7 @@
   <let name="steering_tire_angle_gain_var" value="1.639" if="$(var simulation)"/>
   <let name="steering_tire_angle_gain_var" value="1.639" unless="$(var simulation)"/>
 
-  <node pkg="simple_pure_pursuit" exec="simple_pure_pursuit" name="simple_pure_pursuit_node" output="screen">
+  <node pkg="simple_pure_pursuit" exec="simple_pure_pursuit" name="$(var node_name)" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="use_external_target_vel" value="$(var use_external_target_vel)"/>
     <param name="external_target_vel" value="$(var external_target_vel)"/>
@@ -70,6 +77,8 @@
     <param name="require_solved_mpc_health_for_horizon" value="$(var require_solved_mpc_health_for_horizon)"/>
     <param name="max_mpc_health_age_sec" value="$(var max_mpc_health_age_sec)"/>
     <param name="require_matching_overtake_horizon_contract" value="$(var require_matching_overtake_horizon_contract)"/>
+    <param name="recovery_mode" value="$(var recovery_mode)"/>
+    <param name="recovery_status_timeout_sec" value="$(var recovery_status_timeout_sec)"/>
     <param name="lookahead_gain" value="$(var lookahead_gain)"/>
     <param name="lookahead_min_distance" value="$(var lookahead_min_distance)"/>
     <param name="curvature_adaptive_lookahead_enabled" value="$(var curvature_adaptive_lookahead_enabled)"/>
@@ -95,8 +104,12 @@
     <remap from="input/mpc_predicted_horizon_contract" to="$(var input_mpc_predicted_horizon_contract)"/>
     <remap from="input/mpc_health" to="$(var input_mpc_health)"/>
     <remap from="input/steering_status" to="$(var input_steering_status)"/>
+    <remap from="input/recovery_status" to="$(var input_recovery_status)"/>
     <remap from="input/overtake_reference_override" to="$(var input_overtake_reference_override)"/>
     <remap from="output/control_cmd" to="$(var output_control_cmd)"/>
     <remap from="output/raw_control_cmd" to="$(var output_raw_control_cmd)"/>
+    <remap from="output/recovery_control_cmd" to="$(var output_recovery_control_cmd)"/>
+    <remap from="/pure_pursuit/debug" to="$(var output_debug)"/>
+    <remap from="/control/debug/lookahead_point" to="$(var output_lookahead_point)"/>
   </node>
 </launch>

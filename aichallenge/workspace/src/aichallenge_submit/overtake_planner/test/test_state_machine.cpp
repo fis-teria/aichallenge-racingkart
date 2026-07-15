@@ -156,7 +156,7 @@ TEST(BehaviorStateMachine, FeasibleSameSidePassIgnoresAbortTimeout)
   EXPECT_EQ(next, overtake_planner::BehaviorMode::OVERTAKE_LEFT);
 }
 
-TEST(BehaviorStateMachine, FeasibleRecoveryFromFreeRunEntersAbortRecovery)
+TEST(BehaviorStateMachine, FeasibleRecoveryFromFreeRunUsesSpeedGuard)
 {
   overtake_planner::PlannerConfig config;
   overtake_planner::BehaviorStateMachine sm(config);
@@ -167,7 +167,7 @@ TEST(BehaviorStateMachine, FeasibleRecoveryFromFreeRunEntersAbortRecovery)
     2.0, overtake_planner::BehaviorMode::FREE_RUN,
     overtake_planner::CandidateType::RECOVERY, info, true);
 
-  EXPECT_EQ(next, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+  EXPECT_EQ(next, overtake_planner::BehaviorMode::SPEED_GUARD);
 }
 
 TEST(BehaviorStateMachine, OvertakeTransitionsToYieldWhenGapIsLost)
@@ -476,7 +476,7 @@ TEST(BehaviorStateMachine, SafeStopHoldsUntilReleaseCyclesSatisfied)
   EXPECT_EQ(mode, overtake_planner::BehaviorMode::FREE_RUN);
 }
 
-TEST(BehaviorStateMachine, SafeStopHandsOffToRecoveryWhenReleasedButNotCentered)
+TEST(BehaviorStateMachine, SafeStopHandsOffToSpeedGuardWhenReleasedButNotCentered)
 {
   overtake_planner::PlannerConfig config;
   config.min_mode_hold_time_sec = 0.0;
@@ -501,7 +501,7 @@ TEST(BehaviorStateMachine, SafeStopHandsOffToRecoveryWhenReleasedButNotCentered)
   mode = sm.update(
     2.1, mode, overtake_planner::CandidateType::FASTEST, info, true, safe_stop);
 
-  EXPECT_EQ(mode, overtake_planner::BehaviorMode::ABORT_RECOVERY);
+  EXPECT_EQ(mode, overtake_planner::BehaviorMode::SPEED_GUARD);
   EXPECT_EQ(sm.safeStopHoldCount(), 0);
   EXPECT_EQ(sm.safeStopReleaseCount(), 0);
 }

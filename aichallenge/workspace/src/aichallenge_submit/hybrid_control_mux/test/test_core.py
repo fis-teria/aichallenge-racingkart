@@ -4,6 +4,7 @@ from hybrid_control_mux.core import (
     HybridMuxConfig,
     HybridMuxCore,
     MpcHealth,
+    RecoveryMuxState,
     SteeringLimiter,
     SteeringLimiterConfig,
 )
@@ -137,6 +138,128 @@ def test_stops_when_fallback_requested_without_pure_pursuit_command():
         mpc_health=MpcHealth(False, "stale", 1, 1.0),
     )
     assert timeout_decision.source == "stop"
+
+
+def test_recovery_inactive_does_not_change_normal_mpc_selection():
+    core = HybridMuxCore(HybridMuxConfig())
+
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        recovery=RecoveryMuxState(enabled=True, status_state="inactive", status_fresh=True),
+    )
+
+    assert decision.source == "mpc"
+    assert not core.recovery_episode_latched
+
+
+def test_recovery_active_wins_when_all_typed_gates_match():
+    core = HybridMuxCore(HybridMuxConfig(recovery_max_duration_sec=3.0))
+    recovery = RecoveryMuxState(
+        enabled=True,
+        status_state="active",
+        status_fresh=True,
+        command_fresh=True,
+        permit_fresh=True,
+        external_safety_ok=True,
+        input_complete=True,
+        trajectory_valid=True,
+        trajectory_safe=True,
+        recovery_allowed=True,
+        ids_match=True,
+        trajectory_header_match=True,
+        command_valid=True,
+        command_forward_only=True,
+    )
+
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        recovery=recovery,
+    )
+
+    assert decision.source == "recovery"
+    assert core.recovery_episode_latched
+
+
+def test_recovery_latch_stops_instead_of_falling_back_when_status_times_out():
+    core = HybridMuxCore(HybridMuxConfig())
+    stop_hold = RecoveryMuxState(
+        enabled=True,
+        status_state="stop_hold",
+        status_fresh=True,
+        external_safety_ok=True,
+    )
+    first = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        recovery=stop_hold,
+    )
+    assert first.source == "stop"
+    assert core.recovery_episode_latched
+
+    timed_out = core.update(
+        1.1,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        recovery=RecoveryMuxState(enabled=True, status_fresh=False),
+    )
+
+    assert timed_out.source == "stop"
+    assert timed_out.reason == "recovery_status_timeout"
+    assert core.recovery_episode_latched
+
+
+def test_recovery_complete_releases_latch_to_normal_source():
+    core = HybridMuxCore(HybridMuxConfig())
+    core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        recovery=RecoveryMuxState(
+            enabled=True,
+            status_state="active",
+            status_fresh=True,
+            command_fresh=True,
+            permit_fresh=True,
+            external_safety_ok=True,
+            input_complete=True,
+            trajectory_valid=True,
+            trajectory_safe=True,
+            recovery_allowed=True,
+            ids_match=True,
+            trajectory_header_match=True,
+            command_valid=True,
+            command_forward_only=True,
+        ),
+    )
+
+    released = core.update(
+        1.2,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        recovery=RecoveryMuxState(
+            enabled=True,
+            status_state="complete",
+            status_fresh=True,
+            permit_fresh=True,
+            external_safety_ok=True,
+            handoff_ready=True,
+            handoff_allowed=True,
+        ),
+    )
+
+    assert released.source == "mpc"
+    assert not core.recovery_episode_latched
 
 
 def test_steering_limiter_clamps_absolute_angle():

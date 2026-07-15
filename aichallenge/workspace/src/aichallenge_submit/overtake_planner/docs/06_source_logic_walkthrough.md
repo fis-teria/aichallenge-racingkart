@@ -20,21 +20,15 @@ flowchart LR
   Core --> Metrics["/debug/overtake/metrics<br/>JSON String"]
 ```
 
-`/overtake/reference_override` の配列形式は次です。
+`/overtake/reference_override` には、目的を明示した次の3形式を出します。速度の単位はすべて `m/s` です。
 
-```text
-[valid, mode_id, n, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1], contract_version, override_generation]
-```
+| 形式 | payload | 意味 |
+| --- | --- | --- |
+| v3 横+速度 | `[1, mode_id>0, n>0, d[0..n), v_ref[0..n), 3, generation, solver_horizon_intent]` | 安全評価済みの横オフセットと各horizon点の速度上限を適用する。intent 1はPASS/MERGE、intent 2は必須回避だけがsolver horizonを認可する。 |
+| v2 速度のみ | `[1, mode_id>0, 0, 2, generation, speed_cap_mps]` | 横軌道を変更せず、通常参照のまま全horizonへ単一の速度上限を適用する。 |
+| 明示解除 | `[1, 0, 0, 1, generation]` | overrideと保持中の速度capを解除し、通常速度・通常参照へ戻す。 |
 
-| 要素 | 意味 |
-| --- | --- |
-| `valid` | 現状は常に `1.0`。受信側の簡易プロトコル用フラグ。 |
-| `mode_id` | `BehaviorMode` の整数値。 |
-| `n` | overrideが有効ならhorizon点数、無効なら0。 |
-| `d[]` | Frenet横方向オフセット列。 |
-| `v_ref[]` | 各horizon点の速度上限列。 |
-| `contract_version` | 現在は`1`。先頭部分しか読まない旧consumerとの互換性を保つ。 |
-| `override_generation` | payload変更時に増える世代。MPCが解いたhorizonとplanner requestの一致確認に使う。 |
+`generation` は意味的payloadが変わった時だけ増えます。受信側はv2の `n=0` を解除と混同してはいけません。v2を受信した後、malformed payloadまたはoverride timeoutになった場合は、MPC/Pure Pursuitとも横方向は通常参照のまま最後に検証済みの `speed_cap_mps` を保持します。v1/v3のmalformed/timeoutは横overrideを解除します。禁止区間で安全許可済みの通常復帰はv2の速度only（`normal_recovery_speed_only_v_max_mps`、通常10.0 m/s）へ落とし、横solver horizonを出しません。SAFE_STOP・接触・壁/MPC healthのfail-safe capは別の低速設定を維持します。
 
 ## ソースの責務マップ
 
@@ -228,7 +222,7 @@ flowchart TD
 ```
 
 `publishOverride()` は `PlannerOutput` を `Float32MultiArray` へ変換します。
-`output.active_override == false` の場合、`n=0` になり、下流は元の参照を使います。
+安全な横列がある場合はv3、横列を安全に作れず `longitudinal_speed_cap_active=true` の場合はv2、どちらも不要な場合だけ明示解除を出します。したがって、`active_override=false` だけでは `n=0` が解除かv2かを判別できません。
 
 `publishDebug()` は解析用JSONを出します。
 見るべき主なkeyは次です。
@@ -307,7 +301,7 @@ override配列は初期値として `d=0`、`v_ref=v_passthrough_mps` を持ち�
 
 `straight_only_overtake_enabled` が有効な場合、前方曲率が `straight_overtake_max_curvature_m_inv` を超えると、PASS候補が安全でも追い越し開始を抑制します。
 このとき `overtake_start_gate_reason="curve"` になります。
-ただし前方車が停止/低速で `slow_front_exception_active=true` の場合は、pass gapと安全評価を維持したまま曲率ゲートだけを例外的に開き、`overtake_start_gate_reason="slow_front_exception_curve"` として記録します。
+ただし前方車が停止/低速で `slow_front_exception_active=true` の場合は、`slow_front_exception_max_start_curvature_m_inv` 以下の緩い曲率に限り、pass gapと安全評価を維持したまま曲率ゲートだけを例外的に開き、`overtake_start_gate_reason="slow_front_exception_curve"` として記録します。0以下なら例外は無効です。
 
 停止車列では、1台目を抜いた直後に2台目が `front_vehicle_id` ではなく `parallel_side_vehicle_id` として見える場合があります。
 `slow_obstacle_chain_enabled=true` かつ相手が自車より前方、`slow_obstacle_chain_distance_m` 内、`slow_front_exception_speed_mps` 以下なら、core側で `slow_obstacle_chain_active=true` として前方閉塞へ昇格します。
@@ -462,7 +456,7 @@ targetの現在位置と予測 `d[]` を見て、左右の最小gapを求めま�
 - `no_target`
 - `large_lateral_error`
 
-`large_lateral_error` の場合は、pass gap自体が空いていても、横ずれが大きい危険文脈で `pass_decision_frozen=true` になり、PASS開始を一時的に凍結しています。
+`large_lateral_error` の場合は、pass gap自体が空いていても、横ずれが大きい危険文脈で `pass_decision_frozen=true` になり、PASS開始を一時的に凍結しています。FREE_RUN/FOLLOWのこの種の横ずれは `SPEED_GUARD` と横補正で扱い、`ABORT_RECOVERY` を直接起動しません。
 
 ## `src/future_side_by_side_risk_analyzer.cpp`
 
@@ -618,7 +612,7 @@ stateDiagram-v2
   OVERTAKE_RIGHT --> MERGE_BACK: front gap clear
   OVERTAKE_LEFT --> ABORT_RECOVERY: timeout or unsafe
   OVERTAKE_RIGHT --> ABORT_RECOVERY: timeout or unsafe
-  MERGE_BACK --> FREE_RUN: clear
+  MERGE_BACK --> FREE_RUN: reentry gate permitted and centered
   MERGE_BACK --> FOLLOW_BLOCKED: blocked
   FREE_RUN --> SIDE_BY_SIDE_KEEP: side-by-side keep selected
   FOLLOW_BLOCKED --> SIDE_BY_SIDE_KEEP: side-by-side keep selected
@@ -651,7 +645,7 @@ PASS開始時は、`pass_safe_required_cycles` ぶん `PASS_LEFT` または `PAS
 ### SAFE_STOP中
 
 SAFE_STOP中は、`safe_stop_context.release_ready` が `safe_stop_release_cycles` 連続でtrueになるまで保持します。
-SAFE_STOP候補自体がinfeasibleになった場合は、状況に応じて `YIELD_BEHIND`、`SIDE_BY_SIDE_KEEP`、`FOLLOW_BLOCKED`、`ABORT_RECOVERY` へ逃がします。
+SAFE_STOP候補自体がinfeasibleになった場合は、状況に応じて `YIELD_BEHIND`、`SIDE_BY_SIDE_KEEP`、`FOLLOW_BLOCKED`、`SPEED_GUARD` へ逃がします。通常ラインへ横断して戻る実復帰文脈なら、core側のreentry gateが連続安全評価を行い、未許可時だけ `ABORT_RECOVERY` を維持します。
 
 ## `src/planner_output_builder.cpp`
 
@@ -752,7 +746,7 @@ y = ref.y + d * cos(ref.yaw)
 ### overrideが出ているか
 
 `/debug/overtake/metrics` の `active_override` を見ます。
-`active_override=false` の場合、`/overtake/reference_override` はpublishされていても `n=0` です。
+`active_override=false` でも、`longitudinal_speed_cap_active=true` ならv2速度のみoverrideが出ます。payloadの `mode_id` と `contract_version` を見て、`[1, mode_id>0, 0, 2, generation, speed_cap_mps]` を明示解除と混同しないでください。
 
 ### なぜ追い越ししないか
 

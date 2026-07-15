@@ -16,6 +16,8 @@
 #include <autoware_auto_planning_msgs/msg/trajectory.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
+#include <cmath>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -49,6 +51,7 @@ public:
       RCLCPP_ERROR(get_logger(), "Failed to load CSV file: %s", csv_path.c_str());
       return;
     }
+    current_csv_path_ = csv_path;
     
     RCLCPP_INFO(get_logger(), "Loaded trajectory from CSV with %zu points", csv_trajectory_.points.size());
 
@@ -59,6 +62,66 @@ public:
   }
 
 private:
+  enum class CSVFormat
+  {
+    kPoseWithQuaternion,
+    kReferencePath,
+  };
+
+  static geometry_msgs::msg::Quaternion createQuaternionFromYaw(const double yaw_rad)
+  {
+    geometry_msgs::msg::Quaternion quaternion;
+    quaternion.x = 0.0;
+    quaternion.y = 0.0;
+    quaternion.z = std::sin(yaw_rad * 0.5);
+    quaternion.w = std::cos(yaw_rad * 0.5);
+    return quaternion;
+  }
+
+  static std::vector<std::string> splitCSVLine(const std::string & line)
+  {
+    std::stringstream ss(line);
+    std::string token;
+    std::vector<std::string> tokens;
+    while (std::getline(ss, token, ',')) {
+      if (!token.empty() && token.back() == '\r') {
+        token.pop_back();
+      }
+      tokens.push_back(token);
+    }
+    return tokens;
+  }
+
+  static std::vector<double> parseCSVValues(const std::string & line)
+  {
+    const auto tokens = splitCSVLine(line);
+    std::vector<double> values;
+    values.reserve(tokens.size());
+    for (const auto & token : tokens) {
+      values.push_back(std::stod(token));
+    }
+    return values;
+  }
+
+  static bool isBlankLine(const std::string & line)
+  {
+    return line.find_first_not_of(" \t\r\n") == std::string::npos;
+  }
+
+  static CSVFormat detectCSVFormat(const std::string & header_line)
+  {
+    const auto header = splitCSVLine(header_line);
+    if (header.size() >= 7 &&
+        header[0] == "s_m" &&
+        header[1] == "x_m" &&
+        header[2] == "y_m" &&
+        header[3] == "psi_rad" &&
+        header[5] == "vx_mps") {
+      return CSVFormat::kReferencePath;
+    }
+    return CSVFormat::kPoseWithQuaternion;
+  }
+
   bool loadCSVTrajectory(const std::string & csv_path)
   {
     std::ifstream file(csv_path);
@@ -68,6 +131,7 @@ private:
     
     std::string line;
     std::getline(file, line);
+    const CSVFormat csv_format = detectCSVFormat(line);
     
     csv_trajectory_.header.stamp = this->now();
     csv_trajectory_.header.frame_id = "map";
@@ -75,33 +139,48 @@ private:
     csv_trajectory_.points.clear();
     
     while (std::getline(file, line)) {
-      std::stringstream ss(line);
-      std::string token;
+      if (isBlankLine(line)) {
+        continue;
+      }
+
       std::vector<double> values;
-      
-      while (std::getline(ss, token, ',')) {
-        values.push_back(std::stod(token));
+      try {
+        values = parseCSVValues(line);
+      } catch (const std::exception & exception) {
+        RCLCPP_WARN(
+          get_logger(), "Invalid numeric value in CSV line, skipping line: %s", exception.what());
+        continue;
       }
       
-      if (values.size() != 8) {
-        RCLCPP_WARN(get_logger(), "Invalid CSV line format, expected 8 values");
+      if (csv_format == CSVFormat::kPoseWithQuaternion && values.size() != 8) {
+        RCLCPP_WARN(get_logger(), "Invalid pose CSV line format, expected 8 values");
+        continue;
+      }
+      if (csv_format == CSVFormat::kReferencePath && values.size() < 7) {
+        RCLCPP_WARN(get_logger(), "Invalid reference path CSV line format, expected at least 7 values");
         continue;
       }
       
       TrajectoryPoint point;
-      point.pose.position.x = values[0];
-      point.pose.position.y = values[1];
       point.pose.position.z = z_;
-
-      point.pose.orientation.x = values[3];
-      point.pose.orientation.y = values[4];
-      point.pose.orientation.z = values[5];
-      point.pose.orientation.w = values[6];
-      
-      point.longitudinal_velocity_mps = values[7];
+      if (csv_format == CSVFormat::kReferencePath) {
+        point.pose.position.x = values[1];
+        point.pose.position.y = values[2];
+        point.pose.orientation = createQuaternionFromYaw(values[3]);
+        point.longitudinal_velocity_mps = values[5];
+        point.acceleration_mps2 = values[6];
+      } else {
+        point.pose.position.x = values[0];
+        point.pose.position.y = values[1];
+        point.pose.orientation.x = values[3];
+        point.pose.orientation.y = values[4];
+        point.pose.orientation.z = values[5];
+        point.pose.orientation.w = values[6];
+        point.longitudinal_velocity_mps = values[7];
+        point.acceleration_mps2 = 0.0;
+      }
       
       point.lateral_velocity_mps = 0.0;
-      point.acceleration_mps2 = 0.0;
       point.heading_rate_rps = 0.0;
       
       csv_trajectory_.points.push_back(point);

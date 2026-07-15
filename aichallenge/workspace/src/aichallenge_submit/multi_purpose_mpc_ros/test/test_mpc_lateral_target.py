@@ -7,6 +7,10 @@ import pytest
 sys.modules.setdefault("osqp", SimpleNamespace(OSQP=lambda: object()))
 
 from multi_purpose_mpc_ros.core.MPC import MPC
+from multi_purpose_mpc_ros.overtake_contract import (
+    OvertakeSpeedOnlyFailClosedLatch,
+    parse_overtake_reference_override,
+)
 
 
 class ModelStub:
@@ -103,13 +107,14 @@ def test_overtake_override_snapshot_keeps_lateral_and_speed_same_generation():
     mpc.set_overtake_reference_override([0.2, 0.4], [3.0, 4.0], mode_id=3)
     mpc.set_overtake_reference_override(
         [0.2, 0.4], [3.0, 4.0], mode_id=3, generation=12)
-    mode_id, generation, lateral_offsets, speed_caps = (
+    mode_id, generation, lateral_offsets, speed_caps, speed_only, _authorized, _mandatory = (
         mpc._overtake_override_snapshot())
 
     mpc.set_overtake_reference_override([-0.5, -0.6], [1.0, 1.5], mode_id=4)
 
     assert mode_id == 3
     assert generation == 12
+    assert not speed_only
     assert mpc._overtake_lateral_reference(
         2, np.array([1.0, 1.0]), np.array([-1.0, -1.0]),
         lateral_offsets) == pytest.approx([0.2, 0.4])
@@ -117,19 +122,22 @@ def test_overtake_override_snapshot_keeps_lateral_and_speed_same_generation():
     assert mpc._overtake_speed_cap(1, speed_caps) == pytest.approx(4.0)
 
 
-def test_prediction_contract_snapshot_keeps_mode_and_generation_together():
+def test_prediction_contract_snapshot_keeps_horizon_authorization_together():
     mpc = make_mpc()
     mpc.set_overtake_reference_override(
-        [0.3], [2.0], mode_id=7, generation=42)
+        [0.3], [2.0], mode_id=7, generation=42,
+        solver_horizon_authorized=True, mandatory_lateral_avoidance=True)
 
-    mode_id, generation, _offsets, _speed_caps = (
+    (mode_id, generation, _offsets, _speed_caps, _speed_only, authorized,
+     mandatory) = (
         mpc._overtake_override_snapshot())
-    mpc._last_problem_prediction_contract = (mode_id, generation)
+    mpc._last_problem_prediction_contract = (
+        mode_id, generation, authorized, mandatory)
     mpc.set_overtake_reference_override(
         [-0.3], [1.0], mode_id=4, generation=43)
     mpc.current_prediction_contract = mpc._last_problem_prediction_contract
 
-    assert mpc.current_prediction_contract == (7, 42)
+    assert mpc.current_prediction_contract == (7, 42, True, True)
 
 
 def test_overtake_speed_cap_returns_none_for_invalid_values():
@@ -139,6 +147,82 @@ def test_overtake_speed_cap_returns_none_for_invalid_values():
     assert mpc._overtake_speed_cap(0) == pytest.approx(4.0)
     assert mpc._overtake_speed_cap(1) is None
     assert mpc._overtake_speed_cap(2) is None
+
+
+def test_speed_only_override_keeps_baseline_lateral_and_caps_every_horizon_point():
+    mpc = make_mpc(lateral_target_mode="reference_path")
+    mpc.set_overtake_reference_override(
+        [], [0.5], mode_id=11, generation=42, speed_only=True)
+
+    mode_id, generation, lateral_offsets, speed_caps, speed_only, _authorized, _mandatory = (
+        mpc._overtake_override_snapshot())
+
+    assert mode_id == 11
+    assert generation == 42
+    assert speed_only
+    assert lateral_offsets is not None
+    assert lateral_offsets.size == 0
+    assert mpc._overtake_lateral_reference(
+        2, np.array([1.0, 1.0]), np.array([-1.0, -1.0]),
+        lateral_offsets) is None
+    assert mpc._overtake_speed_cap(0, speed_caps, speed_only) == pytest.approx(0.5)
+    assert mpc._overtake_speed_cap(1, speed_caps, speed_only) == pytest.approx(0.5)
+    assert mpc._overtake_speed_cap(50, speed_caps, speed_only) == pytest.approx(0.5)
+
+
+def test_speed_only_cap_latches_after_malformed_payload_without_lateral_override():
+    mpc = make_mpc(lateral_target_mode="reference_path")
+    latch = OvertakeSpeedOnlyFailClosedLatch()
+    valid_v2 = parse_overtake_reference_override([1.0, 11.0, 0.0, 2.0, 42.0, 0.5])
+    assert valid_v2 is not None
+    latch.observe_valid(valid_v2)
+    mpc.set_overtake_reference_override(
+        valid_v2.lateral_offsets, valid_v2.speed_caps, valid_v2.mode_id,
+        valid_v2.generation, speed_only=valid_v2.speed_only)
+
+    malformed = parse_overtake_reference_override(
+        [1.0, 11.0, 0.0, 2.0, 42.0, 0.0])
+    assert malformed is None
+    retained = latch.retained()
+    assert retained is not None
+    mpc.set_overtake_reference_override(
+        retained.lateral_offsets, retained.speed_caps, retained.mode_id,
+        retained.generation, speed_only=retained.speed_only)
+
+    mode_id, generation, lateral_offsets, speed_caps, speed_only, _authorized, _mandatory = (
+        mpc._overtake_override_snapshot())
+    assert (mode_id, generation, speed_only) == (11, 42, True)
+    assert lateral_offsets is not None and lateral_offsets.size == 0
+    assert mpc._overtake_lateral_reference(
+        2, np.array([1.0, 1.0]), np.array([-1.0, -1.0]),
+        lateral_offsets) is None
+    assert mpc._overtake_speed_cap(0, speed_caps, speed_only) == pytest.approx(0.5)
+    assert mpc._overtake_speed_cap(1, speed_caps, speed_only) == pytest.approx(0.5)
+
+
+def test_speed_only_cap_latches_after_timeout_without_lateral_override():
+    mpc = make_mpc(lateral_target_mode="reference_path")
+    latch = OvertakeSpeedOnlyFailClosedLatch()
+    valid_v2 = parse_overtake_reference_override([1.0, 11.0, 0.0, 2.0, 43.0, 0.4])
+    assert valid_v2 is not None
+    latch.observe_valid(valid_v2)
+
+    # No new payload arrives before the timeout. The v2-only latch is the
+    # controller's retained input, so it continues to cap every horizon point.
+    retained = latch.retained()
+    assert retained is not None
+    mpc.set_overtake_reference_override(
+        retained.lateral_offsets, retained.speed_caps, retained.mode_id,
+        retained.generation, speed_only=retained.speed_only)
+
+    _mode_id, _generation, lateral_offsets, speed_caps, speed_only, _authorized, _mandatory = (
+        mpc._overtake_override_snapshot())
+    assert lateral_offsets is not None and lateral_offsets.size == 0
+    assert mpc._overtake_lateral_reference(
+        2, np.array([1.0, 1.0]), np.array([-1.0, -1.0]),
+        lateral_offsets) is None
+    assert mpc._overtake_speed_cap(0, speed_caps, speed_only) == pytest.approx(0.4)
+    assert mpc._overtake_speed_cap(1, speed_caps, speed_only) == pytest.approx(0.4)
 
 
 def test_clear_overtake_reference_override_restores_no_override():

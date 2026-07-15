@@ -39,7 +39,7 @@ overtake_planner_node:
     recovery_release_lateral_error_m: 0.60
     yield_release_lateral_error_m: 0.60
     corner_follow_speed_margin_mps: 0.20
-    corner_yield_v_max_mps: 8.0
+    corner_yield_v_max_mps: 10.0
     straight_only_overtake_enabled: true
     straight_overtake_max_curvature_m_inv: 0.025
     straight_overtake_lookahead_m: 12.0
@@ -53,15 +53,19 @@ overtake_planner_node:
     slow_front_exception_speed_mps: 1.0
     slow_front_exception_distance_m: 8.0
     slow_front_exception_required_cycles: 3
+    # 停止/低速前走車でも、曲率gateを開くのは緩い曲線まで。permission/CBFは維持する。
+    slow_front_exception_max_start_curvature_m_inv: 0.040
     slow_obstacle_chain_enabled: true
     slow_obstacle_chain_distance_m: 12.0
     large_lateral_error_threshold_m: 0.60
-    large_lateral_error_v_max_mps: 8.5
+    large_lateral_error_v_max_mps: 10.0
     min_pass_gap_m: 1.8
     pass_gap_hysteresis_m: 0.25
     dynamic_pass_candidate_enabled: true
     yield_speed_margin_mps: 0.60
-    yield_min_speed_cap_mps: 9.5
+    # YIELD時の下限。通常のレース上限10 m/sではない。接近並走時に後方へ
+    # 譲れるよう、CBFまで詰めてからsafe-stopへ落ちることを避ける。
+    yield_min_speed_cap_mps: 0.50
     yield_rejoin_gap_m: 3.0
     # Planner safety prediction. Keep <= the verified active controller deceleration.
     # The default hybrid MPC permits -1.0 m/s^2; PP/mux fallback permits -1.5 m/s^2.
@@ -76,6 +80,11 @@ overtake_planner_node:
     reentry_evaluation_horizon_sec: 4.0
     reentry_v2x_snapshot_stale_time_sec: 0.50
     reentry_hold_v_max_mps: 0.50
+    # solve timeだけの一過性劣化では、全相手に再評価した現d holdに限り
+    # このcapで待機する。CBF/stale/infeasibleは常にreentry_hold_v_max_mps。
+    reentry_mpc_degraded_hold_v_max_mps: 3.0
+    reentry_mpc_unhealthy_enter_samples: 2
+    reentry_mpc_healthy_release_samples: 3
     reentry_require_mpc_health: true
     left_offset_m: 0.70
     right_offset_m: -0.70
@@ -89,7 +98,7 @@ overtake_planner_node:
     maneuver_latch_target_update_alpha: 0.0
     prepare_distance_m: 8.0
     merge_distance_m: 12.0
-    follow_speed_margin_mps: 0.20
+    follow_speed_margin_mps: 0.01
     recovery_v_max_mps: 8.5
     wall_margin_recovery_v_max_mps: 8.5
     outside_corridor_recovery_centering_time_sec: 1.0
@@ -111,23 +120,25 @@ overtake_planner_node:
     high_speed_curve_lateral_hold_release_speed_mps: 2.5
     high_speed_curve_lateral_hold_release_curvature_m_inv: 0.025
     speed_only_fallback_enabled: true
-    speed_only_fallback_v_max_mps: 1.0
+    speed_only_fallback_v_max_mps: 10.0
+    # 追越禁止区間でreentry gateが許可した通常復帰だけのレース上限。fail-safe capとは別。
+    normal_recovery_speed_only_v_max_mps: 10.0
     opponent_collision_fallback_v_max_mps: 0.5
     side_by_side_leader_priority_enabled: true
     side_by_side_leader_priority_enter_s_m: 1.0
     side_by_side_leader_priority_release_s_m: 0.3
     side_by_side_leader_priority_hold_sec: 1.0
-    side_by_side_leader_priority_v_max_mps: 3.0
+    side_by_side_leader_priority_v_max_mps: 10.0
     wall_risk_speed_guard_enabled: true
     wall_soft_margin_m: 0.25
     wall_risk_v_max_mps: 8.0
     mpc_health_speed_guard_enabled: true
     mpc_health_infeasible_count_threshold: 1
     mpc_health_solve_time_warn_ms: 80.0
-    mpc_health_v_max_mps: 3.0
+    mpc_health_v_max_mps: 10.0
     mpc_health_stale_time_sec: 0.60
     recovery_speed_guard_enabled: true
-    recovery_speed_guard_v_max_mps: 3.0
+    recovery_speed_guard_v_max_mps: 10.0
     section_safety_profile_enabled: true
     # Add same-length arrays to enable section presets, e.g. names/profiles/start_wp/end_wp.
     safe_stop_enabled: true

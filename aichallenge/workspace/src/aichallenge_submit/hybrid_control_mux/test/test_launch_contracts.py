@@ -12,6 +12,25 @@ def _parse_launch(relative_path: str) -> ET.Element:
     return ET.parse(_aichallenge_submit_root() / relative_path).getroot()
 
 
+def test_no_pass_normal_recovery_uses_current_race_cap_profile():
+    config_path = (
+        _aichallenge_submit_root()
+        / "overtake_planner/config/overtake_planner.param.yaml"
+    )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))[
+        "overtake_planner_node"
+    ]["ros__parameters"]
+
+    assert config["normal_recovery_speed_only_v_max_mps"] == 10.0
+    assert config["speed_only_fallback_v_max_mps"] == 10.0
+    assert config["opponent_collision_fallback_v_max_mps"] == 0.5
+    assert config["side_by_side_speed_cap_mps"] == 7.5
+    assert config["corner_yield_v_max_mps"] == 10.0
+    assert config["large_lateral_error_v_max_mps"] == 10.0
+    assert config["mpc_health_v_max_mps"] == 10.0
+    assert config["recovery_speed_guard_v_max_mps"] == 10.0
+
+
 def test_pure_pursuit_launch_wires_timing_and_vehicle_geometry():
     root = _parse_launch("aichallenge_submit_launch/launch/control/pure_pursuit.launch.xml")
     params = {
@@ -37,6 +56,8 @@ def test_pure_pursuit_launch_wires_timing_and_vehicle_geometry():
         params["require_matching_overtake_horizon_contract"]
         == "$(var require_matching_overtake_horizon_contract)"
     )
+    assert params["recovery_mode"] == "$(var recovery_mode)"
+    assert params["recovery_status_timeout_sec"] == "$(var recovery_status_timeout_sec)"
     assert params["pp_control_delay_sec"] == "$(var pp_control_delay_sec)"
     assert params["steering_time_constant_sec"] == "$(var steering_time_constant_sec)"
     assert params["steering_status_timeout_sec"] == "$(var steering_status_timeout_sec)"
@@ -60,6 +81,9 @@ def test_pure_pursuit_launch_wires_timing_and_vehicle_geometry():
     )
     assert remaps["input/mpc_health"] == "$(var input_mpc_health)"
     assert remaps["input/steering_status"] == "$(var input_steering_status)"
+    assert remaps["input/recovery_status"] == "$(var input_recovery_status)"
+    assert remaps["output/recovery_control_cmd"] == "$(var output_recovery_control_cmd)"
+    assert remaps["/pure_pursuit/debug"] == "$(var output_debug)"
 
 
 def test_pure_pursuit_launch_uses_mpc_consistent_steering_gain():
@@ -178,6 +202,10 @@ def test_pure_pursuit_mpc_horizon_keeps_mpc_as_horizon_generator():
     root = _parse_launch(
         "aichallenge_submit_launch/launch/control/pure_pursuit_mpc_horizon.launch.xml"
     )
+    launch_args = {
+        element.attrib.get("name"): element.attrib
+        for element in root.findall("arg")
+    }
     includes = list(root.iter("include"))
     delay_mpc_include = next(
         element
@@ -207,7 +235,9 @@ def test_pure_pursuit_mpc_horizon_keeps_mpc_as_horizon_generator():
         for element in mux_include.iter("arg")
     }
 
+    assert launch_args["use_obstacle_avoidance"]["default"] == "true"
     assert delay_args["config_path"].endswith("pure_pursuit_mpc_horizon_config.yaml")
+    assert delay_args["use_obstacle_avoidance"] == "$(var use_obstacle_avoidance)"
     assert delay_args["input_control_cmd_raw"] == (
         "/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd_raw"
     )
@@ -247,6 +277,74 @@ def test_pure_pursuit_mpc_horizon_config_publishes_neutral_outside_overtake():
     assert mpc_config["neutral_horizon_publish_period_sec"] == 0.05
 
 
+def test_wall_recovery_launch_contract_is_fail_closed_by_default():
+    config_path = (
+        _aichallenge_submit_root()
+        / "wall_recovery_planner/config/wall_recovery_planner.param.yaml"
+    )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))[
+        "wall_recovery_planner_node"
+    ]["ros__parameters"]
+
+    assert config["wall_recovery_enabled"] is False
+    assert config["allow_unverified_recovery"] is False
+    assert config["require_recovery_permit"] is True
+    assert config["recovery_v_max_mps"] == 0.7
+
+
+def test_hybrid_control_mux_wires_recovery_inputs():
+    root = _parse_launch("hybrid_control_mux/launch/hybrid_control_mux.launch.xml")
+    launch_args = {
+        element.attrib.get("name"): element.attrib.get("default")
+        for element in root.findall("arg")
+    }
+    params = {
+        element.attrib.get("name"): element.attrib.get("value")
+        for element in root.iter("param")
+    }
+    remaps = {
+        element.attrib.get("from"): element.attrib.get("to")
+        for element in root.iter("remap")
+    }
+
+    assert launch_args["recovery_enabled"] == "false"
+    assert params["recovery_enabled"] == "$(var recovery_enabled)"
+    assert remaps["input/recovery_control_cmd"] == "$(var input_recovery_cmd)"
+    assert remaps["input/recovery_status"] == "$(var input_recovery_status)"
+    assert remaps["input/recovery_permit"] == "$(var input_recovery_permit)"
+
+
+def test_pure_pursuit_mpc_horizon_wires_recovery_pp_without_overtake_or_mpc_horizon():
+    root = _parse_launch(
+        "aichallenge_submit_launch/launch/control/pure_pursuit_mpc_horizon.launch.xml"
+    )
+    includes = [
+        element
+        for element in root.iter("include")
+        if "pure_pursuit.launch.xml" in element.attrib.get("file", "")
+    ]
+    recovery_include = next(
+        element
+        for element in includes
+        if any(
+            arg.attrib.get("name") == "node_name"
+            and arg.attrib.get("value") == "wall_recovery_pure_pursuit_node"
+            for arg in element.iter("arg")
+        )
+    )
+    args = {
+        element.attrib.get("name"): element.attrib.get("value")
+        for element in recovery_include.iter("arg")
+    }
+
+    assert args["input_trajectory"] == "/wall_recovery/trajectory"
+    assert args["input_recovery_status"] == "/wall_recovery/status"
+    assert args["output_recovery_control_cmd"] == "/hybrid_control/recovery/control_cmd"
+    assert args["use_mpc_predicted_horizon"] == "false"
+    assert args["use_overtake_reference_override"] == "false"
+    assert args["recovery_mode"] == "true"
+
+
 def test_reference_launch_exposes_pure_pursuit_mpc_horizon_control_method():
     root = _parse_launch("aichallenge_submit_launch/launch/reference.launch.xml")
     control_arg = next(
@@ -263,3 +361,21 @@ def test_reference_launch_exposes_pure_pursuit_mpc_horizon_control_method():
         for element in group.iter("include")
     ]
     assert any("pure_pursuit_mpc_horizon.launch.xml" in path for path in includes)
+
+
+def test_reference_launch_uses_mincurv_manual_trajectory_source():
+    root = _parse_launch("aichallenge_submit_launch/launch/reference.launch.xml")
+    generator = next(
+        element
+        for element in root.iter("node")
+        if element.attrib.get("pkg") == "simple_trajectory_generator"
+    )
+    params = {
+        element.attrib.get("name"): element.attrib.get("value")
+        for element in generator.iter("param")
+    }
+
+    assert params["csv_path"] == (
+        "$(find-pkg-share multi_purpose_mpc_ros)/env/final_ver3/"
+        "traj_mincurv_manual.csv"
+    )

@@ -2,8 +2,13 @@
 <launch>
   <arg name="use_sim_time" default="true"/>
   <arg name="param_file" default="$(find-pkg-share hybrid_control_mux)/config/hybrid_control_mux.param.yaml"/>
+  <arg name="recovery_enabled" default="false"/>
   <arg name="input_mpc_cmd" default="/hybrid_control/mpc/control_cmd"/>
   <arg name="input_pure_pursuit_cmd" default="/hybrid_control/pure_pursuit/control_cmd"/>
+  <arg name="input_recovery_cmd" default="/hybrid_control/recovery/control_cmd"/>
+  <arg name="input_recovery_status" default="/wall_recovery/status"/>
+  <arg name="input_recovery_permit" default="/wall_recovery/permit"/>
+  <arg name="input_external_safety_status" default="/wall_recovery/external_safety_status"/>
   <arg name="input_mpc_health" default="/mpc/speed_profile_debug"/>
   <arg name="output_control_cmd" default="/control/command/control_cmd"/>
   <arg name="output_debug" default="/hybrid_control_mux/debug"/>
@@ -12,8 +17,13 @@
         name="hybrid_control_mux_node" output="screen">
     <param from="$(var param_file)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="recovery_enabled" value="$(var recovery_enabled)"/>
     <remap from="input/mpc_control_cmd" to="$(var input_mpc_cmd)"/>
     <remap from="input/pure_pursuit_control_cmd" to="$(var input_pure_pursuit_cmd)"/>
+    <remap from="input/recovery_control_cmd" to="$(var input_recovery_cmd)"/>
+    <remap from="input/recovery_status" to="$(var input_recovery_status)"/>
+    <remap from="input/recovery_permit" to="$(var input_recovery_permit)"/>
+    <remap from="input/external_safety_status" to="$(var input_external_safety_status)"/>
     <remap from="input/mpc_health" to="$(var input_mpc_health)"/>
     <remap from="output/control_cmd" to="$(var output_control_cmd)"/>
     <remap from="output/debug" to="$(var output_debug)"/>

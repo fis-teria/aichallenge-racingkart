@@ -56,19 +56,24 @@ ROSノードは `overtake_planner_node` です。
   - `std_msgs/msg/String`
   - eval wrapperやレポート用のJSON
 
-`/overtake/reference_override` の配列形式:
+`/overtake/reference_override` は次の3形式を使います。
 
 ```text
-[valid, mode_id, n, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1], contract_version, override_generation]
+v3 lateral: [1, mode_id!=0, n>0, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1], 3, generation, solver_horizon_intent]
+v2 speed-only: [1, mode_id!=0, 0, 2, generation, speed_cap_mps]
+explicit inactive: [1, 0, 0, 1, generation]
 ```
 
 - `valid`: 現状は常に `1.0`
 - `mode_id`: `BehaviorMode` の整数値
-- `n`: overrideが有効ならhorizon点数、無効なら0
+- `n`: v3 lateralではhorizon点数、v2 speed-onlyとexplicit inactiveでは0
 - `d`: Frenet横方向オフセット列
-- `v_ref`: 各点の即時速度上限列。応答遅れ・制動上限を含む安全予測は `s(t)` と `predicted_speed_mps` に分離する
-- `contract_version`: 現在は `1`。旧consumerは末尾を読まず従来形式として扱える
+- `v_ref`: v3の各点の即時速度上限列。v2は単一の `speed_cap_mps` を全horizonへ適用する。応答遅れ・制動上限を含む安全予測は `s(t)` と `predicted_speed_mps` に分離する
+- `contract_version`: explicit inactiveは `1`、横軌道を持たない速度guardは `2`、横軌道とsolver認可を持つpayloadは `3`
+- `solver_horizon_intent`: `0` は通常trajectoryだけで使う横列、`1` はPASS/MERGEのsolver horizon認可、`2` は全車両・壁評価済みの必須回避。通常の`ABORT_RECOVERY`は `0` であり、mode番号だけではsolver horizonを認可しない
 - `override_generation`: payloadが変わった時に更新する1以上の世代。MPC solver horizonがどのplanner requestで解かれたかをPP/eval解析が照合する
+
+controllerはexplicit inactiveを受けた時だけoverrideを解除します。最後に受理したv2 speed-onlyの後でpayloadが不正になった、または0.50秒でtimeoutした場合は、横軌道を再利用せずbaselineのまま最後の有効speed capを保持します。v1/v3 lateral overrideは不正payload/timeoutでclearします。
 
 ## 主要データ構造
 
@@ -264,9 +269,9 @@ MPCへ渡す候補軌道です。
 そのため、risk判定側は `SPEED_GUARD` の出力形式を知らなくてよい構造です。
 `pass_horizon_publish_mode=overtake_only` では、`BehaviorStateMachine` へ渡す内部候補は `PASS_LEFT/RIGHT` のまま維持しますが、`PREPARE_OVERTAKE_*` 中に `PlannerOutputBuilder` へ渡すpublish用候補だけ `FOLLOW` へ差し替えます。
 これにより `pass_safe_required_cycles` は従来どおり貯まり、MPCへ追い越し横オフセットを出すのは `OVERTAKE_LEFT/RIGHT` に入った周期からになります。
-速度だけを落とす `SPEED_GUARD` では、横オフセットを中心線 `d=0` へ0埋めせず、現在の横位置を保持します。
-その後、`OvertakePlannerCore` が前回publishした横オフセット列との差分を `lateral_target_max_step_m` で制限します。
-高速カーブ中の `YIELD_BEHIND`, `ABORT_RECOVERY`, `SAFE_STOP`, `SPEED_GUARD` では、rate limit後の横オフセット列を `high_speed_curve_lateral_hold_*` 条件でholdし、低速化またはカーブ脱出まで短周期の再選択を抑えます。
+横軌道を安全評価できない `SPEED_GUARD` では、`active_override=false` と空の `lateral_offsets` を使い、v2 speed-onlyで減速だけを下流へ渡します。これにより横列を推測・0埋めしてMPCへ渡しません。
+安全評価済みの横列がある場合だけ、`OvertakePlannerCore` が前回publishした横オフセット列との差分を `lateral_target_max_step_m` で制限します。
+高速カーブ中の `YIELD_BEHIND`, `ABORT_RECOVERY`, `SAFE_STOP`, `SPEED_GUARD` で横軌道が有効な場合は、rate limit後の横オフセット列を `high_speed_curve_lateral_hold_*` 条件でholdし、低速化またはカーブ脱出まで短周期の再選択を抑えます。
 PASSでは、この最終 `d[]` を再度SafetyEvaluatorへ通します。unsafeならoverrideを無効化して通常速度へ戻さず、同じ周期にRECOVERY、さらに不可ならspeed-only fallbackを出します。
 
 `BlockedRiskAnalyzer` と `FutureSideBySideRiskAnalyzer` への責務分割そのものでは、新しいYAMLパラメータは追加していません。

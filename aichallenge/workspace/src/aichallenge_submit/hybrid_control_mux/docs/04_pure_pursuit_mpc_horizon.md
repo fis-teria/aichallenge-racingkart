@@ -8,6 +8,8 @@
 
 新モードでは、Pure Pursuit が常に制御指令を出し、MPCが解けている時だけMPC予測ホライズンを優先して追従します。MPCが解けない時は、Pure Pursuit が通常trajectoryと overtake planner のoverrideを使って走ります。
 
+通常trajectory、MPC reference、overtake planner reference は `multi_purpose_mpc_ros/env/final_ver3/traj_mincurv_manual.csv` 由来に揃えます。これにより、Pure Pursuit が見る基準線とMPC/追い越し管制が見る基準線のズレを避けます。
+
 ## 起動方法
 
 ```bash
@@ -43,6 +45,8 @@ flowchart LR
 | 同上 | `mpc.N: 20` | horizon生成に必要な範囲を残しつつ、問題サイズを小さくする |
 | 同上 | `mpc.predicted_horizon_publish_mode: overtake_or_neutral` | 実追い越し/merge中だけsolver予測horizonをpublishする |
 | 同上 | `mpc.neutral_horizon_publish_period_sec: 0.05` | 非追い越し中は固定周期の中立horizonを出す |
+| `reference.launch.xml` | `simple_trajectory_generator.csv_path` | 通常trajectoryも `traj_mincurv_manual.csv` 由来に揃える |
+| `pure_pursuit_mpc_horizon.launch.xml` | `use_obstacle_avoidance: true` | planner overrideの許可とは独立に、MPCの障害物回避チェックを既定で維持する |
 | `pure_pursuit_mpc_horizon.launch.xml` | `overtake_mpc_health_solve_time_warn_ms: 200.0` | 10Hz horizon生成時だけ、overtake plannerのsolve-time guardを緩める |
 | `pure_pursuit.launch.xml` | `require_solved_mpc_health_for_horizon` | MPC healthがsolvedの時だけhorizonを採用する |
 | `hybrid_control_mux/config/pure_pursuit_mpc_horizon.param.yaml` | `primary_source: pure_pursuit` | 最終出力をPure Pursuit主制御にする |

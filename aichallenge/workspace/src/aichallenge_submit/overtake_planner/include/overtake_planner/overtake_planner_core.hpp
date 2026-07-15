@@ -17,19 +17,18 @@ public:
   OvertakePlannerCore(FrenetFrame frame, PlannerConfig config);
 
   // 1制御周期の中核処理。障害判定、候補生成、安全評価、状態遷移をまとめて行う。
-  PlannerOutput update(double now_sec, const EgoState &ego,
-                       const std::vector<OpponentState> &opponents,
-                       const MpcHealthStatus &mpc_health = MpcHealthStatus{},
-                       const ReentryInputStatus &reentry_input =
-                           ReentryInputStatus{});
+  PlannerOutput
+  update(double now_sec, const EgoState &ego,
+         const std::vector<OpponentState> &opponents,
+         const MpcHealthStatus &mpc_health = MpcHealthStatus{},
+         const ReentryInputStatus &reentry_input = ReentryInputStatus{});
 
   BehaviorMode mode() const { return mode_; }
 
 private:
   // V2Xで受けた他車位置を短いhorizonだけ等速予測する。
   std::vector<PredictedOpponent>
-  predictOpponents(const std::vector<OpponentState> &opponents,
-                   double now_sec,
+  predictOpponents(const std::vector<OpponentState> &opponents, double now_sec,
                    const std::vector<double> *time_points = nullptr) const;
   // FASTEST/FOLLOW/PASS/RECOVERYそれぞれの横オフセット列と速度上限を作る。
   CandidateTrajectory
@@ -39,13 +38,23 @@ private:
   CandidateTrajectory makeReentryEvaluationCandidate(
       const EgoState &ego, const BlockedInfo &blocked_info,
       const std::vector<OpponentState> &opponents) const;
-  ReentryGateResult evaluateReentryGate(
-      double now_sec, const EgoState &ego, const BlockedInfo &blocked_info,
-      const std::vector<OpponentState> &opponents,
-      const MpcHealthStatus &mpc_health,
-      const ReentryInputStatus &reentry_input);
-  void updateReentryPhase(const EgoState &ego);
+  ReentryGateResult
+  evaluateReentryGate(double now_sec, const EgoState &ego,
+                      const BlockedInfo &blocked_info,
+                      const std::vector<OpponentState> &opponents,
+                      const MpcHealthStatus &mpc_health,
+                      const ReentryInputStatus &reentry_input,
+                      ReentryMpcHealthState reentry_mpc_health);
+  ReentryMpcHealthState
+  updateReentryMpcHealthState(const ReentryInputStatus &reentry_input);
+  void updateReentryPhase(const EgoState &ego, BehaviorMode previous_mode);
   bool reentryRequested(const EgoState &ego) const;
+  bool candidateMovesTowardCenter(const EgoState &ego,
+                                  const CandidateTrajectory &candidate) const;
+  void applyGenericRecoveryStaleHold(PlannerOutput &output) const;
+  void rememberGenericRecoveryHold(const CandidateTrajectory &candidate,
+                                   const ReentryGateResult &gate);
+  void rememberGenericRecoveryHold(const PlannerOutput &output);
   // 安全で目的に合う候補を、スコアが最小のものとして選ぶ。
   CandidateTrajectory
   selectCandidate(std::vector<CandidateTrajectory> &candidates) const;
@@ -67,25 +76,23 @@ private:
   void classifyStationaryFrontObstacle(
       double now_sec, const EgoState &ego, BlockedInfo &blocked,
       const std::vector<OpponentState> &opponents) const;
-  bool revalidatePublishedLateral(const PlannerOutput &output,
-                                  const CandidateTrajectory &base_candidate,
-                                  const std::vector<PredictedOpponent>
-                                      &predictions) const;
+  bool revalidatePublishedLateral(
+      const PlannerOutput &output, const CandidateTrajectory &base_candidate,
+      const std::vector<PredictedOpponent> &predictions) const;
   bool updateSlowFrontException(const BlockedInfo &blocked);
-  bool shouldSuppressSafeStopForStartGrace(double now_sec,
-                                           const EgoState &ego,
+  bool shouldSuppressSafeStopForStartGrace(double now_sec, const EgoState &ego,
                                            const BlockedInfo &blocked) const;
   bool leaderPriorityCandidate(const BlockedInfo &blocked, double margin_m,
-                               std::string &target_id,
-                               double &target_delta_s,
+                               std::string &target_id, double &target_delta_s,
                                std::string &reason) const;
   void updateLeaderPriority(double now_sec, BlockedInfo &blocked);
   bool localizedLateralProfileEnabled() const;
   CandidateType preferredPassType(const BlockedInfo &blocked) const;
   int localizedProfileTargetIndex(const BlockedInfo &blocked) const;
-  void updateLocalizedLateralProfile(double now_sec, const EgoState &ego,
-                                     const BlockedInfo &blocked,
-                                     const std::vector<OpponentState> &opponents);
+  void
+  updateLocalizedLateralProfile(double now_sec, const EgoState &ego,
+                                const BlockedInfo &blocked,
+                                const std::vector<OpponentState> &opponents);
   void clearLocalizedLateralProfile();
   void setLocalizedProfileMarkers(double target_s_m);
   double targetOffsetForPass(CandidateType pass_type) const;
@@ -111,6 +118,20 @@ private:
   int reentry_clear_cycles_{0};
   bool reentry_lockout_active_{false};
   bool reentry_phase_active_{false};
+  // trueになっても実車が通常ラインへ収束するまではphaseを残す。次の復帰を
+  // 未評価のまま許すフラグではなく、同じ復帰軌道を継続評価済みである記録。
+  bool reentry_gate_permitted_{false};
+  // FREE_RUN/FOLLOW由来のRECOVERYも中心側へ横断する時だけ同じ長期安全評価に
+  // 載せる。ただし拒否時はABORTではなくSPEED_GUARDの現d保持を続ける。
+  bool generic_recovery_phase_active_{false};
+  std::vector<double> generic_recovery_hold_offsets_;
+  double generic_recovery_hold_speed_cap_mps_{
+      std::numeric_limits<double>::quiet_NaN()};
+  std::uint64_t last_reentry_mpc_health_sample_sequence_{0U};
+  int reentry_mpc_bad_sample_count_{0};
+  int reentry_mpc_good_sample_count_{0};
+  ReentryMpcHealthState reentry_mpc_health_state_{
+      ReentryMpcHealthState::HEALTHY};
   int slow_front_exception_count_{0};
   bool leader_priority_hold_active_{false};
   std::string leader_priority_hold_id_{};

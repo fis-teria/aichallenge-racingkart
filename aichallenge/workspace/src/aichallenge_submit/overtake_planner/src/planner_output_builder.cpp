@@ -31,6 +31,18 @@ double candidateSpeedCapOr(const CandidateTrajectory &candidate,
   return out;
 }
 
+// 入力: 速度cap列。
+// 出力: 有限かつ正のcapを一つでも含むならtrue。
+// 処理概要: 横軌道を出せる場合と速度だけを出す場合を分離するため、縦overrideの
+// 有効性を横overrideとは独立して検査する。
+bool hasPositiveSpeedCap(const std::vector<double> &speed_caps) {
+  return std::any_of(speed_caps.begin(), speed_caps.end(),
+                     [](double speed_cap_mps) {
+                       return std::isfinite(speed_cap_mps) &&
+                              speed_cap_mps > 0.0;
+                     });
+}
+
 // 入力: 既存の速度列と適用したい一様速度上限。
 // 出力: なし。speed_capsを上限以下へ直接更新する。
 // 処理概要: 既に横overrideがある候補に、速度ガードだけを重ねる。
@@ -64,17 +76,63 @@ bool isRecoverySpeedGuardMode(BehaviorMode mode, CandidateType selected) {
          selected == CandidateType::RECOVERY;
 }
 
-// 入力: PlannerConfigと自車状態。
-// 出力: 安全コリドー内にクランプした現在横位置d。
-// 処理概要: 速度だけのguardで横参照を新規生成する時、急に中心線へ飛ばさず現在位置を保持する。
-double clampedCurrentLateralOffset(const PlannerConfig &config,
-                                   const EgoState &ego) {
-  const double lower_d = config.d_min_m + config.min_wall_margin_m;
-  const double upper_d = config.d_max_m - config.min_wall_margin_m;
-  if (!std::isfinite(ego.frenet.d)) {
-    return 0.0;
+// 入力: planner設定とBlockedInfo。
+// 出力: opponent_collision fallbackを最低速側へ倒すほど近い相手車リスクならtrue。
+// 処理概要: parallel_side_candidateは広く拾う診断値なので、横楕円/横並び幅の外に
+// いる相手では0.5m/s級の衝突fallbackを使わず通常fallback速度に留める。
+bool hasCloseParallelSideRisk(const PlannerConfig &config,
+                              const BlockedInfo &blocked) {
+  if (!blocked.parallel_side_candidate || blocked.parallel_side_index < 0 ||
+      !std::isfinite(blocked.parallel_side_delta_s) ||
+      !std::isfinite(blocked.parallel_side_delta_d)) {
+    return false;
   }
-  return std::clamp(ego.frenet.d, lower_d, upper_d);
+  const double s_limit = std::max(0.0, config.side_by_side_s_m);
+  const double d_limit =
+      std::max(std::max(0.0, config.side_margin_m),
+               std::max(0.0, config.safety_ellipse_b_m));
+  return std::abs(blocked.parallel_side_delta_s) <= s_limit &&
+         std::abs(blocked.parallel_side_delta_d) <= d_limit;
+}
+
+// 入力: planner設定とBlockedInfo。
+// 出力: 横に少し離れた低速前方車へ中心復帰で近づき得るならtrue。
+// 処理概要: 同一コリドーfrontではなくても、停止車列や2台目が前方にいる場合は
+// opponent_collision fallbackを通常parallelより強く扱う。
+bool hasSlowForwardParallelRecoveryRisk(const PlannerConfig &config,
+                                        const BlockedInfo &blocked) {
+  if (!blocked.parallel_side_candidate || blocked.parallel_side_index < 0 ||
+      !std::isfinite(blocked.parallel_side_delta_s) ||
+      !std::isfinite(blocked.parallel_side_delta_d) ||
+      !std::isfinite(blocked.parallel_side_rel_v)) {
+    return false;
+  }
+  const double s_limit =
+      std::max(std::max(0.0, config.parallel_side_s_m),
+               std::max(0.0, config.slow_obstacle_chain_distance_m));
+  return blocked.parallel_side_delta_s > 0.0 &&
+         blocked.parallel_side_delta_s <= s_limit &&
+         std::abs(blocked.parallel_side_delta_d) <=
+             std::max(0.0, config.parallel_side_margin_m) &&
+         blocked.parallel_side_rel_v >
+             std::max(0.0, config.dv_block_threshold_mps);
+}
+
+// 入力: planner設定とBlockedInfo。
+// 出力: opponent_collision時に強い低速capを使うべきならtrue。
+// 処理概要: 横並び/未来譲り/停止前走車/近接parallelだけを厳格fallbackにし、
+// 通常追従や広い並走観測では必要以上の低速化を避ける。
+bool shouldUseStrictOpponentCollisionFallback(const PlannerConfig &config,
+                                              const BlockedInfo &blocked) {
+  return blocked.side_by_side || blocked.corner_side_by_side ||
+         blocked.future_side_by_side || blocked.future_corner_side_by_side ||
+         blocked.future_yield_required ||
+         blocked.future_parallel_interaction ||
+         blocked.stationary_front_obstacle ||
+         blocked.slow_obstacle_chain_active ||
+         blocked.front_vehicle_low_speed ||
+         hasCloseParallelSideRisk(config, blocked) ||
+         hasSlowForwardParallelRecoveryRisk(config, blocked);
 }
 
 } // namespace
@@ -174,7 +232,8 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
             leader_priority_relaxed = true;
             cap = finitePositiveOr(config_.side_by_side_leader_priority_v_max_mps,
                                    cap);
-          } else {
+          } else if (shouldUseStrictOpponentCollisionFallback(config_,
+                                                              blocked)) {
             cap = std::min(
                 cap, finitePositiveOr(
                          config_.opponent_collision_fallback_v_max_mps, cap));
@@ -285,7 +344,8 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   }
 
   // 処理ブロック: 選択候補をPlannerOutputへコピーし、必要なら速度ガードを重ねる。
-  // 設計意図: 横overrideがある場合は横列を維持し、速度だけのguardでは現在横位置保持の一様列を作る。
+  // 設計意図: 横overrideがある場合は横列を維持する。横軌道が安全評価を通らない
+  // 速度guardは、現在dの推測列を作らず縦capだけを下流契約へ渡す。
   output.active_override = selected_override_active;
   output.target_lateral_offset_m = selected.d.empty() ? 0.0 : selected_target_d;
   output.min_cbf_h = selected.min_safety_margin;
@@ -293,16 +353,25 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
   output.active_cbf_constraint_count = selected.active_safety_constraint_count;
   output.lateral_offsets = selected.d;
   output.speed_caps = selected.v_ref;
+  if (selected_override_active) {
+    if (output.mode == BehaviorMode::OVERTAKE_LEFT ||
+        output.mode == BehaviorMode::OVERTAKE_RIGHT ||
+        output.mode == BehaviorMode::MERGE_BACK) {
+      output.solver_horizon_intent =
+          PlannerOutput::SolverHorizonIntent::MANEUVER_AUTHORIZED;
+    }
+    // ABORT_RECOVERYはCoreが全車両・壁・freshnessを確認した後だけ
+    // MANDATORY_AVOIDANCEへ昇格する。mode番号だけでは認可しない。
+  }
   if (std::isfinite(requested_speed_cap)) {
     if (selected_override_active && selected.feasible) {
       applyUniformSpeedCap(output.speed_caps, requested_speed_cap);
     } else {
-      output.active_override = true;
-      const double hold_d = clampedCurrentLateralOffset(config_, input.ego);
-      output.lateral_offsets = uniformVector(config_.horizon_points, hold_d);
+      output.active_override = false;
+      output.lateral_offsets.clear();
       output.speed_caps =
           uniformVector(config_.horizon_points, requested_speed_cap);
-      output.target_lateral_offset_m = hold_d;
+      output.target_lateral_offset_m = 0.0;
       if (output.mode == BehaviorMode::FREE_RUN) {
         output.mode = BehaviorMode::SPEED_GUARD;
       }
@@ -313,6 +382,9 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
       output.reason = speed_cap_reason;
     }
   }
+  output.longitudinal_speed_cap_active =
+      (output.active_override || std::isfinite(requested_speed_cap)) &&
+      hasPositiveSpeedCap(output.speed_caps);
   output.speed_only_fallback_active = speed_only_fallback;
   output.wall_risk_speed_guard_active = wall_risk_guard;
   output.mpc_health_speed_guard_active = mpc_health_guard;

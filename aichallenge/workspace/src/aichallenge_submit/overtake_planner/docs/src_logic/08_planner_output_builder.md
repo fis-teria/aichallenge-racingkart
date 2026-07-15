@@ -72,6 +72,8 @@ SAFE_STOPは停止候補がfeasibleなときだけoverrideします。
 - `speed_caps` は要求capで一様。
 - modeが `FREE_RUN` なら `SPEED_GUARD` に変更する。
 
+現在dの保持もSAFE_STOP候補も安全に作れない場合は、横列を捏造しません。このとき `active_override=false` と `longitudinal_speed_cap_active=true` を出し、nodeはv2速度のみpayload `[1, mode_id>0, 0, 2, generation, speed_cap_mps]` をpublishします。下流は通常参照の横方向を使い、`speed_cap_mps`（`m/s`）だけを適用します。v2のmalformed/timeoutでは最後に検証済みのcapを保持し、明示解除 `[1, 0, 0, 1, generation]` またはv1横+速度overrideで解除します。
+
 中心線へ0埋めしないのがポイントです。
 壁際や横ずれ中に急に中央へ引っ張ると、MPCが破綻しやすいためです。
 

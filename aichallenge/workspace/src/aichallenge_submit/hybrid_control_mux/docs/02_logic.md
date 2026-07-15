@@ -23,7 +23,7 @@
 
 `input/pure_pursuit_control_cmd` で Pure Pursuit の `AckermannControlCommand` を受け取ります。受信時刻を保存し、現在時刻との差が `pure_pursuit_cmd_timeout_sec` 以下なら fresh と判定します。
 
-Pure Pursuit ノード側でも odometry と trajectory の受信時刻を見ます。鮮度判定は `/clock` 停止時にも進む steady time で行います。どちらかが `max_odom_age_sec` / `max_trajectory_age_sec` を超えて古い場合は、古い経路追従を続けず停止指令を出します。`/overtake/reference_override` だけが古い場合は停止せず、その override を破棄して元の trajectory を追います。
+Pure Pursuit ノード側でも odometry と trajectory の受信時刻を見ます。鮮度判定は `/clock` 停止時にも進む steady time で行います。どちらかが `max_odom_age_sec` / `max_trajectory_age_sec` を超えて古い場合は、古い経路追従を続けず停止指令を出します。`/overtake/reference_override` のv1/v3横+速度overrideだけが古い場合は停止せず、その横overrideを破棄して元のtrajectoryを追います。v2速度のみoverrideが古い、またはv2受信後にpayloadが壊れた場合は、横方向を再利用せず通常trajectoryのまま最後に検証済みの速度capを保持します。
 
 ### MPC health
 
@@ -131,18 +131,21 @@ abs(delta_steering) <= max_steering_rate_radps * dt
 
 `hybrid_delay_aware_mpc.launch.xml` では、Pure Pursuit に `use_overtake_reference_override=true` を渡します。これにより、Pure Pursuit は `/overtake/reference_override` を購読します。
 
-`/overtake/reference_override` は MPC と同じ形式です。
+`/overtake/reference_override` は MPC と同じ、version付きの契約です（速度は `m/s`）。
 
 ```text
-[valid, mode_id, n, lateral_offsets[0..n), speed_caps[0..n)]
+v3 lateral + speed: [1, mode_id>0, n>0, lateral_offsets[0..n), speed_caps[0..n), 3, generation, solver_horizon_intent]
+v2 speed only:     [1, mode_id>0, 0, 2, generation, speed_cap_mps]
+explicit inactive: [1, 0, 0, 1, generation]
 ```
 
 Pure Pursuit は現在位置に最も近い trajectory index を基準にして、先の `n` 点へ以下を適用します。
 
-- `lateral_offsets[i]` が有限値なら、trajectory 点を yaw の法線方向に横移動する
-- `speed_caps[i]` が正の有限値なら、その点の速度を cap 以下にする
+- v1の `lateral_offsets[i]` が有限値なら、trajectory 点を yaw の法線方向に横移動する
+- v1の `speed_caps[i]` が正の有限値なら、その点の速度を cap 以下にする
+- v2はtrajectoryを横移動せず、単一の正の `speed_cap_mps` を全horizonの速度上限として使う
 - `external_target_vel` を使う場合でも、現在点の `speed_caps[0]` を目標速度の上限として使う
-- override が `overtake_override_timeout_sec` より古くなったら無効化する
+- v1は `overtake_override_timeout_sec` より古くなったら無効化する。v2のtimeoutまたはv2受信後のmalformed payloadでは、明示解除を受けるまで最後の検証済みcapだけを保持する
 
 Pure Pursuit の lookahead は基本的に `lookahead_gain * max(target_speed, current_speed) + lookahead_min_distance` で決まります。`curvature_adaptive_lookahead_enabled=true` の場合は、override 適用後の trajectory の実際の `x/y` 点列から前方曲率を推定し、曲率が大きい区間だけ `curvature_lookahead_min_distance` まで lookahead を短くします。曲率推定の距離窓は base lookahead から決め、trajectory 点密度だけで変わりにくくしています。直線や低曲率区間では従来の速度ベース lookahead を維持し、lookahead の急変は `curvature_lookahead_smoothing_alpha` で平滑化します。
 

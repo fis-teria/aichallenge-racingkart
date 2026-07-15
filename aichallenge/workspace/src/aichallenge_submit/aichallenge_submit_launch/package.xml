@@ -33,6 +33,7 @@
   <exec_depend>simple_pure_pursuit</exec_depend>
   <exec_depend>multi_purpose_mpc_ros</exec_depend>
   <exec_depend>hybrid_control_mux</exec_depend>
+  <exec_depend>wall_recovery_planner</exec_depend>
   <exec_depend>delay_aware_mpc_ros</exec_depend>
   <exec_depend>overtake_planner</exec_depend>
 

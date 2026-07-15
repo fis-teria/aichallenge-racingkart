@@ -51,6 +51,21 @@ bool selectedMatchesCurrentPass(BehaviorMode current, CandidateType selected) {
           selected == CandidateType::PASS_RIGHT);
 }
 
+// 入力: 現在modeと閉塞情報。
+// 出力: infeasible候補を受けてもABORT_RECOVERYを使うべき実復帰文脈ならtrue。
+// 処理概要: 通常走行の横ずれ・壁寄り・予見対象を、PASS中止と同じ強い状態へ
+// 落とさない。ABORTは実PASS/mergeの中止だけに限定し、その他は速度guardまたは
+// 既存の追従/譲りで安全を保つ。
+bool isAbortRecoveryContext(BehaviorMode current,
+                            const BlockedInfo &blocked_info) {
+  return current == BehaviorMode::OVERTAKE_LEFT ||
+         current == BehaviorMode::OVERTAKE_RIGHT ||
+         current == BehaviorMode::MERGE_BACK ||
+         current == BehaviorMode::ABORT_RECOVERY ||
+         (current == BehaviorMode::SAFE_STOP &&
+          blocked_info.reentry_hold_active);
+}
+
 } // namespace
 
 // 入力: planner設定。
@@ -147,7 +162,7 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
         next = BehaviorMode::SIDE_BY_SIDE_KEEP;
       } else {
         next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                    : BehaviorMode::ABORT_RECOVERY;
+                                    : BehaviorMode::SPEED_GUARD;
       }
       safe_stop_hold_count_ = 0;
       safe_stop_release_count_ = 0;
@@ -170,7 +185,9 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
          !lateralReleaseReady(blocked_info,
                               config_.safe_stop_lateral_error_threshold_m));
     if (recovery_required && canSwitch(now_sec)) {
-      next = BehaviorMode::ABORT_RECOVERY;
+      // SAFE_STOP解除待ちの壁/横ずれは、実際に通常ラインへ横断する文脈が
+      // Coreで確認されるまでは速度guardで保持する。
+      next = BehaviorMode::SPEED_GUARD;
       safe_stop_hold_count_ = 0;
       safe_stop_release_count_ = 0;
       pass_left_safe_cycles_ = 0;
@@ -227,9 +244,13 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     } else if (blocked_info.side_by_side &&
                selected == CandidateType::SIDE_BY_SIDE_KEEP) {
       next = BehaviorMode::SIDE_BY_SIDE_KEEP;
+    } else if (isAbortRecoveryContext(current, blocked_info)) {
+      next = BehaviorMode::ABORT_RECOVERY;
     } else {
+      // FREE_RUN/FOLLOWのgenericな横ずれや壁寄りは、中心線への強制復帰ではなく
+      // 既存の速度制限・横目標holdへ委譲する。前方閉塞があれば追従を優先する。
       next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                  : BehaviorMode::ABORT_RECOVERY;
+                                  : BehaviorMode::SPEED_GUARD;
     }
     markIfChanged(now_sec, current, next);
     if (next != BehaviorMode::YIELD_BEHIND) {
@@ -279,7 +300,9 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;
     } else if (selected == CandidateType::RECOVERY) {
-      next = BehaviorMode::ABORT_RECOVERY;
+      // RECOVERY候補が選ばれても、PASSを中止した事実がない通常走行では
+      // ABORTへ遷移しない。速度guard付きの横補正として扱う。
+      next = BehaviorMode::SPEED_GUARD;
     } else if (blocked_info.side_by_side &&
                selected == CandidateType::SIDE_BY_SIDE_KEEP) {
       next = BehaviorMode::SIDE_BY_SIDE_KEEP;
@@ -307,7 +330,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;
     } else if (selected == CandidateType::RECOVERY) {
-      next = BehaviorMode::ABORT_RECOVERY;
+      // 追従中は前走車との縦安全を失わないようFOLLOWを継続する。
+      next = BehaviorMode::FOLLOW_BLOCKED;
     } else if (blocked_info.side_by_side &&
                selected == CandidateType::SIDE_BY_SIDE_KEEP) {
       next = BehaviorMode::SIDE_BY_SIDE_KEEP;
@@ -397,7 +421,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;
     } else if (selected == CandidateType::RECOVERY) {
-      next = BehaviorMode::ABORT_RECOVERY;
+      // wide parallel観測だけで中心線へ横切らない。横並び保持を続ける。
+      next = BehaviorMode::SIDE_BY_SIDE_KEEP;
     } else if (!blocked_info.side_by_side ||
                selected != CandidateType::SIDE_BY_SIDE_KEEP) {
       next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
@@ -432,8 +457,14 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
   case BehaviorMode::SAFE_STOP:
     break;
   case BehaviorMode::SPEED_GUARD:
-    next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                : BehaviorMode::FREE_RUN;
+    // generic lateral/wall/health guardが続く間は状態も維持し、FREE_RUNと
+    // SPEED_GUARDの1周期振動を避ける。
+    if (blocked_info.pass_decision_frozen) {
+      next = BehaviorMode::SPEED_GUARD;
+    } else {
+      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
+                                  : BehaviorMode::FREE_RUN;
+    }
     break;
   }
 

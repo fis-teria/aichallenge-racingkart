@@ -92,7 +92,7 @@ neutral horizon の先頭アンカー点は現在poseを表しますが、速度
 これにより、PP fallbackが通常走行中に古い追い越し横オフセットを追い続けることを避けます。
 
 `pure_pursuit_mpc_horizon` では、MPC側の `predicted_horizon_publish_mode` を `overtake_or_neutral` にします。
-このモードでは `OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK`, `ABORT_RECOVERY` 中だけsolver予測horizonを出し、それ以外は固定周期のneutral horizonを出します。
+このモードでは、planner v3契約で認可された `OVERTAKE_LEFT`, `OVERTAKE_RIGHT`, `MERGE_BACK`、または必須回避として明示された `ABORT_RECOVERY` だけsolver予測horizonを出し、それ以外は固定周期のneutral horizonを出します。
 Pure Pursuit側はhealth gateでempty/unsolved horizonを採用せず、通常trajectoryとovertake overrideによる走行へ戻ります。
 
 ## 曲率適応lookahead
@@ -134,9 +134,11 @@ feed-forward は raw tire-angle rad に加算してから `steering_tire_angle_g
 | パラメータ | 役割 | 調整の目安 |
 | --- | --- | --- |
 | `use_overtake_reference_override` | `/overtake/reference_override` を PP 側にも適用するか。 | overtake planner と fallback PP の経路意図を揃えるため、hybrid では有効にします。 |
-| `overtake_override_timeout_sec` | override の有効期限。 | planner publish 周期より少し長くします。 |
+| `overtake_override_timeout_sec` | override の有効期限。 | planner publish 周期より少し長くします。v1/v3 lateralはtimeoutでclearする一方、最後に受理したv2 speed-onlyは明示inactiveまで速度capだけを保持します。 |
 
 MPC horizon が usable な時は、horizon を優先するため通常 trajectory への overtake lateral override は適用しません。ただし overtake speed cap は PP の目標速度 cap として使われます。
+
+`[1, mode_id!=0, 0, 2, generation, speed_cap_mps]` のv2 speed-onlyは横offsetを含みません。受理後にpayloadが不正になった、または `overtake_override_timeout_sec` を超えた場合も、PPはbaseline trajectoryを使い続けて最後の有効speed capだけを適用します。`[1, 0, 0, 1, generation]` のexplicit inactiveはこの保持を解除します。v1/v3 lateral overrideは不正payload/timeoutでclearします。
 
 ## デバッグ確認
 

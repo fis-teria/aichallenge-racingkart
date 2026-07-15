@@ -1,0 +1,4 @@
+std_msgs/Header header
+uint32 attempt_id
+uint32 trajectory_generation
+autoware_auto_planning_msgs/Trajectory trajectory

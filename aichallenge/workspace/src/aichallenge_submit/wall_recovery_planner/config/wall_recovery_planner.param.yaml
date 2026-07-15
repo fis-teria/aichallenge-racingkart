@@ -1,0 +1,30 @@
+wall_recovery_planner_node:
+  ros__parameters:
+    wall_recovery_enabled: false
+    allow_unverified_recovery: false
+    require_recovery_permit: true
+    control_rate_hz: 20.0
+    collision_edge_min_delta: 30
+    collision_event_ttl_sec: 2.0
+    stuck_confirm_sec: 1.0
+    stuck_speed_threshold_mps: 0.10
+    stuck_progress_threshold_m: 0.10
+    stuck_min_command_speed_mps: 0.50
+    stop_hold_sec: 0.25
+    permit_wait_timeout_sec: 0.75
+    recovery_v_max_mps: 0.7
+    recovery_max_duration_sec: 3.0
+    recovery_no_progress_timeout_sec: 1.0
+    recovery_max_attempts: 1
+    max_odom_age_sec: 0.20
+    max_trajectory_age_sec: 0.50
+    max_control_cmd_age_sec: 0.20
+    max_permit_age_sec: 0.30
+    min_rejoin_arc_distance_m: 1.0
+    max_rejoin_arc_distance_m: 4.0
+    max_rejoin_heading_error_rad: 1.2
+    max_trajectory_segment_length_m: 5.0
+    recovery_trajectory_points: 12
+    handoff_distance_threshold_m: 0.5
+    complete_publish_window_sec: 0.5
+    debug_publish_period_sec: 0.25

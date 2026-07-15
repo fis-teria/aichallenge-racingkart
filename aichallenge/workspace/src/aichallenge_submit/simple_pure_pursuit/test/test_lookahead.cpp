@@ -1,5 +1,6 @@
 #include "simple_pure_pursuit/delay_compensation.hpp"
 #include "simple_pure_pursuit/lookahead.hpp"
+#include "simple_pure_pursuit/overtake_override_contract.hpp"
 #include "simple_pure_pursuit/safety.hpp"
 
 #include <geometry_msgs/msg/quaternion.hpp>
@@ -73,6 +74,128 @@ Trajectory makeArcTrajectory(double direction) {
 }
 
 } // namespace
+
+TEST(OvertakeOverrideContract, SpeedOnlyV2ParsesWithoutLateralOffsets) {
+  const auto contract = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 11.0F, 0.0F, 2.0F, 42.0F, 0.5F});
+
+  ASSERT_TRUE(contract.has_value());
+  EXPECT_EQ(contract->kind,
+            simple_pure_pursuit::OvertakeOverrideContractKind::SPEED_ONLY_V2);
+  EXPECT_EQ(contract->mode_id, 11);
+  EXPECT_EQ(contract->generation, 42U);
+  EXPECT_TRUE(contract->lateral_offsets.empty());
+  ASSERT_EQ(contract->speed_caps.size(), 1U);
+  EXPECT_NEAR(contract->speed_caps.front(), 0.5, 1.0e-9);
+}
+
+TEST(OvertakeOverrideContract, InvalidV2FailsClosed) {
+  const std::vector<std::vector<float>> malformed = {
+      {1.0F, 0.0F, 0.0F, 2.0F, 42.0F, 0.5F},
+      {1.0F, 11.0F, 0.0F, 2.0F, 0.0F, 0.5F},
+      {1.0F, 11.0F, 0.0F, 2.0F, 42.0F, 0.0F},
+      {1.0F, 11.0F, 0.0F, 2.0F, 42.0F,
+       std::numeric_limits<float>::infinity()},
+      {1.0F, 11.0F, 1.0F, 2.0F, 42.0F, 0.5F},
+  };
+  for (const auto &payload : malformed) {
+    EXPECT_FALSE(
+        simple_pure_pursuit::parseOvertakeOverrideContract(payload).has_value());
+  }
+}
+
+TEST(OvertakeOverrideContract, ExplicitInactiveV1ClearsInsteadOfSpeedOnly) {
+  const auto contract = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 0.0F, 0.0F, 1.0F, 42.0F});
+
+  ASSERT_TRUE(contract.has_value());
+  EXPECT_EQ(contract->kind,
+            simple_pure_pursuit::OvertakeOverrideContractKind::INACTIVE);
+  EXPECT_EQ(contract->mode_id, 0);
+  EXPECT_TRUE(contract->speed_caps.empty());
+}
+
+TEST(OvertakeOverrideContract,
+     SpeedOnlyV2KeepsBaselineLateralAndRequestsImmediateBraking) {
+  const auto contract = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 11.0F, 0.0F, 2.0F, 42.0F, 0.5F});
+
+  ASSERT_TRUE(contract.has_value());
+  ASSERT_EQ(contract->kind,
+            simple_pure_pursuit::OvertakeOverrideContractKind::SPEED_ONLY_V2);
+  ASSERT_TRUE(contract->lateral_offsets.empty());
+  ASSERT_EQ(contract->speed_caps.size(), 1U);
+  const double target_speed_mps = simple_pure_pursuit::applyOvertakeSpeedCap(
+      4.0, std::optional<double>{contract->speed_caps.front()});
+  const double acceleration_mps2 =
+      simple_pure_pursuit::proportionalLongitudinalAcceleration(
+          target_speed_mps, 4.0, 1.0);
+
+  EXPECT_NEAR(target_speed_mps, 0.5, 1.0e-9);
+  EXPECT_LT(acceleration_mps2, 0.0);
+}
+
+TEST(OvertakeOverrideContract,
+     SpeedOnlyV2MalformedPayloadRetainsCapWithoutLateralTrajectory) {
+  simple_pure_pursuit::OvertakeSpeedOnlyFailClosedLatch latch;
+  const auto valid_v2 = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 11.0F, 0.0F, 2.0F, 42.0F, 0.5F});
+  ASSERT_TRUE(valid_v2.has_value());
+  latch.observeValid(valid_v2.value());
+
+  const auto malformed = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 11.0F, 0.0F, 2.0F, 42.0F, 0.0F});
+  EXPECT_FALSE(malformed.has_value());
+  const auto &retained = latch.retained();
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_TRUE(retained->lateral_offsets.empty());
+  ASSERT_EQ(retained->speed_caps.size(), 1U);
+  EXPECT_NEAR(retained->speed_caps.front(), 0.5, 1.0e-9);
+  EXPECT_NEAR(simple_pure_pursuit::applyOvertakeSpeedCap(
+                  4.0, std::optional<double>{retained->speed_caps.front()}),
+              0.5, 1.0e-9);
+}
+
+TEST(OvertakeOverrideContract,
+     SpeedOnlyV2TimeoutRetainsCapWithoutLateralTrajectory) {
+  simple_pure_pursuit::OvertakeSpeedOnlyFailClosedLatch latch;
+  const auto valid_v2 = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 11.0F, 0.0F, 2.0F, 43.0F, 0.4F});
+  ASSERT_TRUE(valid_v2.has_value());
+  latch.observeValid(valid_v2.value());
+
+  // timeout中に新しいpayloadが無くても、v2だけは縦capを保持する。
+  const auto &retained = latch.retained();
+  ASSERT_TRUE(retained.has_value());
+  EXPECT_TRUE(retained->lateral_offsets.empty());
+  ASSERT_EQ(retained->speed_caps.size(), 1U);
+  EXPECT_NEAR(retained->speed_caps.front(), static_cast<double>(0.4F),
+              1.0e-9);
+  EXPECT_NEAR(simple_pure_pursuit::applyOvertakeSpeedCap(
+                  4.0, std::optional<double>{retained->speed_caps.front()}),
+              static_cast<double>(0.4F), 1.0e-9);
+}
+
+TEST(OvertakeOverrideContract, V1AndExplicitInactiveClearSpeedOnlyLatch) {
+  simple_pure_pursuit::OvertakeSpeedOnlyFailClosedLatch latch;
+  const auto valid_v2 = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 11.0F, 0.0F, 2.0F, 42.0F, 0.5F});
+  ASSERT_TRUE(valid_v2.has_value());
+  latch.observeValid(valid_v2.value());
+
+  const auto v1 = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 7.0F, 1.0F, 0.3F, 2.0F, 1.0F, 43.0F});
+  ASSERT_TRUE(v1.has_value());
+  latch.observeValid(v1.value());
+  EXPECT_FALSE(latch.retained().has_value());
+
+  latch.observeValid(valid_v2.value());
+  const auto inactive = simple_pure_pursuit::parseOvertakeOverrideContract(
+      {1.0F, 0.0F, 0.0F, 1.0F, 44.0F});
+  ASSERT_TRUE(inactive.has_value());
+  latch.observeValid(inactive.value());
+  EXPECT_FALSE(latch.retained().has_value());
+}
 
 TEST(Lookahead, SpeedBasedDistanceMatchesExistingFormula) {
   simple_pure_pursuit::LookaheadParams params;
@@ -224,19 +347,37 @@ TEST(LongitudinalOverride, ImmediateSpeedCapRequestsBrakingInSameCycle) {
   EXPECT_LT(acceleration_mps2, 0.0);
 }
 
-TEST(HorizonContract, MatchingAbortRecoverySolverHorizonIsUsable) {
+TEST(HorizonContract, UnauthorizedAbortRecoverySolverHorizonIsRejected) {
   const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
       true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
       true, "solver_prediction", 7, 42U);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_not_authorized");
+}
+
+TEST(HorizonContract, MandatoryAbortRecoverySolverHorizonIsUsable) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 42U, true, true, true, true);
 
   EXPECT_TRUE(result.usable);
   EXPECT_EQ(result.reason, "fresh");
 }
 
+TEST(HorizonContract, AuthorizedButNonMandatoryAbortRecoveryIsRejected) {
+  const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
+      true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
+      true, "solver_prediction", 7, 42U, true, true, false, false);
+
+  EXPECT_FALSE(result.usable);
+  EXPECT_EQ(result.reason, "mpc_horizon_abort_not_mandatory");
+}
+
 TEST(HorizonContract, MismatchedGenerationFallsBackFromMpcHorizon) {
   const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
       true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
-      true, "solver_prediction", 7, 41U);
+      true, "solver_prediction", 7, 41U, true, true, true, true);
 
   EXPECT_FALSE(result.usable);
   EXPECT_EQ(result.reason, "mpc_horizon_contract_generation_mismatch");
@@ -263,7 +404,7 @@ TEST(HorizonContract, InactiveOverrideRejectsNonzeroSolverContract) {
 TEST(HorizonContract, StampMismatchFallsBackFromMpcHorizon) {
   const auto result = simple_pure_pursuit::evaluateMpcHorizonContract(
       true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
-      false, "solver_prediction", 7, 42U);
+      false, "solver_prediction", 7, 42U, true, true, true, true);
 
   EXPECT_FALSE(result.usable);
   EXPECT_EQ(result.reason, "mpc_horizon_contract_stamp_mismatch");
@@ -272,13 +413,13 @@ TEST(HorizonContract, StampMismatchFallsBackFromMpcHorizon) {
 TEST(HorizonContract, SourceModeAndStalenessAreRejected) {
   const auto source = simple_pure_pursuit::evaluateMpcHorizonContract(
       true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
-      true, "neutral_reference", 7, 42U);
+      true, "neutral_reference", 7, 42U, true, true, true, true);
   const auto mode = simple_pure_pursuit::evaluateMpcHorizonContract(
       true, true, 7, 42U, true, std::optional<double>{10.0}, 10.1, 0.5,
-      true, "solver_prediction", 6, 42U);
+      true, "solver_prediction", 6, 42U, true, true, true, true);
   const auto stale = simple_pure_pursuit::evaluateMpcHorizonContract(
       true, true, 7, 42U, true, std::optional<double>{9.0}, 10.1, 0.5,
-      true, "solver_prediction", 7, 42U);
+      true, "solver_prediction", 7, 42U, true, true, true, true);
 
   EXPECT_EQ(source.reason, "mpc_horizon_contract_source");
   EXPECT_EQ(mode.reason, "mpc_horizon_contract_mode_mismatch");
@@ -288,7 +429,7 @@ TEST(HorizonContract, SourceModeAndStalenessAreRejected) {
 TEST(HorizonContract, LegacyGenerationAndDisabledStrictGateBehaveSafely) {
   const auto legacy = simple_pure_pursuit::evaluateMpcHorizonContract(
       true, true, 7, 0U, true, std::optional<double>{10.0}, 10.1, 0.5,
-      true, "solver_prediction", 7, 0U);
+      true, "solver_prediction", 7, 0U, true, true, true, true);
   const auto disabled = simple_pure_pursuit::evaluateMpcHorizonContract(
       false, true, 7, 42U, false, std::nullopt, 10.1, 0.5,
       false, "unknown", 0, 0U);

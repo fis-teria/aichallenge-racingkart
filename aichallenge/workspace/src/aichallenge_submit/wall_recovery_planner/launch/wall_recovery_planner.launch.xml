@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="param_file" default="$(find-pkg-share wall_recovery_planner)/config/wall_recovery_planner.param.yaml"/>
+  <arg name="wall_recovery_enabled" default="false"/>
+  <arg name="input_pitstop_condition" default="/aichallenge/pitstop/condition"/>
+  <arg name="input_kinematics" default="/delay_aware_mpc/localization/kinematic_state"/>
+  <arg name="input_reference_trajectory" default="/planning/scenario_planning/trajectory"/>
+  <arg name="input_control_cmd" default="/control/command/control_cmd"/>
+  <arg name="input_recovery_permit" default="/wall_recovery/permit"/>
+  <arg name="output_candidate_trajectory" default="/wall_recovery/candidate_trajectory"/>
+  <arg name="output_trajectory" default="/wall_recovery/trajectory"/>
+  <arg name="output_status" default="/wall_recovery/status"/>
+  <arg name="output_debug" default="/wall_recovery/debug"/>
+
+  <node pkg="wall_recovery_planner" exec="wall_recovery_planner_node"
+        name="wall_recovery_planner_node" output="screen">
+    <param from="$(var param_file)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="wall_recovery_enabled" value="$(var wall_recovery_enabled)"/>
+    <remap from="input/pitstop_condition" to="$(var input_pitstop_condition)"/>
+    <remap from="input/kinematics" to="$(var input_kinematics)"/>
+    <remap from="input/reference_trajectory" to="$(var input_reference_trajectory)"/>
+    <remap from="input/control_cmd" to="$(var input_control_cmd)"/>
+    <remap from="input/recovery_permit" to="$(var input_recovery_permit)"/>
+    <remap from="output/candidate_trajectory" to="$(var output_candidate_trajectory)"/>
+    <remap from="output/trajectory" to="$(var output_trajectory)"/>
+    <remap from="output/status" to="$(var output_status)"/>
+    <remap from="output/debug" to="$(var output_debug)"/>
+  </node>
+</launch>

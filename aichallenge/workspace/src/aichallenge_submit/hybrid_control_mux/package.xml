@@ -12,6 +12,7 @@
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>autoware_auto_control_msgs</depend>
+  <depend>multi_purpose_mpc_ros_msgs</depend>
 
   <test_depend>ament_cmake_pytest</test_depend>
 

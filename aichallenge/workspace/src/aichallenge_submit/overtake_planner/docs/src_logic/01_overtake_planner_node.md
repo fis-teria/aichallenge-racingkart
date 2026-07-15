@@ -122,11 +122,12 @@ else
 `PlannerOutput` を `Float32MultiArray` に変換します。
 
 ```text
-[valid, mode_id, n, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1]]
+v1 lateral: [1, mode_id!=0, n>0, d[0], ..., d[n-1], v_ref[0], ..., v_ref[n-1], 1, generation]
+v2 speed-only: [1, mode_id!=0, 0, 2, generation, speed_cap_mps]
+explicit inactive: [1, 0, 0, 1, generation]
 ```
 
-`active_override=false` のときは `n=0` です。
-下流MPCはこの状態を「overrideなし」と扱います。
+`active_override=false` でも速度guardが有効なら `n=0` のv2を出し、下流は横方向baselineを維持したまま全horizonへ `speed_cap_mps` を適用します。明示inactiveだけがclearです。v2受理後のmalformed payloadまたはtimeoutでは、下流MPC/PPは横軌道を保持せず最後の有効speed capだけをfail-closedで維持します。v1 lateral overrideのmalformed/timeout clear動作は変えません。
 
 ## `updateAttemptId()`
 

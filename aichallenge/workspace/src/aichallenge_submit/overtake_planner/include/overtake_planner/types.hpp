@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <vector>
@@ -181,6 +182,8 @@ struct BlockedInfo {
   bool future_corner_side_by_side{false};
   bool future_outer_wall_risk{false};
   bool future_yield_required{false};
+  // strictなparallel接近で後方へ譲る間は、相手dへ横切らず現在dを保持する。
+  bool parallel_yield_hold_lateral{false};
   bool future_parallel_interaction{false};
   double future_delta_s{std::numeric_limits<double>::infinity()};
   double future_delta_d{0.0};
@@ -204,6 +207,10 @@ struct BlockedInfo {
   bool pass_right_candidate_feasible{false};
   // 復帰ゲートが閉じている間はRECOVERY候補を中心線へ動かさず、現在横位置を保持する。
   bool reentry_hold_active{false};
+  // NaNなら従来のreentry_hold_v_max_mpsを使う。MPC
+  // solve遅延だけの短時間holdは、
+  // SafetyEvaluatorを通した現d保持候補に限って別の低速capを指定する。
+  double reentry_hold_speed_cap_mps{std::numeric_limits<double>::quiet_NaN()};
   double pass_gap_required_m{0.0};
   double corner_abs_curvature{0.0};
   bool straight_overtake_start_allowed{true};
@@ -242,6 +249,16 @@ struct MpcHealthStatus {
   int infeasible_count{0};
   double solve_time_ms{std::numeric_limits<double>::quiet_NaN()};
   double age_sec{std::numeric_limits<double>::infinity()};
+  // /mpc/speed_profile_debugの新規受信ごとにNodeが増やす。planner
+  // timer周期ではない。
+  std::uint64_t sample_sequence{0U};
+};
+
+enum class ReentryMpcHealthState {
+  HEALTHY = 0,
+  TRANSIENT_LATENCY = 1,
+  UNHEALTHY = 2,
+  STALE = 3,
 };
 
 struct ReentryInputStatus {
@@ -252,7 +269,14 @@ struct ReentryInputStatus {
   // collectOpponents()から除外された近接他車が無いこと。falseは未評価車両あり。
   bool all_observed_opponents_included{false};
   bool reference_valid{false};
+  // mpc_healthyは通常ライン復帰を直ちに許せる健康状態。latency warningだけは
+  // sample単位のhysteresisでTRANSIENT_LATENCYへ分離し、CBF/stale/infeasibleは
+  // hard fail-safeとして扱う。
   bool mpc_healthy{false};
+  bool mpc_health_fresh{false};
+  bool mpc_hard_failure{false};
+  bool mpc_latency_warning{false};
+  std::uint64_t mpc_health_sample_sequence{0U};
 };
 
 struct ReentryGateResult {
@@ -348,6 +372,9 @@ struct PlannerConfig {
   double slow_front_exception_speed_mps{1.0};
   double slow_front_exception_distance_m{8.0};
   int slow_front_exception_required_cycles{3};
+  // 0以下ならslow front例外で曲率gateを開かない。有限の正値を設定しても
+  // permission、候補SafetyEvaluator、壁/CBFの制約は迂回しない。
+  double slow_front_exception_max_start_curvature_m_inv{0.0};
   bool slow_obstacle_chain_enabled{true};
   double slow_obstacle_chain_distance_m{12.0};
   double large_lateral_error_threshold_m{0.60};
@@ -370,6 +397,12 @@ struct PlannerConfig {
   double reentry_evaluation_horizon_sec{4.0};
   double reentry_v2x_snapshot_stale_time_sec{0.50};
   double reentry_hold_v_max_mps{0.50};
+  // MPC
+  // solve遅延だけの時は、SafetyEvaluatorを通した現d保持に限りこのcapを使う。
+  // stale/infeasible/CBF制約は常にreentry_hold_v_max_mps以下へ閉じる。
+  double reentry_mpc_degraded_hold_v_max_mps{3.0};
+  int reentry_mpc_unhealthy_enter_samples{2};
+  int reentry_mpc_healthy_release_samples{3};
   bool reentry_require_mpc_health{true};
   double left_offset_m{0.70};
   double right_offset_m{-0.70};
@@ -407,6 +440,9 @@ struct PlannerConfig {
   double high_speed_curve_lateral_hold_release_curvature_m_inv{0.025};
   bool speed_only_fallback_enabled{true};
   double speed_only_fallback_v_max_mps{1.0};
+  // 追越不可区間で安全に通常ラインへ戻れる時だけ使うレース用cap。
+  // SAFE_STOP、衝突、wall/MPC healthなどのfail-safe capとは分離する。
+  double normal_recovery_speed_only_v_max_mps{10.0};
   double opponent_collision_fallback_v_max_mps{0.5};
   bool side_by_side_leader_priority_enabled{true};
   double side_by_side_leader_priority_enter_s_m{1.0};
@@ -447,7 +483,20 @@ struct PlannerOutput {
   std::vector<double> speed_caps;
   BlockedInfo blocked_info{};
   std::string reason{};
+  // 横軌道と縦速度capは別契約でpublishできる。active_overrideは横列が
+  // SafetyEvaluatorを通った時だけtrueにし、横列を作れないfail-closed時も
+  // longitudinal_speed_cap_activeで安全側の減速要求を下流へ届ける。
   bool active_override{false};
+  bool longitudinal_speed_cap_active{false};
+  // Solver prediction horizonをPure Pursuitへ渡してよい横マヌーバの意図。
+  // NONEは横override自体を否定しない。通常復帰などは通常trajectoryへ
+  // 明示offsetを重ねられるが、solverが逸脱したpredictionは採用しない。
+  enum class SolverHorizonIntent {
+    NONE = 0,
+    MANEUVER_AUTHORIZED = 1,
+    MANDATORY_AVOIDANCE = 2,
+  };
+  SolverHorizonIntent solver_horizon_intent{SolverHorizonIntent::NONE};
   double target_lateral_offset_m{0.0};
   double min_cbf_h{std::numeric_limits<double>::quiet_NaN()};
   double cbf_slack{0.0};
@@ -479,8 +528,7 @@ struct PlannerOutput {
       std::numeric_limits<double>::quiet_NaN()};
   double maneuver_latch_full_offset_end_s_m{
       std::numeric_limits<double>::quiet_NaN()};
-  double maneuver_latch_merge_end_s_m{
-      std::numeric_limits<double>::quiet_NaN()};
+  double maneuver_latch_merge_end_s_m{std::numeric_limits<double>::quiet_NaN()};
   double applied_speed_cap_mps{std::numeric_limits<double>::quiet_NaN()};
   std::string speed_cap_reason{};
   double wall_soft_margin_m{std::numeric_limits<double>::quiet_NaN()};

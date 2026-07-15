@@ -9,7 +9,14 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/AckermannControlBoostCommand.msg"
   "msg/BorderCells.msg"
   "msg/PathConstraints.msg"
+  "msg/RecoveryControlCommand.msg"
+  "msg/RecoveryPermit.msg"
+  "msg/RecoveryStatus.msg"
+  "msg/RecoveryTrajectory.msg"
+  "msg/SafetyStopStatus.msg"
   DEPENDENCIES autoware_auto_control_msgs
+               autoware_auto_planning_msgs
+               std_msgs
 )
 
 ament_auto_package()

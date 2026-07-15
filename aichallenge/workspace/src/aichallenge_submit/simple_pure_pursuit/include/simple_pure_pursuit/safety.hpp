@@ -47,7 +47,11 @@ inline HorizonContractResult evaluateMpcHorizonContract(
     std::uint32_t override_generation, bool metadata_received,
     std::optional<double> metadata_receive_sec, double now_sec,
     double max_age_sec, bool stamp_matches, const std::string &source,
-    int contract_mode_id, std::uint32_t contract_generation) {
+    int contract_mode_id, std::uint32_t contract_generation,
+    bool override_solver_horizon_authorized = false,
+    bool contract_solver_horizon_authorized = false,
+    bool override_mandatory_lateral_avoidance = false,
+    bool contract_mandatory_lateral_avoidance = false) {
   HorizonContractResult result;
   if (!required) {
     result.usable = true;
@@ -74,6 +78,10 @@ inline HorizonContractResult evaluateMpcHorizonContract(
     result.reason = "fresh";
     return result;
   }
+  if (!override_solver_horizon_authorized) {
+    result.reason = "mpc_horizon_not_authorized";
+    return result;
+  }
   if (source != "solver_prediction") {
     result.reason = "mpc_horizon_contract_source";
     return result;
@@ -85,6 +93,16 @@ inline HorizonContractResult evaluateMpcHorizonContract(
   if (override_generation == 0U ||
       contract_generation != override_generation) {
     result.reason = "mpc_horizon_contract_generation_mismatch";
+    return result;
+  }
+  if (!contract_solver_horizon_authorized) {
+    result.reason = "mpc_horizon_not_authorized";
+    return result;
+  }
+  if (override_mode_id == 7 &&
+      (!override_mandatory_lateral_avoidance ||
+       !contract_mandatory_lateral_avoidance)) {
+    result.reason = "mpc_horizon_abort_not_mandatory";
     return result;
   }
   result.usable = true;

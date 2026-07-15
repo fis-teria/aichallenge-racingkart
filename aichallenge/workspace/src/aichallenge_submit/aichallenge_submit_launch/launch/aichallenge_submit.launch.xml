@@ -4,7 +4,7 @@
   <arg name="use_sim_time"/>
   <arg name="sensor_model"/>
   <arg name="launch_vehicle_interface"/>
-  <arg name="control_method" default="hybrid_delay_aware_mpc"/>
+  <arg name="control_method" default="pure_pursuit_mpc_horizon"/>
 
   <log message="The arguments for aichallenge_submit_launch."/>
   <log message=" - simulation: $(var simulation)"/>

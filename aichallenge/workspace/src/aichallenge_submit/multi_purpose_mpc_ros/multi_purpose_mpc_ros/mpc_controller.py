@@ -57,6 +57,7 @@ from multi_purpose_mpc_ros.speed_profile import (
     combine_speed_profile,
 )
 from multi_purpose_mpc_ros.overtake_contract import (
+    OvertakeSpeedOnlyFailClosedLatch,
     parse_overtake_reference_override,
 )
 from multi_purpose_mpc_ros_msgs.msg import AckermannControlBoostCommand, PathConstraints, BorderCells
@@ -611,6 +612,7 @@ class MPCController(Node):
         self._path_constraints = None
         self._last_overtake_override_sec: Optional[float] = None
         self._overtake_override_timeout_sec = 0.50
+        self._overtake_speed_only_latch = OvertakeSpeedOnlyFailClosedLatch()
 
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
@@ -993,26 +995,47 @@ class MPCController(Node):
         data = list(msg.data)
         override = parse_overtake_reference_override(data)
         if override is None:
+            retained = self._overtake_speed_only_latch.retained()
+            if retained is not None:
+                self.get_logger().warn(
+                    "Malformed overtake override payload; retaining last "
+                    "validated speed-only cap",
+                    throttle_duration_sec=1.0)
+                self._apply_overtake_reference_override(retained)
+                self._last_overtake_override_sec = None
+                return
             self.get_logger().warn(
                 "Malformed overtake override payload",
                 throttle_duration_sec=1.0)
             self._mpc.clear_overtake_reference_override()
             self._last_overtake_override_sec = None
             return
-        if override.point_count <= 0 or override.mode_id == 0:
+        if override.point_count <= 0 and not override.speed_only:
+            self._overtake_speed_only_latch.clear()
             self._mpc.clear_overtake_reference_override()
             self._last_overtake_override_sec = self.get_clock().now().nanoseconds / 1e9
             return
+        self._overtake_speed_only_latch.observe_valid(override)
+        self._apply_overtake_reference_override(override)
+        self._last_overtake_override_sec = self.get_clock().now().nanoseconds / 1e9
+
+    def _apply_overtake_reference_override(self, override) -> None:
         self._mpc.set_overtake_reference_override(
             override.lateral_offsets, override.speed_caps, override.mode_id,
-            override.generation)
-        self._last_overtake_override_sec = self.get_clock().now().nanoseconds / 1e9
+            override.generation, speed_only=override.speed_only,
+            solver_horizon_authorized=override.solver_horizon_authorized,
+            mandatory_lateral_avoidance=override.mandatory_lateral_avoidance)
 
     def _clear_stale_overtake_override(self, now) -> None:
         if self._last_overtake_override_sec is None:
             return
         now_sec = now.nanoseconds / 1e9
         if now_sec - self._last_overtake_override_sec > self._overtake_override_timeout_sec:
+            retained = self._overtake_speed_only_latch.retained()
+            if retained is not None:
+                self._apply_overtake_reference_override(retained)
+                self._last_overtake_override_sec = None
+                return
             self._mpc.clear_overtake_reference_override()
             self._last_overtake_override_sec = None
 
@@ -1135,10 +1158,12 @@ class MPCController(Node):
             trajectory.points.append(point)
 
         if len(trajectory.points) >= 2:
-            mode_id, generation = getattr(
-                self._mpc, "current_prediction_contract", (0, 0))
+            mode_id, generation, authorized, mandatory_avoidance = getattr(
+                self._mpc, "current_prediction_contract",
+                (0, 0, False, False))
             self._publish_predicted_horizon(
-                trajectory, "solver_prediction", int(mode_id), int(generation))
+                trajectory, "solver_prediction", int(mode_id), int(generation),
+                bool(authorized), bool(mandatory_avoidance))
         else:
             empty_trajectory = Trajectory()
             empty_trajectory.header = trajectory.header
@@ -1146,7 +1171,8 @@ class MPCController(Node):
 
     def _publish_predicted_horizon(
             self, trajectory: Trajectory, source: str, mode_id: int = 0,
-            generation: int = 0) -> None:
+            generation: int = 0, solver_horizon_authorized: bool = False,
+            mandatory_lateral_avoidance: bool = False) -> None:
         """Publish each horizon with immutable solver/override provenance."""
         self._last_mpc_predicted_horizon_source = source
         self._mpc_pred_trajectory_pub.publish(trajectory)
@@ -1154,12 +1180,14 @@ class MPCController(Node):
         stamp = trajectory.header.stamp
         contract.data = json.dumps(
             {
-                "contract_version": 1,
+                "contract_version": 2,
                 "horizon_stamp_sec": int(stamp.sec),
                 "horizon_stamp_nanosec": int(stamp.nanosec),
                 "source": source,
                 "mode_id": int(mode_id),
                 "override_generation": int(generation),
+                "solver_horizon_authorized": bool(solver_horizon_authorized),
+                "mandatory_lateral_avoidance": bool(mandatory_lateral_avoidance),
             },
             separators=(",", ":"),
         )
@@ -1167,16 +1195,47 @@ class MPCController(Node):
 
     def _should_publish_overtake_prediction_horizon(self) -> bool:
         mode_id = int(getattr(self._mpc, "overtake_mode_id", 0) or 0)
-        return mode_id in OVERTAKE_HORIZON_MODE_IDS
+        authorized = bool(
+            getattr(self._mpc, "overtake_solver_horizon_authorized", False))
+        mandatory_avoidance = bool(
+            getattr(self._mpc, "overtake_mandatory_lateral_avoidance", False))
+        return self._is_solver_horizon_authorized(
+            mode_id, authorized, mandatory_avoidance)
 
     def _should_publish_solver_prediction_horizon(self) -> bool:
         mode = str(
             self._mpc_cfg.predicted_horizon_publish_mode or "overtake_or_neutral"
         ).strip().lower()
+        mode_id, _, authorized, mandatory_avoidance = getattr(
+            self._mpc, "current_prediction_contract", (0, 0, False, False))
         if mode == "solver_when_solved":
-            return True
-        mode_id, _ = getattr(self._mpc, "current_prediction_contract", (0, 0))
-        return int(mode_id) in OVERTAKE_HORIZON_MODE_IDS
+            # Baseline solver output is an explicitly requested debug/control
+            # mode. Any active planner lateral override still needs the same
+            # authorization gate as overtake_or_neutral.
+            return int(mode_id) == 0 or self._is_solver_horizon_authorized(
+                int(mode_id), bool(authorized), bool(mandatory_avoidance))
+        return self._is_solver_horizon_authorized(
+            int(mode_id), bool(authorized), bool(mandatory_avoidance))
+
+    @staticmethod
+    def _is_solver_horizon_authorized(
+            mode_id: int, authorized: bool,
+            mandatory_lateral_avoidance: bool) -> bool:
+        """Allow solver horizons only for a current planner authorization.
+
+        Normal ABORT_RECOVERY is deliberately excluded. A mode-7 solver horizon
+        is allowed only when the planner's same-generation v3 contract marked it
+        as mandatory collision avoidance.
+        """
+        if not authorized or mode_id not in OVERTAKE_HORIZON_MODE_IDS:
+            return False
+        if mode_id == ABORT_RECOVERY_MODE_ID:
+            return mandatory_lateral_avoidance
+        return mode_id in {
+            OVERTAKE_LEFT_MODE_ID,
+            OVERTAKE_RIGHT_MODE_ID,
+            MERGE_BACK_MODE_ID,
+        }
 
     def _fixed_neutral_horizon_enabled(self) -> bool:
         mode = str(

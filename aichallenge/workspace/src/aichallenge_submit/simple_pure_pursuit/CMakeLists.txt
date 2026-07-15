@@ -17,7 +17,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_lookahead test/test_lookahead.cpp)
   target_include_directories(test_lookahead PUBLIC include)
-  ament_target_dependencies(test_lookahead autoware_auto_planning_msgs geometry_msgs tf2)
+  ament_target_dependencies(test_lookahead autoware_auto_planning_msgs geometry_msgs multi_purpose_mpc_ros_msgs tf2)
 endif()
 
 ament_auto_package()

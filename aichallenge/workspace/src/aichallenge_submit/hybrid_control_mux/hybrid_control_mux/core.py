@@ -21,6 +21,7 @@ class HybridMuxConfig:
     use_pure_pursuit_on_mpc_cmd_timeout: bool = True
     use_pure_pursuit_on_mpc_health_timeout: bool = False
     use_mpc_on_pure_pursuit_cmd_timeout: bool = False
+    recovery_max_duration_sec: float = 3.0
 
 
 @dataclass
@@ -29,6 +30,27 @@ class MuxDecision:
     fallback_active: bool
     reason: str
     solved_cycles: int
+
+
+@dataclass
+class RecoveryMuxState:
+    enabled: bool = False
+    status_state: str = "inactive"
+    status_fresh: bool = False
+    command_fresh: bool = False
+    permit_fresh: bool = False
+    external_safety_ok: bool = False
+    input_complete: bool = False
+    trajectory_valid: bool = False
+    trajectory_safe: bool = False
+    stop_required: bool = False
+    handoff_ready: bool = False
+    recovery_allowed: bool = False
+    handoff_allowed: bool = False
+    ids_match: bool = False
+    trajectory_header_match: bool = False
+    command_valid: bool = False
+    command_forward_only: bool = False
 
 
 @dataclass
@@ -136,6 +158,8 @@ class HybridMuxCore:
         self.fallback_enter_time_sec = 0.0
         self.solved_cycles = 0
         self.last_reason = "startup"
+        self.recovery_episode_latched = False
+        self.recovery_enter_time_sec = 0.0
 
     def update(
         self,
@@ -144,7 +168,16 @@ class HybridMuxCore:
         mpc_cmd_fresh: bool,
         pure_pursuit_cmd_fresh: bool,
         mpc_health: MpcHealth,
+        recovery: RecoveryMuxState | None = None,
     ) -> MuxDecision:
+        recovery_decision = self._update_recovery(
+            now_sec,
+            recovery=recovery,
+            normal_cmd_fresh=mpc_cmd_fresh or pure_pursuit_cmd_fresh,
+        )
+        if recovery_decision is not None:
+            return recovery_decision
+
         if self._primary_source() == "pure_pursuit":
             return self._update_pure_pursuit_primary(
                 now_sec,
@@ -201,6 +234,68 @@ class HybridMuxCore:
             return MuxDecision("pure_pursuit", True, self.last_reason, self.solved_cycles)
 
         return MuxDecision("stop", False, "no_fresh_control_cmd", self.solved_cycles)
+
+    def _update_recovery(
+        self,
+        now_sec: float,
+        *,
+        recovery: RecoveryMuxState | None,
+        normal_cmd_fresh: bool,
+    ) -> MuxDecision | None:
+        if recovery is None or not recovery.enabled:
+            self.recovery_episode_latched = False
+            return None
+
+        state = str(recovery.status_state or "inactive").strip().lower()
+        starts_episode = state in {"stop_hold", "active", "handoff_verify"}
+        if recovery.status_fresh and starts_episode and not self.recovery_episode_latched:
+            self.recovery_episode_latched = True
+            self.recovery_enter_time_sec = now_sec
+
+        if not self.recovery_episode_latched:
+            return None
+
+        if not recovery.status_fresh:
+            return MuxDecision("stop", True, "recovery_status_timeout", self.solved_cycles)
+        if not recovery.external_safety_ok:
+            return MuxDecision("stop", True, "recovery_external_safety_stop", self.solved_cycles)
+
+        release_ready = (
+            state == "complete"
+            and recovery.handoff_ready
+            and recovery.permit_fresh
+            and recovery.handoff_allowed
+            and normal_cmd_fresh
+        )
+        if release_ready:
+            self.recovery_episode_latched = False
+            self.last_reason = "recovery_handoff_complete"
+            return None
+
+        if state in {"stop_hold", "abort", "lockout"}:
+            return MuxDecision("stop", True, f"recovery_{state}", self.solved_cycles)
+
+        if state in {"active", "handoff_verify"}:
+            if now_sec - self.recovery_enter_time_sec > self.config.recovery_max_duration_sec:
+                return MuxDecision("stop", True, "recovery_duration_timeout", self.solved_cycles)
+            gates_ok = (
+                recovery.command_fresh
+                and recovery.permit_fresh
+                and recovery.input_complete
+                and recovery.trajectory_valid
+                and recovery.trajectory_safe
+                and not recovery.stop_required
+                and recovery.recovery_allowed
+                and recovery.ids_match
+                and recovery.trajectory_header_match
+                and recovery.command_valid
+                and recovery.command_forward_only
+            )
+            if gates_ok:
+                return MuxDecision("recovery", True, f"recovery_{state}", self.solved_cycles)
+            return MuxDecision("stop", True, "recovery_gate_not_satisfied", self.solved_cycles)
+
+        return MuxDecision("stop", True, f"recovery_latched_{state}", self.solved_cycles)
 
     def _update_pure_pursuit_primary(
         self,

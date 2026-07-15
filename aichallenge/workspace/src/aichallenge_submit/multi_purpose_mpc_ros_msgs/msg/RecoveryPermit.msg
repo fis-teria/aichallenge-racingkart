@@ -1,0 +1,12 @@
+std_msgs/Header header
+uint32 attempt_id
+uint32 trajectory_generation
+bool recovery_allowed
+bool handoff_allowed
+bool safe_stop_active
+bool cbf_safe
+bool opponents_fresh
+bool reference_fresh
+float32 min_wall_clearance_m
+float32 min_vehicle_margin_m
+string reason

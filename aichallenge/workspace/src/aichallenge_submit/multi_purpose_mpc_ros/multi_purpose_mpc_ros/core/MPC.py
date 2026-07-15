@@ -70,15 +70,18 @@ class MPC:
         self.current_prediction_trajectory = None
         # Solver成功時に使ったoverride契約。publish側がcallbackの最新値を
         # 読み直すと、予測点列との世代がずれるためここへ固定する。
-        self.current_prediction_contract = (0, 0)
-        self._last_problem_prediction_contract = (0, 0)
+        self.current_prediction_contract = (0, 0, False, False)
+        self._last_problem_prediction_contract = (0, 0, False, False)
         self.infeasibility_counter = 0
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
         self.overtake_lateral_offsets = None
         self.overtake_speed_caps = None
+        self.overtake_speed_only = False
         self.overtake_mode_id = 0
         self.overtake_override_generation = 0
+        self.overtake_solver_horizon_authorized = False
+        self.overtake_mandatory_lateral_avoidance = False
         self._overtake_override_lock = threading.Lock()
         self.optimizer = osqp.OSQP()
 
@@ -104,7 +107,8 @@ class MPC:
 
     def set_overtake_reference_override(
             self, lateral_offsets=None, speed_caps=None, mode_id=0,
-            generation=0):
+            generation=0, speed_only=False, solver_horizon_authorized=False,
+            mandatory_lateral_avoidance=False):
         lateral_offsets_array = (
             None if lateral_offsets is None
             else np.asarray(lateral_offsets, dtype=float).copy())
@@ -114,23 +118,33 @@ class MPC:
         with self._overtake_override_lock:
             self.overtake_mode_id = int(mode_id)
             self.overtake_override_generation = max(0, int(generation))
+            self.overtake_speed_only = bool(speed_only)
+            self.overtake_solver_horizon_authorized = bool(
+                solver_horizon_authorized)
+            self.overtake_mandatory_lateral_avoidance = bool(
+                mandatory_lateral_avoidance)
             self.overtake_lateral_offsets = lateral_offsets_array
             self.overtake_speed_caps = speed_caps_array
 
     def clear_overtake_reference_override(self):
-        self.set_overtake_reference_override(None, None, 0, 0)
+        self.set_overtake_reference_override(None, None, 0, 0, False, False,
+                                             False)
 
     def _overtake_override_snapshot(self):
         with self._overtake_override_lock:
             mode_id = self.overtake_mode_id
             generation = self.overtake_override_generation
+            speed_only = self.overtake_speed_only
+            solver_horizon_authorized = self.overtake_solver_horizon_authorized
+            mandatory_lateral_avoidance = self.overtake_mandatory_lateral_avoidance
             lateral_offsets = (
                 None if self.overtake_lateral_offsets is None
                 else np.array(self.overtake_lateral_offsets, dtype=float, copy=True))
             speed_caps = (
                 None if self.overtake_speed_caps is None
                 else np.array(self.overtake_speed_caps, dtype=float, copy=True))
-        return mode_id, generation, lateral_offsets, speed_caps
+        return (mode_id, generation, lateral_offsets, speed_caps, speed_only,
+                solver_horizon_authorized, mandatory_lateral_avoidance)
 
     def update_Q(self, Q: np.ndarray):
         self.Q = Q
@@ -171,7 +185,7 @@ class MPC:
             self, n_points: int, ub: np.ndarray, lb: np.ndarray,
             lateral_offsets=_OVERTAKE_OVERRIDE_UNSET):
         if lateral_offsets is _OVERTAKE_OVERRIDE_UNSET:
-            _, _, offsets, _ = self._overtake_override_snapshot()
+            _, _, offsets, _, _, _, _ = self._overtake_override_snapshot()
         else:
             offsets = lateral_offsets
         if offsets is None or offsets.size == 0:
@@ -181,12 +195,19 @@ class MPC:
         reference[:count] = offsets[:count]
         return np.clip(reference, lb, ub)
 
-    def _overtake_speed_cap(self, index: int, speed_caps=_OVERTAKE_OVERRIDE_UNSET):
+    def _overtake_speed_cap(
+            self, index: int, speed_caps=_OVERTAKE_OVERRIDE_UNSET,
+            speed_only=_OVERTAKE_OVERRIDE_UNSET):
         if speed_caps is _OVERTAKE_OVERRIDE_UNSET:
-            _, _, _, speed_caps = self._overtake_override_snapshot()
-        if speed_caps is None or index >= speed_caps.size:
+            _, _, _, speed_caps, speed_only, _, _ = self._overtake_override_snapshot()
+        if speed_caps is None:
             return None
-        cap = float(speed_caps[index])
+        if speed_only is _OVERTAKE_OVERRIDE_UNSET:
+            speed_only = False
+        cap_index = 0 if speed_only else index
+        if cap_index >= speed_caps.size:
+            return None
+        cap = float(speed_caps[cap_index])
         if not np.isfinite(cap) or cap <= 0.0:
             return None
         return cap
@@ -218,10 +239,15 @@ class MPC:
         xmin_dyn = np.kron(np.ones(N + 1), xmin)
         xmax_dyn = np.kron(np.ones(N + 1), xmax)
         umax_dyn = np.kron(np.ones(N), umax)
-        overtake_mode_id, overtake_generation, overtake_lateral_offsets, overtake_speed_caps = (
+        (overtake_mode_id, overtake_generation, overtake_lateral_offsets,
+         overtake_speed_caps, overtake_speed_only,
+         overtake_solver_horizon_authorized,
+         overtake_mandatory_lateral_avoidance) = (
             self._overtake_override_snapshot())
         self._last_problem_prediction_contract = (
-            int(overtake_mode_id), int(overtake_generation))
+            int(overtake_mode_id), int(overtake_generation),
+            bool(overtake_solver_horizon_authorized),
+            bool(overtake_mandatory_lateral_avoidance))
 
         # Get curvature predictions
         kappa_pred = np.tan(np.append(np.array(self.current_control[3::self.nu]), self.current_control[-1])) / self.model.length
@@ -239,7 +265,8 @@ class MPC:
 
             # Clip reference velocity
             v_ref = np.clip(current_waypoint.v_ref, self.input_constraints['umin'][0], self.input_constraints['umax'][0])
-            overtake_cap = self._overtake_speed_cap(n, overtake_speed_caps)
+            overtake_cap = self._overtake_speed_cap(
+                n, overtake_speed_caps, overtake_speed_only)
             if overtake_cap is not None:
                 v_ref = min(v_ref, overtake_cap)
 

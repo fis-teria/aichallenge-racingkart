@@ -237,13 +237,24 @@ s9,335,1,true
 | `v_passthrough_mps` | `50.0` | `50.0` | plannerが速度を制限しない時の実質上限。 |
 | `follow_speed_margin_mps` | `0.20` | `0.20` | FOLLOW時に前走車よりどれだけ遅くするか。 |
 | `yield_speed_margin_mps` | `0.60` | `0.60` | YIELD/SIDE_BY_SIDEで相手よりどれだけ遅くするか。 |
-| `yield_min_speed_cap_mps` | `0.50` | `0.50` | YIELD/SIDE_BY_SIDEで相手速度基準capが低くなりすぎる時の下限。PurePursuit fallback時の約2km/h低速化を上げたい時に調整する。 |
+| `yield_min_speed_cap_mps` | `0.50` | `0.50` | YIELD/SIDE_BY_SIDEで相手速度基準capが低くなりすぎる時の下限。通常走行の最高速度ではない。これを高くすると接近並走で後方へ譲れず、CBF safe-stopへ入りやすくなる。 |
 | `corner_follow_speed_margin_mps` | `0.20` | `0.20` | コーナー譲り時に相手よりどれだけ遅くするか。 |
 | `side_by_side_speed_cap_mps` | `7.5` | `7.5` | SIDE_BY_SIDE_KEEPの通常速度上限。 |
 | `corner_yield_v_max_mps` | `8.0` | `3.0` | コーナー譲り時の最大速度。 |
 | `recovery_v_max_mps` | `8.5` | `8.5` | RECOVERY中の速度上限。 |
 | `wall_margin_recovery_v_max_mps` | `8.5` | `8.5` | 安全コリドー外から復帰する時の速度上限。 |
 | `safe_stop_v_mps` | `0.20` | `0.20` | SAFE_STOP候補の速度上限。0ではなく小さい正値を使う。 |
+
+### 復帰ゲートとMPC health
+
+| パラメータ | 現在値 | fallback | 変更すると何が変わるか |
+|---|---:|---:|---|
+| `reentry_hold_v_max_mps` | `0.50` | `0.50` | CBF衝突、MPC infeasible、入力stale時のhard hold上限。上げない。 |
+| `reentry_mpc_degraded_hold_v_max_mps` | `3.0` | `3.0` | solve timeだけの一過性遅延で、全相手へ安全評価済みの現在d保持を出す時だけの上限。中心線へは復帰しない。 |
+| `reentry_mpc_unhealthy_enter_samples` | `2` | `2` | 新しいMPC debug sampleでlatency warningが連続した時、hard holdへ落とす回数。planner周期では数えない。 |
+| `reentry_mpc_healthy_release_samples` | `3` | `3` | hard/transient holdから復帰判定を再開するために必要な連続healthy MPC sample数。既存`reentry_safe_cycles`も別途必要。 |
+
+`safety_ellipse_*`、`min_ellipse_h`、V2X/ego/MPC debug stale、MPC infeasibleはこのdegraded holdの対象外です。常にhard holdまたは既存watchdogへfail-closedします。
 
 ## SafetyEvaluator
 
@@ -302,6 +313,7 @@ upper_d = d_max_m - min_wall_margin_m
 |---|---:|---:|---|
 | `speed_only_fallback_enabled` | `true` | `true` | unsafeな横方向候補やSAFE_STOP infeasible時に速度only fallbackを出す。 |
 | `speed_only_fallback_v_max_mps` | `1.0` | `1.0` | 速度only fallbackの上限。 |
+| `normal_recovery_speed_only_v_max_mps` | `10.0` | `10.0` | 追越禁止区間でreentry gateが許可した通常復帰だけに使うレース速度上限。SAFE_STOP、接触、壁余裕、MPC healthのfail-safe capは変更しない。 |
 | `opponent_collision_fallback_v_max_mps` | `0.5` | `0.5` | `opponent_collision` で横候補がunsafeな場合だけ使う低速上限。後続車や優先権なしの膠着ではこちらを使う。 |
 | `side_by_side_leader_priority_enabled` | `true` | `true` | 横並び/並走で自車が明確に先行している場合だけ、SAFE_STOP要求と `opponent_collision` fallbackの低速固定を緩める。安全評価自体は無効化しない。 |
 | `side_by_side_leader_priority_enter_s_m` | `1.0` | `1.0` | 先行車扱いへ入るために必要な、相手が後方にいる距離。`side_delta_s <= -enter` または `parallel_side_delta_s <= -enter` で入る。 |

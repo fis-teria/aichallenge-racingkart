@@ -2,6 +2,7 @@
 #define SIMPLE_PURE_PURSUIT_HPP_
 
 #include "simple_pure_pursuit/lookahead.hpp"
+#include "simple_pure_pursuit/overtake_override_contract.hpp"
 #include "simple_pure_pursuit/safety.hpp"
 
 #include <autoware_auto_control_msgs/msg/ackermann_control_command.hpp>
@@ -13,6 +14,8 @@
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <multi_purpose_mpc_ros_msgs/msg/recovery_control_command.hpp>
+#include <multi_purpose_mpc_ros_msgs/msg/recovery_status.hpp>
 #include <memory>
 #include <nav_msgs/msg/odometry.hpp>
 #include <optional>
@@ -32,6 +35,8 @@ using autoware_auto_vehicle_msgs::msg::SteeringReport;
 using geometry_msgs::msg::PointStamped;
 using geometry_msgs::msg::Pose;
 using geometry_msgs::msg::Twist;
+using multi_purpose_mpc_ros_msgs::msg::RecoveryControlCommand;
+using multi_purpose_mpc_ros_msgs::msg::RecoveryStatus;
 using nav_msgs::msg::Odometry;
 using std_msgs::msg::Float32MultiArray;
 using std_msgs::msg::String;
@@ -48,10 +53,12 @@ public:
   rclcpp::Subscription<Float32MultiArray>::SharedPtr sub_overtake_override_;
   rclcpp::Subscription<SteeringReport>::SharedPtr sub_steering_status_;
   rclcpp::Subscription<String>::SharedPtr sub_mpc_health_;
+  rclcpp::Subscription<RecoveryStatus>::SharedPtr sub_recovery_status_;
 
   // publishers
   rclcpp::Publisher<AckermannControlCommand>::SharedPtr pub_cmd_;
   rclcpp::Publisher<AckermannControlCommand>::SharedPtr pub_raw_cmd_;
+  rclcpp::Publisher<RecoveryControlCommand>::SharedPtr pub_recovery_cmd_;
   rclcpp::Publisher<PointStamped>::SharedPtr pub_lookahead_point_;
   rclcpp::Publisher<String>::SharedPtr pub_debug_;
 
@@ -68,6 +75,8 @@ public:
   std::optional<double> last_mpc_predicted_horizon_contract_receive_sec_;
   std::optional<double> last_steering_status_receive_sec_;
   std::optional<double> last_mpc_health_receive_sec_;
+  std::optional<double> last_recovery_status_receive_sec_;
+  RecoveryStatus::SharedPtr recovery_status_;
   double latest_steering_status_rad_{0.0};
   std::string mpc_health_status_{"missing"};
   int mpc_health_infeasible_count_{0};
@@ -78,6 +87,8 @@ public:
   std::string mpc_horizon_contract_source_{"unknown"};
   int mpc_horizon_contract_mode_id_{0};
   std::uint32_t mpc_horizon_contract_generation_{0};
+  bool mpc_horizon_contract_solver_horizon_authorized_{false};
+  bool mpc_horizon_contract_mandatory_lateral_avoidance_{false};
 
   // pure pursuit parameters
   const double wheel_base_;
@@ -102,6 +113,8 @@ public:
   const double max_mpc_health_age_sec_;
   const bool require_matching_overtake_horizon_contract_;
   const bool use_overtake_reference_override_;
+  const bool recovery_mode_;
+  const double recovery_status_timeout_sec_;
   const double overtake_override_timeout_sec_;
   const bool curvature_adaptive_lookahead_enabled_;
   const double curvature_lookahead_min_distance_;
@@ -122,11 +135,16 @@ public:
   bool has_smoothed_lookahead_distance_{false};
   double smoothed_lookahead_distance_{0.0};
   bool overtake_override_active_{false};
+  bool overtake_lateral_override_active_{false};
+  bool overtake_speed_only_active_{false};
+  bool overtake_solver_horizon_authorized_{false};
+  bool overtake_mandatory_lateral_avoidance_{false};
   int overtake_mode_id_{0};
   std::uint32_t overtake_override_generation_{0};
   double last_overtake_override_sec_{-1.0e9};
   std::vector<double> overtake_lateral_offsets_;
   std::vector<double> overtake_speed_caps_;
+  OvertakeSpeedOnlyFailClosedLatch overtake_speed_only_latch_;
 
 private:
   struct ControlPosePrediction {
@@ -223,8 +241,16 @@ private:
   void onOvertakeOverride(const Float32MultiArray::SharedPtr msg);
   void onMpcPredictedHorizonContract(const String::SharedPtr msg);
   void onMpcHealth(const String::SharedPtr msg);
+  void onRecoveryStatus(const RecoveryStatus::SharedPtr msg);
   double mpcHealthAgeSec(double now_sec) const;
+  bool recoveryStatusAllowsControl(double now_sec,
+                                   const Trajectory &control_trajectory,
+                                   std::string *reason) const;
+  void publishRecoveryControlCommand(const AckermannControlCommand &cmd,
+                                     const Trajectory &control_trajectory);
   void clearOvertakeOverride();
+  void applyReceivedOvertakeOverride(const OvertakeOverrideContract &contract);
+  bool hasLatchedSpeedOnlyCap() const;
   bool applyOvertakeOverride(Trajectory &trajectory,
                              std::size_t nearest_traj_point_idx,
                              double now_sec);

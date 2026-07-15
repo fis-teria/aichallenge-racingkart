@@ -1,4 +1,5 @@
 #include "overtake_planner/overtake_planner_core.hpp"
+#include "overtake_planner/reference_override_contract.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
@@ -40,7 +41,8 @@ double yawFromQuaternion(const geometry_msgs::msg::Quaternion &q) {
 
 // 入力: パッケージ名とCSVパス。
 // 出力: 絶対パス。csv_pathが絶対パスならそのまま返す。
-// 処理概要: launch/configでは短い相対パスを書けるよう、package share配下へ解決する。
+// 処理概要: launch/configでは短い相対パスを書けるよう、package
+// share配下へ解決する。
 std::string resolveReferencePath(const std::string &package_name,
                                  const std::string &csv_path) {
   // 相対パスならパッケージshare配下として解決し、configから短いパスで指定できるようにする。
@@ -95,10 +97,9 @@ std::optional<std::int64_t> parseInt64(const std::string &value) {
 std::optional<bool> parseBool(const std::string &value) {
   std::string lowered;
   lowered.reserve(value.size());
-  std::transform(value.begin(), value.end(), std::back_inserter(lowered),
-                 [](unsigned char c) {
-                   return static_cast<char>(std::tolower(c));
-                 });
+  std::transform(
+      value.begin(), value.end(), std::back_inserter(lowered),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   if (lowered == "true" || lowered == "1" || lowered == "yes" ||
       lowered == "allow") {
     return true;
@@ -150,7 +151,8 @@ std::optional<double> jsonNumberField(const std::string &json,
 
 // 入力: ROS_DOMAIN_ID文字列。
 // 出力: 対応するV2X vehicle_id(dN)。変換できなければnullopt。
-// 処理概要: 複数台評価でdomain_idと車両IDを揃え、自車を相手車リストから除外する。
+// 処理概要:
+// 複数台評価でdomain_idと車両IDを揃え、自車を相手車リストから除外する。
 std::optional<std::string> vehicleIdFromRosDomainId(const char *raw_domain_id) {
   // AI Challengeのdomain番号とV2X vehicle_id(d1,d2,...)を対応させる。
   if (raw_domain_id == nullptr || raw_domain_id[0] == '\0') {
@@ -169,7 +171,8 @@ std::optional<std::string> vehicleIdFromRosDomainId(const char *raw_domain_id) {
 
 // 入力: パラメータで指定された自車IDとlogger。
 // 出力: 実際に使う自車vehicle_id。
-// 処理概要: 明示IDを優先し、auto時はROS_DOMAIN_IDから推定、失敗時はd1へフォールバックする。
+// 処理概要:
+// 明示IDを優先し、auto時はROS_DOMAIN_IDから推定、失敗時はd1へフォールバックする。
 std::string resolveOwnVehicleId(const std::string &configured_id,
                                 const rclcpp::Logger &logger) {
   // own_vehicle_id=autoならROS_DOMAIN_IDから自車IDを推定し、V2X上の自車を除外する。
@@ -204,8 +207,7 @@ invalidLongitudinalSafetyConfig(const PlannerConfig &config) {
     return "horizon_dt_sec must be finite and > 0";
   }
   if (!std::isfinite(config.max_brake_decel_mps2) ||
-      config.max_brake_decel_mps2 <= 0.0 ||
-      config.max_brake_decel_mps2 > 1.5) {
+      config.max_brake_decel_mps2 <= 0.0 || config.max_brake_decel_mps2 > 1.5) {
     return "max_brake_decel_mps2 must be finite and in (0, 1.5]";
   }
   if (!std::isfinite(config.longitudinal_response_delay_sec) ||
@@ -228,6 +230,10 @@ invalidLongitudinalSafetyConfig(const PlannerConfig &config) {
        config.reentry_hold_v_max_mps <= 0.0)) {
     return "invalid reentry gate safety parameter";
   }
+  if (!std::isfinite(config.normal_recovery_speed_only_v_max_mps) ||
+      config.normal_recovery_speed_only_v_max_mps <= 0.0) {
+    return "normal_recovery_speed_only_v_max_mps must be finite and > 0";
+  }
   return std::nullopt;
 }
 
@@ -237,7 +243,8 @@ class OvertakePlannerNode : public rclcpp::Node {
 public:
   // 入力: ROS parameter、参照CSV、V2X/odom/MPC health topic。
   // 出力: publisher/subscriber/timerを持つROS node。
-  // 処理概要: PlannerConfigとFrenetFrameを初期化し、周期timerでcoreを更新する実行環境を作る。
+  // 処理概要:
+  // PlannerConfigとFrenetFrameを初期化し、周期timerでcoreを更新する実行環境を作る。
   OvertakePlannerNode() : Node("overtake_planner_node") {
     // 参照線、V2Xフィルタ、候補生成/安全評価のしきい値をROSパラメータから読む。
     const auto reference_package = declare_parameter<std::string>(
@@ -257,7 +264,8 @@ public:
 
     PlannerConfig config;
     config.enabled = declare_parameter<bool>("enabled", true);
-    const int horizon_points_param = declare_parameter<int>("horizon_points", 20);
+    const int horizon_points_param =
+        declare_parameter<int>("horizon_points", 20);
     config.horizon_points = horizon_points_param > 0
                                 ? static_cast<std::size_t>(horizon_points_param)
                                 : 0U;
@@ -344,6 +352,9 @@ public:
         declare_parameter<double>("slow_front_exception_distance_m", 8.0);
     config.slow_front_exception_required_cycles =
         declare_parameter<int>("slow_front_exception_required_cycles", 3);
+    config.slow_front_exception_max_start_curvature_m_inv =
+        declare_parameter<double>(
+            "slow_front_exception_max_start_curvature_m_inv", 0.0);
     config.slow_obstacle_chain_enabled =
         declare_parameter<bool>("slow_obstacle_chain_enabled", true);
     config.slow_obstacle_chain_distance_m =
@@ -377,10 +388,16 @@ public:
         declare_parameter<double>("reentry_min_safety_margin_h", 0.30);
     config.reentry_evaluation_horizon_sec =
         declare_parameter<double>("reentry_evaluation_horizon_sec", 4.0);
-    config.reentry_v2x_snapshot_stale_time_sec = declare_parameter<double>(
-        "reentry_v2x_snapshot_stale_time_sec", 0.50);
+    config.reentry_v2x_snapshot_stale_time_sec =
+        declare_parameter<double>("reentry_v2x_snapshot_stale_time_sec", 0.50);
     config.reentry_hold_v_max_mps =
         declare_parameter<double>("reentry_hold_v_max_mps", 0.50);
+    config.reentry_mpc_degraded_hold_v_max_mps =
+        declare_parameter<double>("reentry_mpc_degraded_hold_v_max_mps", 3.0);
+    config.reentry_mpc_unhealthy_enter_samples =
+        declare_parameter<int>("reentry_mpc_unhealthy_enter_samples", 2);
+    config.reentry_mpc_healthy_release_samples =
+        declare_parameter<int>("reentry_mpc_healthy_release_samples", 3);
     config.reentry_require_mpc_health =
         declare_parameter<bool>("reentry_require_mpc_health", true);
     config.left_offset_m = declare_parameter<double>("left_offset_m", 0.70);
@@ -395,9 +412,8 @@ public:
     config.localized_avoidance_full_offset_before_target_m =
         declare_parameter<double>(
             "localized_avoidance_full_offset_before_target_m", 2.0);
-    config.localized_avoidance_hold_after_target_m =
-        declare_parameter<double>("localized_avoidance_hold_after_target_m",
-                                  5.0);
+    config.localized_avoidance_hold_after_target_m = declare_parameter<double>(
+        "localized_avoidance_hold_after_target_m", 5.0);
     config.localized_avoidance_merge_distance_m =
         declare_parameter<double>("localized_avoidance_merge_distance_m", 8.0);
     config.maneuver_latch_min_hold_sec =
@@ -415,8 +431,8 @@ public:
     config.wall_margin_recovery_v_max_mps =
         declare_parameter<double>("wall_margin_recovery_v_max_mps", 8.5);
     config.outside_corridor_recovery_centering_time_sec =
-        declare_parameter<double>("outside_corridor_recovery_centering_time_sec",
-                                  1.0);
+        declare_parameter<double>(
+            "outside_corridor_recovery_centering_time_sec", 1.0);
     config.v_passthrough_mps =
         declare_parameter<double>("v_passthrough_mps", 50.0);
     config.d_min_m = declare_parameter<double>("d_min_m", -1.35);
@@ -454,16 +470,18 @@ public:
         declare_parameter<bool>("speed_only_fallback_enabled", true);
     config.speed_only_fallback_v_max_mps =
         declare_parameter<double>("speed_only_fallback_v_max_mps", 1.0);
-    config.opponent_collision_fallback_v_max_mps = declare_parameter<double>(
-        "opponent_collision_fallback_v_max_mps", 0.5);
+    config.normal_recovery_speed_only_v_max_mps =
+        declare_parameter<double>("normal_recovery_speed_only_v_max_mps", 10.0);
+    config.opponent_collision_fallback_v_max_mps =
+        declare_parameter<double>("opponent_collision_fallback_v_max_mps", 0.5);
     config.side_by_side_leader_priority_enabled =
         declare_parameter<bool>("side_by_side_leader_priority_enabled", true);
     config.side_by_side_leader_priority_enter_s_m = declare_parameter<double>(
         "side_by_side_leader_priority_enter_s_m", 1.0);
     config.side_by_side_leader_priority_release_s_m = declare_parameter<double>(
         "side_by_side_leader_priority_release_s_m", 0.3);
-    config.side_by_side_leader_priority_hold_sec = declare_parameter<double>(
-        "side_by_side_leader_priority_hold_sec", 1.0);
+    config.side_by_side_leader_priority_hold_sec =
+        declare_parameter<double>("side_by_side_leader_priority_hold_sec", 1.0);
     config.side_by_side_leader_priority_v_max_mps = declare_parameter<double>(
         "side_by_side_leader_priority_v_max_mps", 3.0);
     config.wall_risk_speed_guard_enabled =
@@ -681,7 +699,8 @@ private:
 
   // 入力: 参照線frameとROS parameter群。
   // 出力: section safety rule配列。
-  // 処理概要: YAMLの区間安全設定を読み、wp指定またはs指定を統一したs区間へ変換する。
+  // 処理概要:
+  // YAMLの区間安全設定を読み、wp指定またはs指定を統一したs区間へ変換する。
   std::vector<SectionSafetyRule>
   readSectionSafetyRules(const FrenetFrame &frame) {
     const auto names = declare_parameter<std::vector<std::string>>(
@@ -700,7 +719,8 @@ private:
         "section_safety_end_wp", std::vector<std::int64_t>{});
 
     // 処理ブロック: 複数parameter配列の最大長を基準にrule候補を走査する。
-    // 設計意図: 一部の配列だけ短い設定でも、欠損を警告しながら有効なruleだけ採用する。
+    // 設計意図:
+    // 一部の配列だけ短い設定でも、欠損を警告しながら有効なruleだけ採用する。
     const std::size_t n = std::max(
         {names.size(), profiles.size(), role_policies.size(), start_s.size(),
          end_s.size(), start_wp.size(), end_wp.size()});
@@ -745,7 +765,8 @@ private:
 
   // 入力: 参照線frame、CSVのパッケージ名、CSVパス。
   // 出力: 追い越し許可区間rule配列。
-  // 処理概要: name,start_wp,end_wp,allow_overtake形式のCSVを読み、wp範囲をs範囲へ変換する。
+  // 処理概要:
+  // name,start_wp,end_wp,allow_overtake形式のCSVを読み、wp範囲をs範囲へ変換する。
   std::vector<OvertakePermissionRule>
   readOvertakePermissionRules(const FrenetFrame &frame,
                               const std::string &package_name,
@@ -767,7 +788,8 @@ private:
     std::string line;
     std::size_t line_number = 0;
     // 処理ブロック: CSVを1行ずつ検証してrule化する。
-    // 設計意図: 1行が壊れていてもnode全体は止めず、残りの有効な区間設定で走れるようにする。
+    // 設計意図:
+    // 1行が壊れていてもnode全体は止めず、残りの有効な区間設定で走れるようにする。
     while (std::getline(file, line)) {
       ++line_number;
       line = trim(line);
@@ -810,8 +832,9 @@ private:
       }
 
       OvertakePermissionRule rule;
-      rule.name = columns[0].empty() ? "permission_" + std::to_string(rules.size())
-                                     : columns[0];
+      rule.name = columns[0].empty()
+                      ? "permission_" + std::to_string(rules.size())
+                      : columns[0];
       rule.s_start_m = start_s.value();
       rule.s_end_m = end_s.value();
       rule.allow_overtake = allow_overtake.value();
@@ -825,7 +848,8 @@ private:
 
   // 入力: /mpc/speed_profile_debug のJSON文字列。
   // 出力: なし。内部mpc_health_と受信時刻を更新する。
-  // 処理概要: MPC infeasible回数とsolve timeを抜き出し、planner側の速度guardへ渡す。
+  // 処理概要: MPC infeasible回数とsolve
+  // timeを抜き出し、planner側の速度guardへ渡す。
   void updateMpcHealth(const std_msgs::msg::String &msg) {
     MpcHealthStatus health;
     const auto infeasible_count =
@@ -843,13 +867,19 @@ private:
     health.solve_time_ms =
         solve_time_ms.value_or(std::numeric_limits<double>::quiet_NaN());
     health.age_sec = 0.0;
+    health.sample_sequence =
+        mpc_health_sample_sequence_ == std::numeric_limits<std::uint64_t>::max()
+            ? 1U
+            : mpc_health_sample_sequence_ + 1U;
+    mpc_health_sample_sequence_ = health.sample_sequence;
     mpc_health_ = health;
     last_mpc_health_sec_ = now().seconds();
   }
 
   // 入力: 現在時刻[sec]。
   // 出力: age_secを更新したMpcHealthStatus。
-  // 処理概要: health情報が無い場合はinvalidにし、古さはcore側のguard条件で判断できるようにする。
+  // 処理概要:
+  // health情報が無い場合はinvalidにし、古さはcore側のguard条件で判断できるようにする。
   MpcHealthStatus currentMpcHealth(double now_sec) const {
     auto health = mpc_health_;
     if (!health.valid || !last_mpc_health_sec_.has_value()) {
@@ -862,7 +892,8 @@ private:
 
   // 入力: V2X車両位置配列。
   // 出力: なし。車両IDごとの最新位置と推定速度をsamples_へ保存する。
-  // 処理概要: 位置差分からvx/vyを推定し、ジャンプが大きい時は速度を0として外れ値を抑える。
+  // 処理概要:
+  // 位置差分からvx/vyを推定し、ジャンプが大きい時は速度を0として外れ値を抑える。
   void updateOpponents(const v2x_msgs::msg::V2XVehiclePositionArray &msg) {
     // 各車両の最新位置を保持し、ジャンプが小さい時だけ速度推定を更新する。
     for (const auto &vehicle : msg.vehicles) {
@@ -894,7 +925,8 @@ private:
 
   // 入力: 現在の自車状態と時刻。
   // 出力: coreへ渡すOpponentState配列。
-  // 処理概要: 自車ID、近すぎる点、無効な自車状態を除外し、相手車をFrenet座標つきへ変換する。
+  // 処理概要:
+  // 自車ID、近すぎる点、無効な自車状態を除外し、相手車をFrenet座標つきへ変換する。
   std::vector<OpponentState> collectOpponents(const EgoState &ego,
                                               double now_sec) const {
     // 自車IDと近すぎる点を除外し、Frenet座標つきの他車リストへ変換する。
@@ -929,7 +961,8 @@ private:
 
   // 入力: 現在時刻、自車、最新MPC health。
   // 出力: 通常ライン復帰ゲートが使える入力完全性。
-  // 処理概要: V2Xの受信停止を「相手なし」と扱わず、既知の他車の古いstampもfail-closedにする。
+  // 処理概要:
+  // V2Xの受信停止を「相手なし」と扱わず、既知の他車の古いstampもfail-closedにする。
   ReentryInputStatus reentryInputStatus(double now_sec, const EgoState &ego,
                                         const MpcHealthStatus &health) const {
     ReentryInputStatus status;
@@ -939,10 +972,9 @@ private:
              now_sec - stamp_sec <= timeout_sec;
     };
     status.ego_fresh = ego.valid && fresh(ego.stamp_sec, ego_stale_time_sec_);
-    status.v2x_snapshot_fresh =
-        last_v2x_snapshot_sec_.has_value() &&
-        fresh(last_v2x_snapshot_sec_.value(),
-              reentry_v2x_snapshot_stale_time_sec_);
+    status.v2x_snapshot_fresh = last_v2x_snapshot_sec_.has_value() &&
+                                fresh(last_v2x_snapshot_sec_.value(),
+                                      reentry_v2x_snapshot_stale_time_sec_);
     status.all_observed_opponents_fresh = true;
     status.all_observed_opponents_included = true;
     for (const auto &item : samples_) {
@@ -959,62 +991,44 @@ private:
       }
       // 通常のplanner入力では近すぎる観測をself重複対策として除外する。
       // 復帰だけは未評価の相手を安全とみなさず、gateを閉じる。
-      if (std::hypot(sample.x - ego.x, sample.y - ego.y) <
-          ignore_near_ego_m_) {
+      if (std::hypot(sample.x - ego.x, sample.y - ego.y) < ignore_near_ego_m_) {
         status.all_observed_opponents_included = false;
       }
     }
     status.reference_valid = !frame_.empty();
-    status.mpc_healthy = health.valid &&
-                        health.infeasible_count <
-                            mpc_health_infeasible_count_threshold_ &&
-                        (!std::isfinite(health.solve_time_ms) ||
-                         health.solve_time_ms < mpc_health_solve_time_warn_ms_) &&
-                        fresh(now_sec - health.age_sec,
-                              mpc_health_stale_time_sec_);
+    status.mpc_health_fresh = health.valid && fresh(now_sec - health.age_sec,
+                                                    mpc_health_stale_time_sec_);
+    status.mpc_hard_failure =
+        status.mpc_health_fresh &&
+        health.infeasible_count >= mpc_health_infeasible_count_threshold_;
+    status.mpc_latency_warning =
+        status.mpc_health_fresh && !status.mpc_hard_failure &&
+        std::isfinite(health.solve_time_ms) &&
+        health.solve_time_ms >= mpc_health_solve_time_warn_ms_;
+    status.mpc_healthy = status.mpc_health_fresh && !status.mpc_hard_failure &&
+                         !status.mpc_latency_warning;
+    status.mpc_health_sample_sequence = health.sample_sequence;
     return status;
   }
 
   // 入力: coreが返したPlannerOutput。
   // 出力: /overtake/reference_override へFloat32MultiArrayをpublishする。
-  // 処理概要: MPC側の簡易プロトコルに合わせ、mode、点数、横offset列、速度列を1配列に詰める。
+  // 処理概要: 安全な横列がある時は従来v1、横列なしの速度guard時はv2へ詰める。
   void publishOverride(const PlannerOutput &output) {
-    // Float32MultiArrayの簡易プロトコル: [valid, mode_id, n, d[0..n),
-    // v_ref[0..n), contract_version, override_generation]。
-    // 末尾2要素を読まない旧consumerは従来どおり先頭部分だけを使える。
     std_msgs::msg::Float32MultiArray msg;
-    const int mode_id = static_cast<int>(output.mode);
-    const int n = output.active_override
-                      ? static_cast<int>(output.lateral_offsets.size())
-                      : 0;
-    const bool payload_changed =
-        output.active_override != last_override_active_ ||
-        mode_id != last_override_mode_id_ ||
-        output.lateral_offsets != last_override_lateral_offsets_ ||
-        output.speed_caps != last_override_speed_caps_;
+    auto wire_payload =
+        makeReferenceOverrideWirePayload(output, override_generation_);
+    const bool payload_changed = !referenceOverrideWirePayloadSemanticallyEqual(
+        wire_payload, last_override_wire_payload_);
     if (payload_changed) {
       // Float32が全整数を正確に保持できる範囲に収める。0はinactive/旧形式用。
-      override_generation_ = override_generation_ >= 16777215U
-                                 ? 1U
-                                 : override_generation_ + 1U;
-      last_override_active_ = output.active_override;
-      last_override_mode_id_ = mode_id;
-      last_override_lateral_offsets_ = output.lateral_offsets;
-      last_override_speed_caps_ = output.speed_caps;
+      override_generation_ =
+          override_generation_ >= 16777215U ? 1U : override_generation_ + 1U;
+      wire_payload =
+          makeReferenceOverrideWirePayload(output, override_generation_);
     }
-    msg.data.push_back(1.0F);
-    msg.data.push_back(static_cast<float>(mode_id));
-    msg.data.push_back(static_cast<float>(n));
-    for (int i = 0; i < n; ++i) {
-      msg.data.push_back(static_cast<float>(
-          output.lateral_offsets[static_cast<std::size_t>(i)]));
-    }
-    for (int i = 0; i < n; ++i) {
-      msg.data.push_back(
-          static_cast<float>(output.speed_caps[static_cast<std::size_t>(i)]));
-    }
-    msg.data.push_back(1.0F);  // contract_version
-    msg.data.push_back(static_cast<float>(override_generation_));
+    last_override_wire_payload_ = wire_payload;
+    msg.data = wire_payload.data;
     override_pub_->publish(msg);
   }
 
@@ -1079,6 +1093,9 @@ private:
         << "\"parallel_side_candidate\":"
         << (output.blocked_info.parallel_side_candidate ? "true" : "false")
         << ","
+        << "\"parallel_yield_hold_lateral\":"
+        << (output.blocked_info.parallel_yield_hold_lateral ? "true" : "false")
+        << ","
         << "\"corner_abs_curvature\":"
         << jsonNumber(output.blocked_info.corner_abs_curvature) << ","
         << "\"straight_overtake_start_allowed\":"
@@ -1090,8 +1107,7 @@ private:
         << "\"overtake_start_gate_reason\":\""
         << output.blocked_info.overtake_start_gate_reason << "\","
         << "\"overtake_permission_allowed\":"
-        << (output.blocked_info.overtake_permission_allowed ? "true"
-                                                            : "false")
+        << (output.blocked_info.overtake_permission_allowed ? "true" : "false")
         << ","
         << "\"overtake_permission_section_name\":\""
         << output.blocked_info.overtake_permission_section_name << "\","
@@ -1101,8 +1117,7 @@ private:
         << (output.blocked_info.front_vehicle_low_speed ? "true" : "false")
         << ","
         << "\"slow_front_exception_active\":"
-        << (output.blocked_info.slow_front_exception_active ? "true"
-                                                            : "false")
+        << (output.blocked_info.slow_front_exception_active ? "true" : "false")
         << ","
         << "\"slow_front_exception_count\":"
         << output.blocked_info.slow_front_exception_count << ","
@@ -1126,7 +1141,7 @@ private:
         << jsonNumber(output.blocked_info.stationary_front_ttc_sec) << ","
         << "\"stationary_front_brake_feasible\":"
         << (output.blocked_info.stationary_front_brake_feasible ? "true"
-                                                                 : "false")
+                                                                : "false")
         << ","
         << "\"stationary_front_required_brake_distance_m\":"
         << jsonNumber(
@@ -1225,8 +1240,8 @@ private:
         << "\"leader_priority_latched\":"
         << (output.blocked_info.leader_priority_latched ? "true" : "false")
         << ","
-        << "\"leader_priority_id\":\""
-        << output.blocked_info.leader_priority_id << "\","
+        << "\"leader_priority_id\":\"" << output.blocked_info.leader_priority_id
+        << "\","
         << "\"leader_priority_delta_s\":"
         << jsonNumber(output.blocked_info.leader_priority_delta_s) << ","
         << "\"leader_priority_reason\":\""
@@ -1243,25 +1258,23 @@ private:
         << (output.blocked_info.can_pass_right ? "true" : "false") << ","
         << "\"pass_left_candidate_generated\":"
         << (output.blocked_info.pass_left_candidate_generated ? "true"
-                                                               : "false")
+                                                              : "false")
         << ","
         << "\"pass_right_candidate_generated\":"
         << (output.blocked_info.pass_right_candidate_generated ? "true"
-                                                                : "false")
+                                                               : "false")
         << ","
         << "\"pass_left_candidate_feasible\":"
-        << (output.blocked_info.pass_left_candidate_feasible ? "true"
-                                                              : "false")
+        << (output.blocked_info.pass_left_candidate_feasible ? "true" : "false")
         << ","
         << "\"pass_right_candidate_feasible\":"
         << (output.blocked_info.pass_right_candidate_feasible ? "true"
-                                                               : "false")
+                                                              : "false")
         << ","
         << "\"pass_gap_required_m\":"
         << jsonNumber(output.blocked_info.pass_gap_required_m) << ","
         << "\"pass_decision_frozen\":"
-        << (output.blocked_info.pass_decision_frozen ? "true" : "false")
-        << ","
+        << (output.blocked_info.pass_decision_frozen ? "true" : "false") << ","
         << "\"pass_decision_freeze_reason\":\""
         << output.blocked_info.pass_decision_freeze_reason << "\","
         << "\"pass_gap_reason\":\"" << output.blocked_info.pass_gap_reason
@@ -1305,8 +1318,7 @@ private:
         << "\"lateral_target_hold_reason\":\""
         << output.lateral_target_hold_reason << "\","
         << "\"published_lateral_safety_rejected\":"
-        << (output.published_lateral_safety_rejected ? "true" : "false")
-        << ","
+        << (output.published_lateral_safety_rejected ? "true" : "false") << ","
         << "\"reentry_requested\":"
         << (output.reentry_gate.requested ? "true" : "false") << ","
         << "\"reentry_permitted\":"
@@ -1318,20 +1330,21 @@ private:
         << "\"reentry_evaluated_opponent_count\":"
         << output.reentry_gate.evaluated_opponent_count << ","
         << "\"reentry_reason\":\"" << output.reentry_gate.reason << "\","
+        << "\"reentry_hold_speed_cap_mps\":"
+        << jsonNumber(output.blocked_info.reentry_hold_speed_cap_mps) << ","
         << "\"reentry_primary_blocker_id\":\""
         << output.reentry_gate.blocking_vehicle_id << "\","
         << "\"reentry_min_safety_margin\":"
         << jsonNumber(output.reentry_gate.min_safety_margin) << ","
-        << "\"reentry_cbf_slack\":"
-        << jsonNumber(output.reentry_gate.cbf_slack) << ","
+        << "\"reentry_cbf_slack\":" << jsonNumber(output.reentry_gate.cbf_slack)
+        << ","
         << "\"reentry_blocking_time_sec\":"
         << jsonNumber(output.reentry_gate.blocking_time_sec) << ","
-        << "\"lateral_profile_mode\":\"" << output.lateral_profile_mode
-        << "\","
+        << "\"lateral_profile_mode\":\"" << output.lateral_profile_mode << "\","
         << "\"maneuver_latch_active\":"
         << (output.maneuver_latch_active ? "true" : "false") << ","
-        << "\"maneuver_latch_target_id\":\""
-        << output.maneuver_latch_target_id << "\","
+        << "\"maneuver_latch_target_id\":\"" << output.maneuver_latch_target_id
+        << "\","
         << "\"maneuver_latch_target_s\":"
         << jsonNumber(output.maneuver_latch_target_s_m) << ","
         << "\"maneuver_latch_avoid_start_s\":"
@@ -1366,6 +1379,8 @@ private:
         << jsonNumber(output.blocked_info.front_delta_s) << ","
         << "\"active_override\":" << (output.active_override ? "true" : "false")
         << ","
+        << "\"solver_horizon_intent\":"
+        << static_cast<int>(output.solver_horizon_intent) << ","
         << "\"abort_reason\":\""
         << (output.mode == BehaviorMode::ABORT_RECOVERY ? output.reason : "")
         << "\","
@@ -1377,7 +1392,8 @@ private:
 
   // 入力: planner coreが返したPlannerOutput。
   // 出力: ログ変化検出用に主要フィールドだけを抜き出したDecisionLogSnapshot。
-  // 処理概要: 巨大な出力全体ではなく、判断の変化に効く値だけを比較できる形に詰め替える。
+  // 処理概要:
+  // 巨大な出力全体ではなく、判断の変化に効く値だけを比較できる形に詰め替える。
   DecisionLogSnapshot
   makeDecisionLogSnapshot(const PlannerOutput &output) const {
     DecisionLogSnapshot snapshot;
@@ -1477,7 +1493,8 @@ private:
 
   // 入力: 1周期分のDecisionLogSnapshot。
   // 出力: autoware.logへ残す価値がある判断イベントならtrue。
-  // 処理概要: FREE_RUN/FASTESTだけの平常周期を抑制し、閉塞/横並び/safe stopなどの文脈を抽出する。
+  // 処理概要: FREE_RUN/FASTESTだけの平常周期を抑制し、閉塞/横並び/safe
+  // stopなどの文脈を抽出する。
   bool isInterestingDecisionEvent(const DecisionLogSnapshot &snapshot) const {
     const bool has_pass_gap_context = !snapshot.pass_gap_reason.empty() &&
                                       snapshot.pass_gap_reason != "no_target";
@@ -1487,13 +1504,11 @@ private:
            snapshot.parallel_side_candidate || snapshot.future_side_by_side ||
            snapshot.future_corner_side_by_side ||
            snapshot.future_yield_required || snapshot.active_override ||
-           snapshot.safe_stop_triggered ||
-           snapshot.start_grace_active ||
+           snapshot.safe_stop_triggered || snapshot.start_grace_active ||
            snapshot.speed_only_fallback_active ||
            snapshot.wall_risk_speed_guard_active ||
            snapshot.mpc_health_speed_guard_active ||
-           snapshot.recovery_speed_guard_active ||
-           snapshot.reentry_requested ||
+           snapshot.recovery_speed_guard_active || snapshot.reentry_requested ||
            snapshot.lateral_target_hold_active ||
            !snapshot.straight_overtake_start_allowed ||
            !snapshot.overtake_permission_allowed ||
@@ -1510,7 +1525,8 @@ private:
 
   // 入力: 現在周期のDecisionLogSnapshot。
   // 出力: 前回との差分としてログ出力すべきならtrue。
-  // 処理概要: 数値は小さな揺れを無視し、状態・理由・対象車両が変わった時だけ記録する。
+  // 処理概要:
+  // 数値は小さな揺れを無視し、状態・理由・対象車両が変わった時だけ記録する。
   bool shouldLogDecisionEvent(const DecisionLogSnapshot &current) const {
     if (!has_decision_log_snapshot_) {
       return isInterestingDecisionEvent(current);
@@ -1618,7 +1634,8 @@ private:
 
   // 入力: planner出力、自車状態、追い越し試行ID。
   // 出力: なし。必要な時だけRCLCPP_INFOで判断ログを出す。
-  // 処理概要: debug topicを見返せない環境でも、mode遷移やsafe stop理由をautoware.logから追えるようにする。
+  // 処理概要: debug topicを見返せない環境でも、mode遷移やsafe
+  // stop理由をautoware.logから追えるようにする。
   void logDecisionEvent(const PlannerOutput &output, const EgoState &ego,
                         std::uint64_t attempt_id) {
     // 毎周期ではなく、判断入力や出力が変わった時だけautoware.logへ要約を残す。
@@ -1702,21 +1719,19 @@ private:
         output.blocked_info.yield_reason.c_str(),
         output.blocked_info.pass_decision_frozen,
         output.blocked_info.pass_decision_freeze_reason.c_str(), ego.frenet.s,
-        ego.frenet.d,
-        output.target_lateral_offset_m, output.min_cbf_h, output.cbf_slack,
-        output.safe_stop_triggered, output.start_grace_active,
+        ego.frenet.d, output.target_lateral_offset_m, output.min_cbf_h,
+        output.cbf_slack, output.safe_stop_triggered, output.start_grace_active,
         output.safe_stop_reason.c_str(), output.safe_stop_reject_reason.c_str(),
         output.safe_stop_trigger_count, output.safe_stop_hold_count,
-        output.safe_stop_release_count,
-        output.safe_stop_release_ready, output.speed_only_fallback_active,
-        output.wall_risk_speed_guard_active,
+        output.safe_stop_release_count, output.safe_stop_release_ready,
+        output.speed_only_fallback_active, output.wall_risk_speed_guard_active,
         output.mpc_health_speed_guard_active,
-        output.recovery_speed_guard_active,
-        output.reentry_gate.requested, output.reentry_gate.permitted,
-        output.reentry_gate.clear_cycles, output.reentry_gate.reason.c_str(),
+        output.recovery_speed_guard_active, output.reentry_gate.requested,
+        output.reentry_gate.permitted, output.reentry_gate.clear_cycles,
+        output.reentry_gate.reason.c_str(),
         output.reentry_gate.blocking_vehicle_id.c_str(),
-        output.speed_cap_reason.c_str(),
-        output.applied_speed_cap_mps, output.active_section.name.c_str(),
+        output.speed_cap_reason.c_str(), output.applied_speed_cap_mps,
+        output.active_section.name.c_str(),
         output.active_section.profile.c_str(),
         output.mpc_health.infeasible_count, output.mpc_health.solve_time_ms,
         output.reason.c_str());
@@ -1724,7 +1739,8 @@ private:
 
   // 入力: ROS timer周期。
   // 出力: override topic、mode topic、debug metrics、必要に応じた判断ログ。
-  // 処理概要: odomをFrenet自車状態へ変換し、相手車収集からcore更新、publishまでを1周期で実行する。
+  // 処理概要:
+  // odomをFrenet自車状態へ変換し、相手車収集からcore更新、publishまでを1周期で実行する。
   void onTimer() {
     // 最新odomを自車状態へ変換し、他車収集 -> コア更新 -> override/debug
     // publishを1周期で行う。
@@ -1770,6 +1786,7 @@ private:
   int mpc_health_infeasible_count_threshold_{1};
   double mpc_health_solve_time_warn_ms_{80.0};
   MpcHealthStatus mpc_health_{};
+  std::uint64_t mpc_health_sample_sequence_{0U};
   std::optional<double> last_mpc_health_sec_;
   std::optional<double> last_v2x_snapshot_sec_;
   BehaviorMode last_mode_{BehaviorMode::FREE_RUN};
@@ -1777,10 +1794,7 @@ private:
   bool has_decision_log_snapshot_{false};
   bool attempt_active_{false};
   std::uint64_t current_attempt_id_{0};
-  bool last_override_active_{false};
-  int last_override_mode_id_{0};
-  std::vector<double> last_override_lateral_offsets_;
-  std::vector<double> last_override_speed_caps_;
+  ReferenceOverrideWirePayload last_override_wire_payload_;
   std::uint32_t override_generation_{0};
 
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr override_pub_;
@@ -1797,7 +1811,8 @@ private:
 
 // 入力: ROS 2プロセス引数。
 // 出力: 終了コード。正常終了時は0。
-// 処理概要: OvertakePlannerNodeを生成してspinし、シャットダウン時にrclcppを閉じる。
+// 処理概要:
+// OvertakePlannerNodeを生成してspinし、シャットダウン時にrclcppを閉じる。
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<overtake_planner::OvertakePlannerNode>());

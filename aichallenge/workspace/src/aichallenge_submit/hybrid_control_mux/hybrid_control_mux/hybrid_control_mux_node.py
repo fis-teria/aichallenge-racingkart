@@ -8,6 +8,12 @@ from typing import Optional
 
 import rclpy
 from autoware_auto_control_msgs.msg import AckermannControlCommand
+from multi_purpose_mpc_ros_msgs.msg import (
+    RecoveryControlCommand,
+    RecoveryPermit,
+    RecoveryStatus,
+    SafetyStopStatus,
+)
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -15,6 +21,7 @@ from hybrid_control_mux.core import (
     HybridMuxConfig,
     HybridMuxCore,
     MpcHealth,
+    RecoveryMuxState,
     SteeringLimitResult,
     SteeringLimiter,
     SteeringLimiterConfig,
@@ -44,6 +51,33 @@ class HybridControlMuxNode(Node):
         )
         self.fallback_decel_min_mps2 = float(
             self.declare_parameter("fallback_decel_min_mps2", -1.5).value
+        )
+        self.recovery_enabled = bool(
+            self.declare_parameter("recovery_enabled", False).value
+        )
+        self.recovery_cmd_timeout_sec = float(
+            self.declare_parameter("recovery_cmd_timeout_sec", 0.15).value
+        )
+        self.recovery_status_timeout_sec = float(
+            self.declare_parameter("recovery_status_timeout_sec", 0.20).value
+        )
+        self.recovery_permit_timeout_sec = float(
+            self.declare_parameter("recovery_permit_timeout_sec", 0.30).value
+        )
+        self.external_safety_timeout_sec = float(
+            self.declare_parameter("external_safety_timeout_sec", 0.20).value
+        )
+        self.require_recovery_external_safety_status = bool(
+            self.declare_parameter("require_recovery_external_safety_status", True).value
+        )
+        self.recovery_speed_mps = float(
+            self.declare_parameter("recovery_speed_mps", 0.7).value
+        )
+        self.recovery_accel_max_mps2 = float(
+            self.declare_parameter("recovery_accel_max_mps2", 0.5).value
+        )
+        self.recovery_decel_min_mps2 = float(
+            self.declare_parameter("recovery_decel_min_mps2", -1.5).value
         )
         self.stop_decel_mps2 = float(self.declare_parameter("stop_decel_mps2", -1.5).value)
         self.debug_publish_period_sec = float(
@@ -76,6 +110,9 @@ class HybridControlMuxNode(Node):
             use_mpc_on_pure_pursuit_cmd_timeout=bool(
                 self.declare_parameter("use_mpc_on_pure_pursuit_cmd_timeout", False).value
             ),
+            recovery_max_duration_sec=float(
+                self.declare_parameter("recovery_max_duration_sec", 3.0).value
+            ),
         )
         self.core = HybridMuxCore(config)
         self.steering_limiter = SteeringLimiter(
@@ -103,6 +140,14 @@ class HybridControlMuxNode(Node):
         self.mpc_cmd_time_sec: Optional[float] = None
         self.pure_pursuit_cmd: Optional[AckermannControlCommand] = None
         self.pure_pursuit_cmd_time_sec: Optional[float] = None
+        self.recovery_cmd: Optional[RecoveryControlCommand] = None
+        self.recovery_cmd_time_sec: Optional[float] = None
+        self.recovery_status: Optional[RecoveryStatus] = None
+        self.recovery_status_time_sec: Optional[float] = None
+        self.recovery_permit: Optional[RecoveryPermit] = None
+        self.recovery_permit_time_sec: Optional[float] = None
+        self.external_safety_status: Optional[SafetyStopStatus] = None
+        self.external_safety_time_sec: Optional[float] = None
         self.mpc_health = MpcHealth()
         self.mpc_health_time_sec: Optional[float] = None
         self.last_debug_publish_sec = -1.0e9
@@ -118,6 +163,30 @@ class HybridControlMuxNode(Node):
             AckermannControlCommand,
             "input/pure_pursuit_control_cmd",
             self.on_pure_pursuit_cmd,
+            1,
+        )
+        self.create_subscription(
+            RecoveryControlCommand,
+            "input/recovery_control_cmd",
+            self.on_recovery_cmd,
+            1,
+        )
+        self.create_subscription(
+            RecoveryStatus,
+            "input/recovery_status",
+            self.on_recovery_status,
+            1,
+        )
+        self.create_subscription(
+            RecoveryPermit,
+            "input/recovery_permit",
+            self.on_recovery_permit,
+            1,
+        )
+        self.create_subscription(
+            SafetyStopStatus,
+            "input/external_safety_status",
+            self.on_external_safety_status,
             1,
         )
         self.create_subscription(String, "input/mpc_health", self.on_mpc_health, 1)
@@ -137,6 +206,22 @@ class HybridControlMuxNode(Node):
     def on_pure_pursuit_cmd(self, msg: AckermannControlCommand) -> None:
         self.pure_pursuit_cmd = msg
         self.pure_pursuit_cmd_time_sec = self.now_sec()
+
+    def on_recovery_cmd(self, msg: RecoveryControlCommand) -> None:
+        self.recovery_cmd = msg
+        self.recovery_cmd_time_sec = self.now_sec()
+
+    def on_recovery_status(self, msg: RecoveryStatus) -> None:
+        self.recovery_status = msg
+        self.recovery_status_time_sec = self.now_sec()
+
+    def on_recovery_permit(self, msg: RecoveryPermit) -> None:
+        self.recovery_permit = msg
+        self.recovery_permit_time_sec = self.now_sec()
+
+    def on_external_safety_status(self, msg: SafetyStopStatus) -> None:
+        self.external_safety_status = msg
+        self.external_safety_time_sec = self.now_sec()
 
     def on_mpc_health(self, msg: String) -> None:
         now_sec = self.now_sec()
@@ -162,6 +247,7 @@ class HybridControlMuxNode(Node):
             self.pure_pursuit_cmd_time_sec, now_sec, self.pure_pursuit_cmd_timeout_sec
         )
         health = self._current_health(now_sec)
+        recovery_state = self._current_recovery_state(now_sec)
 
         if not self.enabled:
             decision_source = "mpc" if mpc_cmd_fresh else "stop"
@@ -174,6 +260,7 @@ class HybridControlMuxNode(Node):
                 mpc_cmd_fresh=mpc_cmd_fresh,
                 pure_pursuit_cmd_fresh=pp_cmd_fresh,
                 mpc_health=health,
+                recovery=recovery_state,
             )
             decision_source = decision.source
             reason = decision.reason
@@ -194,6 +281,7 @@ class HybridControlMuxNode(Node):
             mpc_cmd_fresh=mpc_cmd_fresh,
             pure_pursuit_cmd_fresh=pp_cmd_fresh,
             health=health,
+            recovery_state=recovery_state,
             selected_input_cmd=selected_input_cmd,
             output_cmd=cmd,
             steering_result=steering_result,
@@ -216,6 +304,8 @@ class HybridControlMuxNode(Node):
             return self._stamp(copy.deepcopy(selected_input_cmd), now_sec)
         if source == "pure_pursuit" and selected_input_cmd is not None:
             return self._fallback_command(copy.deepcopy(selected_input_cmd), now_sec)
+        if source == "recovery" and selected_input_cmd is not None:
+            return self._recovery_command(copy.deepcopy(selected_input_cmd), now_sec)
         return self._stop_command(now_sec)
 
     def _selected_input_command(
@@ -225,6 +315,8 @@ class HybridControlMuxNode(Node):
             return self.mpc_cmd
         if source == "pure_pursuit":
             return self.pure_pursuit_cmd
+        if source == "recovery" and self.recovery_cmd is not None:
+            return self.recovery_cmd.command
         return None
 
     def _fallback_command(
@@ -238,6 +330,20 @@ class HybridControlMuxNode(Node):
             cmd.longitudinal.acceleration,
             self.fallback_decel_min_mps2,
             self.fallback_accel_max_mps2,
+        )
+        return cmd
+
+    def _recovery_command(
+        self, cmd: AckermannControlCommand, now_sec: float
+    ) -> AckermannControlCommand:
+        cmd = self._stamp(cmd, now_sec)
+        cmd.longitudinal.speed = self._finite_clamp(
+            cmd.longitudinal.speed, 0.0, max(0.0, self.recovery_speed_mps)
+        )
+        cmd.longitudinal.acceleration = self._finite_clamp(
+            cmd.longitudinal.acceleration,
+            self.recovery_decel_min_mps2,
+            self.recovery_accel_max_mps2,
         )
         return cmd
 
@@ -299,6 +405,86 @@ class HybridControlMuxNode(Node):
             age_sec=age_sec,
         )
 
+    def _current_recovery_state(self, now_sec: float) -> RecoveryMuxState:
+        status_fresh = self._fresh(
+            self.recovery_status_time_sec, now_sec, self.recovery_status_timeout_sec
+        )
+        command_fresh = self._fresh(
+            self.recovery_cmd_time_sec, now_sec, self.recovery_cmd_timeout_sec
+        )
+        permit_fresh = self._fresh(
+            self.recovery_permit_time_sec, now_sec, self.recovery_permit_timeout_sec
+        )
+        safety_fresh = self._fresh(
+            self.external_safety_time_sec, now_sec, self.external_safety_timeout_sec
+        )
+        if self.require_recovery_external_safety_status:
+            external_safety_ok = (
+                safety_fresh
+                and self.external_safety_status is not None
+                and bool(self.external_safety_status.valid)
+                and not bool(self.external_safety_status.stop_requested)
+            )
+        else:
+            external_safety_ok = (
+                self.external_safety_status is None
+                or not safety_fresh
+                or (bool(self.external_safety_status.valid)
+                    and not bool(self.external_safety_status.stop_requested))
+            )
+
+        status = self.recovery_status
+        command = self.recovery_cmd
+        permit = self.recovery_permit
+        status_state = self._recovery_state_name(status.state) if status else "missing"
+        ids_match = (
+            status is not None
+            and command is not None
+            and permit is not None
+            and status.attempt_id == command.attempt_id == permit.attempt_id
+            and status.trajectory_generation
+            == command.trajectory_generation
+            == permit.trajectory_generation
+        )
+        trajectory_header_match = (
+            status is not None
+            and command is not None
+            and status.trajectory_header.frame_id == command.trajectory_header.frame_id
+            and status.trajectory_header.stamp.sec == command.trajectory_header.stamp.sec
+            and status.trajectory_header.stamp.nanosec
+            == command.trajectory_header.stamp.nanosec
+        )
+        command_valid = False
+        command_forward_only = False
+        if command is not None:
+            cmd = command.command
+            command_valid = (
+                math.isfinite(float(cmd.longitudinal.speed))
+                and math.isfinite(float(cmd.longitudinal.acceleration))
+                and math.isfinite(float(cmd.lateral.steering_tire_angle))
+            )
+            command_forward_only = command_valid and float(cmd.longitudinal.speed) >= 0.0
+
+        return RecoveryMuxState(
+            enabled=self.recovery_enabled,
+            status_state=status_state,
+            status_fresh=status_fresh,
+            command_fresh=command_fresh,
+            permit_fresh=permit_fresh,
+            external_safety_ok=external_safety_ok,
+            input_complete=bool(status.input_complete) if status else False,
+            trajectory_valid=bool(status.trajectory_valid) if status else False,
+            trajectory_safe=bool(status.trajectory_safe) if status else False,
+            stop_required=bool(status.stop_required) if status else False,
+            handoff_ready=bool(status.handoff_ready) if status else False,
+            recovery_allowed=bool(permit.recovery_allowed) if permit else False,
+            handoff_allowed=bool(permit.handoff_allowed) if permit else False,
+            ids_match=ids_match,
+            trajectory_header_match=trajectory_header_match,
+            command_valid=command_valid,
+            command_forward_only=command_forward_only,
+        )
+
     def _publish_debug(
         self,
         *,
@@ -310,6 +496,7 @@ class HybridControlMuxNode(Node):
         mpc_cmd_fresh: bool,
         pure_pursuit_cmd_fresh: bool,
         health: MpcHealth,
+        recovery_state: RecoveryMuxState,
         selected_input_cmd: Optional[AckermannControlCommand],
         output_cmd: AckermannControlCommand,
         steering_result: SteeringLimitResult,
@@ -336,6 +523,15 @@ class HybridControlMuxNode(Node):
                 "mpc_status": health.status,
                 "mpc_infeasible_count": health.infeasible_count,
                 "mpc_health_age_sec": health.age_sec if math.isfinite(health.age_sec) else None,
+                "recovery_enabled": recovery_state.enabled,
+                "recovery_latched": self.core.recovery_episode_latched,
+                "recovery_status_state": recovery_state.status_state,
+                "recovery_status_fresh": recovery_state.status_fresh,
+                "recovery_command_fresh": recovery_state.command_fresh,
+                "recovery_permit_fresh": recovery_state.permit_fresh,
+                "recovery_external_safety_ok": recovery_state.external_safety_ok,
+                "recovery_ids_match": recovery_state.ids_match,
+                "recovery_trajectory_header_match": recovery_state.trajectory_header_match,
                 "selected_input_stamp_sec": self._stamp_sec(selected_input_cmd),
                 "selected_input_stamp_nanosec": self._stamp_nanosec(selected_input_cmd),
                 "output_stamp_sec": self._stamp_sec(output_cmd),
@@ -375,6 +571,20 @@ class HybridControlMuxNode(Node):
         if not math.isfinite(value):
             return lower
         return min(max(value, lower), upper)
+
+    @staticmethod
+    def _recovery_state_name(state: int) -> str:
+        mapping = {
+            int(RecoveryStatus.INACTIVE): "inactive",
+            int(RecoveryStatus.STUCK_CONFIRMING): "stuck_confirming",
+            int(RecoveryStatus.STOP_HOLD): "stop_hold",
+            int(RecoveryStatus.ACTIVE): "active",
+            int(RecoveryStatus.HANDOFF_VERIFY): "handoff_verify",
+            int(RecoveryStatus.COMPLETE): "complete",
+            int(RecoveryStatus.ABORT): "abort",
+            int(RecoveryStatus.LOCKOUT): "lockout",
+        }
+        return mapping.get(int(state), "unknown")
 
 
 def main() -> None:
