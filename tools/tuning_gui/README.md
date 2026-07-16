@@ -50,7 +50,8 @@ tools/run_tuning_gui.bash --restart
 - ヘッダーの `Run Settings` から `Simulator`、`Safety Gate`、`Multiplay` の設定を開けます。
 - `Safety Gate` の `gate` ボタンは `make gate1`〜`make gate3` を呼び出し、AWSIMの `SafetyGate/scenario*.yaml` を使って障害物停止、追い越し、車線維持のシナリオを実行します。
 - `control_method` が `mpc`、`delay_aware_mpc`、`hybrid_delay_aware_mpc` のとき、Files に `Overtake planner params` と `Overtake permission profile` が出ます。`Overtake permission profile` では `name`、`start_wp`、`end_wp`、`allow_overtake` を表編集でき、行追加・削除もできます。
-- `control_method` が `hybrid_delay_aware_mpc` のとき、Files に `Hybrid delay-aware MPC launch params`、`Hybrid control mux params`、`Hybrid control mux launch`、`Pure Pursuit launch params` が出ます。MPC infeasible時のPure Pursuit fallback速度、追い越しoverride連携、切り替え閾値、復帰条件、timeoutを表編集で変更できます。
+- `control_method` が `hybrid_delay_aware_mpc` のとき、Files に `Hybrid delay-aware MPC launch params`、`Hybrid control mux params`、`Hybrid control mux launch`、`Pure Pursuit launch params`、`Wall recovery planner params`、`Wall recovery planner launch` が出ます。MPC infeasible時のPure Pursuit fallback速度、追い越しoverride連携、切り替え閾値、復帰条件、timeoutを表編集で変更できます。
+- `control_method` が `pure_pursuit_mpc_horizon` のときも、Files に `Wall recovery planner params` と `Wall recovery planner launch` が出ます。`wall_recovery_enabled` はデフォルトfalseなので、Tuning GUIで編集できることと実行時に復帰機能が有効であることは別です。
 - `Simulator` の各項目は `AWSIM_EXTRA_ARGS` や `AWSIM_START_MODE` / `AWSIM_LAPS` / `AWSIM_TIMEOUT` としてAWSIM起動オプションへ変換されます。
 - `raw args` はGUIやlaunchが管理する `--camera`、`--laps`、`--scenario` などと重複すると起動前にエラーになります。
 - `Multiplay` は `--multiplay`、`--multiplay-address`、`--multiplay-port`、`--multiplay-name`、`--multiplay-send-hz` を組み立てます。
