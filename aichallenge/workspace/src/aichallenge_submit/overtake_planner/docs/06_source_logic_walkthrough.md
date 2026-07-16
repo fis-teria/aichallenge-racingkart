@@ -28,7 +28,7 @@ flowchart LR
 | v2 速度のみ | `[1, mode_id>0, 0, 2, generation, speed_cap_mps]` | 横軌道を変更せず、通常参照のまま全horizonへ単一の速度上限を適用する。 |
 | 明示解除 | `[1, 0, 0, 1, generation]` | overrideと保持中の速度capを解除し、通常速度・通常参照へ戻す。 |
 
-`generation` は意味的payloadが変わった時だけ増えます。受信側はv2の `n=0` を解除と混同してはいけません。v2を受信した後、malformed payloadまたはoverride timeoutになった場合は、MPC/Pure Pursuitとも横方向は通常参照のまま最後に検証済みの `speed_cap_mps` を保持します。v1/v3のmalformed/timeoutは横overrideを解除します。禁止区間で安全許可済みの通常復帰はv2の速度only（`normal_recovery_speed_only_v_max_mps`、通常10.0 m/s）へ落とし、横solver horizonを出しません。SAFE_STOP・接触・壁/MPC healthのfail-safe capは別の低速設定を維持します。
+`generation` は意味的payloadが変わった時だけ増えます。受信側はv2の `n=0` を解除と混同してはいけません。v2を受信した後、malformed payloadまたはoverride timeoutになった場合は、MPC/Pure Pursuitとも横方向は通常参照のまま最後に検証済みの `speed_cap_mps` を保持します。v1/v3のmalformed/timeoutは横overrideを解除します。禁止区間でもreentry gateを通過した通常復帰は、中心へ物理的に収束するまでSafetyEvaluator済みの横solver horizonを維持し、`normal_recovery_speed_only_v_max_mps` は速度上限としてだけ重ねます。SAFE_STOP・接触・壁/MPC healthのfail-safe capは別の低速設定を維持します。
 
 ## ソースの責務マップ
 
@@ -302,6 +302,12 @@ override配列は初期値として `d=0`、`v_ref=v_passthrough_mps` を持ち�
 `straight_only_overtake_enabled` が有効な場合、前方曲率が `straight_overtake_max_curvature_m_inv` を超えると、PASS候補が安全でも追い越し開始を抑制します。
 このとき `overtake_start_gate_reason="curve"` になります。
 ただし前方車が停止/低速で `slow_front_exception_active=true` の場合は、`slow_front_exception_max_start_curvature_m_inv` 以下の緩い曲率に限り、pass gapと安全評価を維持したまま曲率ゲートだけを例外的に開き、`overtake_start_gate_reason="slow_front_exception_curve"` として記録します。0以下なら例外は無効です。
+
+`slow_front_permission_exception_enabled=true` の時だけ、停止/低速が連続している直接の前走車について、現在地点が `allow_overtake=false` かつPASS候補がSafetyEvaluatorを通過していれば、permission開始gateも `slow_front_exception_permission` として例外許可できます。入力freshnessと予測列の完全性、曲率gate、現在/コーナー横並び、未来譲り、strict parallel YIELD、reentry holdはすべて維持します。lookahead先だけの禁止と停止車列への昇格は例外対象外です。
+
+`slow_front_permission_exception_enabled=true` と `early_stationary_parallel_permission_exception_enabled=true` の時は、直接前走車ではなく停止parallel車でも、`early_stationary_parallel_pass_id` が同じIDで必要周期数確認され、同周期のPASSがSafetyEvaluatorを通過した場合に限り、現在地点の禁止permissionを `early_stationary_parallel_permission_exception` として例外許可できます。CSVの `overtake_permission_allowed` はfalseのまま残します。PREPAREの次周期にも同じ対象・freshness・SafetyEvaluator通過が必要で、対象消失・ID変更・staleではOVERTAKEへ進みません。
+
+`gentle_curve_safe_pass_enabled=true` は通常のcurve gateを直接開きません。停止/低速ではない直接前走車について、通常permission、緩い曲率、freshな入力、future yieldなし、制限した速度・横移動量のPASS候補がSafetyEvaluatorを通過し、`cbf_slack <= gentle_curve_safe_pass_max_cbf_slack` の時だけ `overtake_start_gate_reason="gentle_curve_safe_pass"` を入れます。曲率だけを広げず、候補速度は `min(gentle_curve_safe_pass_v_max_mps, sqrt(gentle_curve_safe_pass_max_lateral_accel_mps2 / abs(kappa)))` に制限し、`PREPARE` から `OVERTAKE` の完了まで緩めずラッチします。staleまたは連続infeasibleはこの例外を閉じますが、単発のfresh slow solveは速度capだけです。
 
 停止車列では、1台目を抜いた直後に2台目が `front_vehicle_id` ではなく `parallel_side_vehicle_id` として見える場合があります。
 `slow_obstacle_chain_enabled=true` かつ相手が自車より前方、`slow_obstacle_chain_distance_m` 内、`slow_front_exception_speed_mps` 以下なら、core側で `slow_obstacle_chain_active=true` として前方閉塞へ昇格します。
@@ -713,8 +719,8 @@ MPCと同じ参照CSVを読み、Frenet座標変換を提供します。
 
 ### 座標変換
 
-`cartesianToFrenet()` は、最近傍の参照点を探し、その参照点のyawを使って横ずれを計算します。
-線分への厳密な射影ではないため、参照点間隔が荒い場所では `s` が最近傍点単位で丸まりやすいです。
+`cartesianToFrenet()` は、閉ループを含む全参照線分へ直交射影し、最も近い線分の補間yawを使って横ずれを計算します。
+そのため参照点間でも連続した `s` が得られ、最終点から先頭点へ戻るseamも同じ計算で扱います。
 
 ```text
 dx = x - ref.x
@@ -729,6 +735,9 @@ yaw_error = normalizeAngle(yaw - ref.yaw)
 x = ref.x - d * sin(ref.yaw)
 y = ref.y + d * cos(ref.yaw)
 ```
+
+`loadCorridorCsv()` は参照CSVと同じ `s` サンプル列の物理境界 `d_min/d_max` を読みます。
+件数または各 `s` が一致しなければ拒否し、隣接点またはclosing seamで回廊が重ならないCSVも拒否します。nodeは失敗時にplanner overrideを無効化します。実行時は隣接境界の狭い側を使うため、補間で実走行可能幅を広げません。
 
 このため、カーブでは同じ `d` でも地図上の見え方が外側へ膨らんで見えることがあります。
 
@@ -768,6 +777,8 @@ y = ref.y + d * cos(ref.yaw)
 
 コーナーで追い越し開始しない場合、`straight_overtake_start_allowed=false` かつ `overtake_start_gate_reason=curve` なら、直線限定ゲートで止めています。
 `overtake_start_gate_reason=slow_front_exception_curve` の場合は、停止/低速車例外によって曲率ゲートだけが解除されており、pass gapや安全評価は引き続き有効です。
+`overtake_start_gate_reason=slow_front_exception_permission` の場合は、停止/低速の直接前走車に対してSafetyEvaluator通過済みPASSだけが、現在地点のpermission禁止を例外許可されています。
+`overtake_start_gate_reason=early_stationary_parallel_permission_exception` の場合は、確認済み停止parallel車に対する同じ限定例外です。`confirmed_stationary_parallel_permission_exception=1` と合わせて確認し、CSV上のpermission値はfalseのままであることを確認します。
 1台目通過後に2台目へ向かわない場合は、`slow_obstacle_chain_active` が立っているかを先に見ます。
 立っていないなら、2台目が前方側のparallel-sideとして認識されていない、速度が低速条件を満たしていない、または距離が `slow_obstacle_chain_distance_m` を超えています。
 
@@ -813,8 +824,11 @@ y = ref.y + d * cos(ref.yaw)
 - `speed_cap_reason`
 
 `speed_cap_reason=mpc_health_infeasible_guard` なら、MPC infeasible回数が閾値以上で速度上限を出しています。
+`speed_cap_reason=mpc_health_infeasible_soft_guard` は閾値未満の連続infeasible観測に対する速度capです。
 `speed_cap_reason=mpc_health_solve_time_guard` なら、solve timeが警告閾値以上です。
 `speed_cap_reason=mpc_health_stale_guard` なら、MPC health情報が古い状態です。
+
+`ego_wall_clearance_m` は `/debug/overtake/metrics`、`autoware.log` のdecision行、evalwrapの `overtake_debug.csv` / `overtake_timeseries.csv` に出ます。`0 <= ego_wall_clearance_m < wall_soft_margin_m` のsoft wallは速度capだけで、コリドー外からの復帰・SAFE_STOP/ABORT復帰・実際の横干渉は従来どおり横方向の安全経路を維持します。
 
 ## 実装上の注意点
 

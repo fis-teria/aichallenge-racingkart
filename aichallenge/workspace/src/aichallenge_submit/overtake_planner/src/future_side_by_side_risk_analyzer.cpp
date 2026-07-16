@@ -82,8 +82,10 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
   const double initial_abs_delta_s = std::abs(
       exact_side_target ? out.side_delta_s : out.parallel_side_delta_s);
 
-  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
-  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
+  const auto ego_bounds = frame_.corridorBounds(
+      ego.frenet.s, config_.d_min_m, config_.d_max_m);
+  const double lower_d = ego_bounds.d_min + config_.min_wall_margin_m;
+  const double upper_d = ego_bounds.d_max - config_.min_wall_margin_m;
   const double left_space = upper_d - ego.frenet.d;
   const double right_space = ego.frenet.d - lower_d;
   double away_sign = 0.0;
@@ -135,9 +137,9 @@ BlockedInfo FutureSideBySideRiskAnalyzer::evaluate(
     const bool future_corner =
         future_side && config_.corner_side_yield_curvature_m_inv > 0.0 &&
         future_curvature >= config_.corner_side_yield_curvature_m_inv;
-    const double clearance = blocked_risk_.wallClearance(ego_d);
+    const double clearance = blocked_risk_.wallClearance(ego_s, ego_d);
     const double target_clearance =
-        blocked_risk_.wallClearance(side_keep_target_d);
+        blocked_risk_.wallClearance(ego_s, side_keep_target_d);
     const double effective_clearance = std::min(clearance, target_clearance);
     const bool outer_wall_risk =
         future_side &&

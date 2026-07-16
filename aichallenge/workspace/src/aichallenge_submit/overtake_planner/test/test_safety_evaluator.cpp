@@ -61,3 +61,30 @@ TEST(SafetyEvaluator, AcceptsClearCandidate)
 
   EXPECT_TRUE(evaluator.evaluate(candidate, {pred}));
 }
+
+TEST(SafetyEvaluator, UsesVerifiedSDependentCorridorWhenAvailable)
+{
+  overtake_planner::FrenetFrame frame;
+  frame.setReference({
+    {0.0, 0.0, 0.0, 0.0, 0.0, 5.0},
+    {10.0, 10.0, 0.0, 0.0, 0.0, 5.0},
+  });
+  frame.setCorridor({
+    {0.0, -3.0, 3.0},
+    {10.0, -3.0, 3.0},
+  });
+  overtake_planner::PlannerConfig config;
+  config.d_min_m = -1.35;
+  config.d_max_m = 1.35;
+  config.min_wall_margin_m = 0.50;
+  overtake_planner::SafetyEvaluator evaluator(frame, config);
+
+  overtake_planner::CandidateTrajectory candidate;
+  candidate.s = {2.0};
+  candidate.d = {2.1};
+  candidate.x = {2.0};
+  candidate.y = {2.1};
+  candidate.yaw = {0.0};
+
+  EXPECT_TRUE(evaluator.evaluate(candidate, {}));
+}

@@ -21,7 +21,7 @@ public:
                   const std::vector<PredictedOpponent> &predictions,
                   BehaviorMode mode) const;
 
-  double wallClearance(double d) const;
+  double wallClearance(double s, double d) const;
   double opponentSDot(const OpponentState &opponent) const;
 
 private:

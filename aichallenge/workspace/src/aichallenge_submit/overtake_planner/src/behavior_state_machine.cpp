@@ -7,32 +7,6 @@ namespace overtake_planner {
 
 namespace {
 
-// 入力: PlannerConfig。
-// 出力: 高速カーブ復帰holdを解除する曲率しきい値[1/m]。
-// 処理概要: 明示設定があればそれを使い、未設定時はコーナー譲り曲率の半分を安全側の既定にする。
-double releaseCurvature(const PlannerConfig &config) {
-  if (config.high_speed_curve_lateral_hold_release_curvature_m_inv >= 0.0) {
-    return config.high_speed_curve_lateral_hold_release_curvature_m_inv;
-  }
-  return std::max(0.0, config.corner_side_yield_curvature_m_inv * 0.5);
-}
-
-// 入力: PlannerConfigと現在のBlockedInfo。
-// 出力: 高速カーブ中の復帰holdを継続すべきならtrue。
-// 処理概要: 高速かつ曲率が残っている間は、中心復帰の短周期切替を抑える。
-bool shouldHoldHighSpeedCurveRecovery(const PlannerConfig &config,
-                                      const BlockedInfo &blocked_info) {
-  if (!config.high_speed_curve_lateral_hold_enabled) {
-    return false;
-  }
-  const double release_speed =
-      config.high_speed_curve_lateral_hold_release_speed_mps >= 0.0
-          ? config.high_speed_curve_lateral_hold_release_speed_mps
-          : config.high_speed_curve_lateral_hold_min_speed_mps;
-  return blocked_info.ego_speed_mps > release_speed &&
-         blocked_info.corner_abs_curvature > releaseCurvature(config);
-}
-
 // 入力: CandidateType。
 // 出力: 左右PASS候補ならtrue。
 // 処理概要: SAFE_STOP解除中でも低速車列を抜ける候補だけを限定的に通す。
@@ -43,7 +17,8 @@ bool isPassCandidate(CandidateType selected) {
 
 // 入力: 現在modeと選択候補。
 // 出力: 現在の追い越し方向と同じPASS候補ならtrue。
-// 処理概要: 複数の低速/停止車両を連続して抜く間、timeoutだけで中止復帰へ落とさない。
+// 処理概要:
+// 複数の低速/停止車両を連続して抜く間、timeoutだけで中止復帰へ落とさない。
 bool selectedMatchesCurrentPass(BehaviorMode current, CandidateType selected) {
   return (current == BehaviorMode::OVERTAKE_LEFT &&
           selected == CandidateType::PASS_LEFT) ||
@@ -66,11 +41,29 @@ bool isAbortRecoveryContext(BehaviorMode current,
           blocked_info.reentry_hold_active);
 }
 
+// 入力: BlockedInfo。
+// 出力: FOLLOW_BLOCKEDで車間形成すべき対象があるならtrue。
+// 処理概要:
+// 通常front blockedに加え、明示的に安全評価へ載せたparallel FOLLOW対象も
+// FOLLOW状態の入力として扱う。
+bool hasFollowBlockedTarget(const BlockedInfo &blocked_info) {
+  return blocked_info.blocked || blocked_info.parallel_follow_candidate ||
+         blocked_info.braking_follow_active;
+}
+
+// PASS開始だけに使う対象。停止した前方parallel車をSafetyEvaluatorへ早期に載せるが、
+// FOLLOW対象にはせず、PASSが不成立なら従来のfallbackへ戻す。
+bool hasPassStartTarget(const BlockedInfo &blocked_info) {
+  return blocked_info.blocked ||
+         blocked_info.early_stationary_parallel_pass_target;
+}
+
 } // namespace
 
 // 入力: planner設定。
 // 出力: 挙動モード状態機械のインスタンス。
-// 処理概要: hold時間や解除条件の設定を保持し、周期ごとにmode遷移を判断できるようにする。
+// 処理概要:
+// hold時間や解除条件の設定を保持し、周期ごとにmode遷移を判断できるようにする。
 BehaviorStateMachine::BehaviorStateMachine(PlannerConfig config)
     : config_(config) {}
 
@@ -94,9 +87,10 @@ void BehaviorStateMachine::markIfChanged(double now_sec, BehaviorMode before,
 
 // 入力: 現在の横位置情報と解除しきい値[m]。
 // 出力: 横ずれが解除可能な範囲ならtrue。しきい値が負/NaNなら常にtrue。
-// 処理概要: YIELD/RECOVERY/SAFE_STOP解除時に、横位置が十分戻ったかを共通判定する。
-bool BehaviorStateMachine::lateralReleaseReady(
-    const BlockedInfo &blocked_info, double threshold_m) const {
+// 処理概要:
+// YIELD/RECOVERY/SAFE_STOP解除時に、横位置が十分戻ったかを共通判定する。
+bool BehaviorStateMachine::lateralReleaseReady(const BlockedInfo &blocked_info,
+                                               double threshold_m) const {
   if (!std::isfinite(threshold_m) || threshold_m < 0.0) {
     return true;
   }
@@ -105,18 +99,18 @@ bool BehaviorStateMachine::lateralReleaseReady(
 
 // 入力: 現在時刻とBlockedInfo。
 // 出力: 未来コーナー譲り状態をまだ保持すべきならtrue。
-// 処理概要: 最小保持時間、壁余裕、横位置、前方ギャップ、コーナー継続をまとめて見る。
+// 処理概要:
+// 最小保持時間、壁余裕、横位置、前方ギャップ、コーナー継続をまとめて見る。
 bool BehaviorStateMachine::shouldHoldFutureYield(
     double now_sec, const BlockedInfo &blocked_info) const {
   if (!future_yield_hold_active_) {
     return false;
   }
 
-  const bool lateral_ready = blocked_info.ego_wall_clearance_m >=
-                                 config_.yield_rejoin_wall_clearance_m &&
-                             lateralReleaseReady(
-                                 blocked_info,
-                                 config_.yield_release_lateral_error_m);
+  const bool lateral_ready =
+      blocked_info.ego_wall_clearance_m >=
+          config_.yield_rejoin_wall_clearance_m &&
+      lateralReleaseReady(blocked_info, config_.yield_release_lateral_error_m);
   const bool corner_still_relevant =
       blocked_info.corner_side_by_side ||
       blocked_info.future_corner_side_by_side ||
@@ -135,7 +129,8 @@ bool BehaviorStateMachine::shouldHoldFutureYield(
 
 // 入力: 現在時刻、現在mode、選択候補、リスク情報、候補安全性、safe stop文脈。
 // 出力: 次周期に使うBehaviorMode。
-// 処理概要: 候補選択をそのままmodeにせず、保持時間・連続安全回数・停止解除条件で安定化する。
+// 処理概要:
+// 候補選択をそのままmodeにせず、保持時間・連続安全回数・停止解除条件で安定化する。
 BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
                                           CandidateType selected,
                                           const BlockedInfo &blocked_info,
@@ -151,7 +146,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
   }
 
   // 処理ブロック: SAFE_STOP中の専用解除ロジック。
-  // 設計意図: 停止系は通常の追い越し遷移より安全側なので、解除にも連続条件と復帰条件を要求する。
+  // 設計意図:
+  // 停止系は通常の追い越し遷移より安全側なので、解除にも連続条件と復帰条件を要求する。
   if (current == BehaviorMode::SAFE_STOP) {
     // SAFE_STOP中は解除条件が連続で満たされるまで低速停止overrideを維持する。
     if (!safe_stop_context.candidate_feasible) {
@@ -161,8 +157,9 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
                  selected == CandidateType::SIDE_BY_SIDE_KEEP) {
         next = BehaviorMode::SIDE_BY_SIDE_KEEP;
       } else {
-        next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                    : BehaviorMode::SPEED_GUARD;
+        next = hasFollowBlockedTarget(blocked_info)
+                   ? BehaviorMode::FOLLOW_BLOCKED
+                   : BehaviorMode::SPEED_GUARD;
       }
       safe_stop_hold_count_ = 0;
       safe_stop_release_count_ = 0;
@@ -178,7 +175,7 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
 
     ++safe_stop_hold_count_;
     const bool recovery_required =
-        !safe_stop_context.requested && !blocked_info.blocked &&
+        !safe_stop_context.requested && !hasFollowBlockedTarget(blocked_info) &&
         !blocked_info.side_by_side && !blocked_info.future_yield_required &&
         (blocked_info.ego_wall_clearance_m <
              config_.safe_stop_release_wall_clearance_m ||
@@ -197,8 +194,9 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
       return next;
     }
 
-    if (!safe_stop_context.requested && blocked_info.slow_obstacle_chain_active &&
-        selected_feasible && isPassCandidate(selected) && canSwitch(now_sec)) {
+    if (!safe_stop_context.requested &&
+        blocked_info.slow_obstacle_chain_active && selected_feasible &&
+        isPassCandidate(selected) && canSwitch(now_sec)) {
       next = BehaviorMode::FOLLOW_BLOCKED;
       safe_stop_hold_count_ = 0;
       safe_stop_release_count_ = 0;
@@ -216,8 +214,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     }
 
     if (safe_stop_release_count_ >= release_cycles_required) {
-      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                  : BehaviorMode::FREE_RUN;
+      next = hasFollowBlockedTarget(blocked_info) ? BehaviorMode::FOLLOW_BLOCKED
+                                                  : BehaviorMode::FREE_RUN;
       safe_stop_hold_count_ = 0;
       safe_stop_release_count_ = 0;
     } else {
@@ -236,7 +234,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
   safe_stop_release_count_ = 0;
 
   // 処理ブロック: 選択候補がfeasibleでない時のfallback。
-  // 設計意図: 危険な候補をmode遷移に採用せず、前方閉塞なら追従、それ以外は復帰へ倒す。
+  // 設計意図:
+  // 危険な候補をmode遷移に採用せず、前方閉塞なら追従、それ以外は復帰へ倒す。
   if (!selected_feasible) {
     // 選択候補が危険なら、前方閉塞中は追従、それ以外は中心線へ復帰する。
     if (selected == CandidateType::YIELD_BEHIND) {
@@ -253,6 +252,10 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
                                   : BehaviorMode::SPEED_GUARD;
     }
     markIfChanged(now_sec, current, next);
+    // PASSの連続安全回数は、どの不成立周期でも必ず途切れる。
+    // 早期returnの前にresetしないと、後の安全1周期を連続と誤認する。
+    pass_left_safe_cycles_ = 0;
+    pass_right_safe_cycles_ = 0;
     if (next != BehaviorMode::YIELD_BEHIND) {
       future_yield_hold_active_ = false;
     }
@@ -272,11 +275,18 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     return next;
   }
 
-  const bool pass_start_allowed =
-      blocked_info.straight_overtake_start_allowed;
+  const bool pass_start_allowed = blocked_info.straight_overtake_start_allowed;
+  const bool gentle_curve_safe_hold_bypass =
+      config_.gentle_curve_safe_pass_bypass_mode_hold_enabled &&
+      blocked_info.gentle_curve_safe_pass_start_approved;
   // 処理ブロック: PASS候補の連続安全回数を数える。
-  // 設計意図: 一瞬だけ空いた隙間では追い越し準備へ入らず、同じ方向の安全判定が続いた時だけ開始する。
-  if ((selected == CandidateType::PASS_LEFT ||
+  // 設計意図:
+  // 一瞬だけ空いた隙間では追い越し準備へ入らず、同じ方向の安全判定が続いた時だけ開始する。
+  const bool normal_pass_start_context =
+      current == BehaviorMode::FREE_RUN ||
+      current == BehaviorMode::FOLLOW_BLOCKED;
+  if (normal_pass_start_context &&
+      (selected == CandidateType::PASS_LEFT ||
        selected == CandidateType::PASS_RIGHT) &&
       pass_start_allowed) {
     // PASS候補が連続して安全なときだけ追い越し準備へ進む。
@@ -293,12 +303,18 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
   }
 
   // 処理ブロック: 現在modeごとの状態遷移。
-  // 設計意図: 候補のスコアリングと運転状態の保持条件を分離し、チャタリングを抑える。
+  // 設計意図:
+  // 候補のスコアリングと運転状態の保持条件を分離し、チャタリングを抑える。
   switch (current) {
   case BehaviorMode::FREE_RUN:
     // 通常走行中に前方閉塞を検出したら、まず追従しつつPASS安全周期を貯める。
     if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;
+    } else if (selected == CandidateType::RECOVERY &&
+               blocked_info.braking_follow_hold_lateral) {
+      // 制動距離FOLLOWが不成立でも、同周期にSafetyEvaluatorを通った現d
+      // hold RECOVERYなら追従状態を維持する。通常ラインへ横切らない。
+      next = BehaviorMode::FOLLOW_BLOCKED;
     } else if (selected == CandidateType::RECOVERY) {
       // RECOVERY候補が選ばれても、PASSを中止した事実がない通常走行では
       // ABORTへ遷移しない。速度guard付きの横補正として扱う。
@@ -306,7 +322,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     } else if (blocked_info.side_by_side &&
                selected == CandidateType::SIDE_BY_SIDE_KEEP) {
       next = BehaviorMode::SIDE_BY_SIDE_KEEP;
-    } else if (blocked_info.blocked) {
+    } else if (hasFollowBlockedTarget(blocked_info) ||
+               blocked_info.early_stationary_parallel_pass_target) {
       const bool left_ready =
           selected == CandidateType::PASS_LEFT &&
           pass_left_safe_cycles_ >=
@@ -315,13 +332,18 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
           selected == CandidateType::PASS_RIGHT &&
           pass_right_safe_cycles_ >=
               static_cast<int>(config_.pass_safe_required_cycles);
-      if (pass_start_allowed && (left_ready || right_ready) &&
-          canSwitch(now_sec)) {
+      if (hasPassStartTarget(blocked_info) && pass_start_allowed &&
+          (left_ready || right_ready) &&
+          (canSwitch(now_sec) || gentle_curve_safe_hold_bypass)) {
         next = selected == CandidateType::PASS_LEFT
                    ? BehaviorMode::PREPARE_OVERTAKE_LEFT
                    : BehaviorMode::PREPARE_OVERTAKE_RIGHT;
-      } else {
+      } else if (hasFollowBlockedTarget(blocked_info)) {
         next = BehaviorMode::FOLLOW_BLOCKED;
+      } else {
+        // early stationary parallelはPASS開始の事前評価だけであり、PASSがまだ
+        // 許可されない周期にFOLLOWへ遷移して通常の車間制御を起動しない。
+        next = BehaviorMode::FREE_RUN;
       }
     }
     break;
@@ -335,7 +357,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     } else if (blocked_info.side_by_side &&
                selected == CandidateType::SIDE_BY_SIDE_KEEP) {
       next = BehaviorMode::SIDE_BY_SIDE_KEEP;
-    } else if (!blocked_info.blocked) {
+    } else if (!hasFollowBlockedTarget(blocked_info) &&
+               !blocked_info.early_stationary_parallel_pass_target) {
       next = BehaviorMode::FREE_RUN;
     } else {
       const bool left_ready =
@@ -346,8 +369,9 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
           selected == CandidateType::PASS_RIGHT &&
           pass_right_safe_cycles_ >=
               static_cast<int>(config_.pass_safe_required_cycles);
-      if (pass_start_allowed && (left_ready || right_ready) &&
-          canSwitch(now_sec)) {
+      if (hasPassStartTarget(blocked_info) && pass_start_allowed &&
+          (left_ready || right_ready) &&
+          (canSwitch(now_sec) || gentle_curve_safe_hold_bypass)) {
         next = selected == CandidateType::PASS_LEFT
                    ? BehaviorMode::PREPARE_OVERTAKE_LEFT
                    : BehaviorMode::PREPARE_OVERTAKE_RIGHT;
@@ -355,21 +379,46 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     }
     break;
   case BehaviorMode::PREPARE_OVERTAKE_LEFT:
-    // 準備モードは1周期だけ使い、次周期から実際の追い越しオフセットを維持する。
-    next = selected == CandidateType::YIELD_BEHIND
-               ? BehaviorMode::YIELD_BEHIND
-               : BehaviorMode::OVERTAKE_LEFT;
+    // 準備モードは1周期だけ使う。ただし禁止区間の停止parallel例外で入った
+    // PREPAREは、同一対象への例外承認が次周期も残る場合だけOVERTAKEへ進める。
+    // 例外対象の消失・別ID化・stale入力では通常PASSへ昇格させない。
+    if (selected == CandidateType::YIELD_BEHIND) {
+      next = BehaviorMode::YIELD_BEHIND;
+    } else if (!blocked_info.overtake_permission_allowed &&
+               !blocked_info.permission_start_exception_active) {
+      next = hasFollowBlockedTarget(blocked_info)
+                 ? BehaviorMode::FOLLOW_BLOCKED
+                 : BehaviorMode::FREE_RUN;
+    } else {
+      next = BehaviorMode::OVERTAKE_LEFT;
+    }
     break;
   case BehaviorMode::PREPARE_OVERTAKE_RIGHT:
     // 左右どちらに避けるかをデバッグ上でも分けて追跡する。
-    next = selected == CandidateType::YIELD_BEHIND
-               ? BehaviorMode::YIELD_BEHIND
-               : BehaviorMode::OVERTAKE_RIGHT;
+    if (selected == CandidateType::YIELD_BEHIND) {
+      next = BehaviorMode::YIELD_BEHIND;
+    } else if (!blocked_info.overtake_permission_allowed &&
+               !blocked_info.permission_start_exception_active) {
+      next = hasFollowBlockedTarget(blocked_info)
+                 ? BehaviorMode::FOLLOW_BLOCKED
+                 : BehaviorMode::FREE_RUN;
+    } else {
+      next = BehaviorMode::OVERTAKE_RIGHT;
+    }
     break;
   case BehaviorMode::OVERTAKE_LEFT:
   case BehaviorMode::OVERTAKE_RIGHT:
     // 横並び中は追い越しを継続し、前方ギャップが戻ったら中心線へ戻る。
-    if (selected == CandidateType::YIELD_BEHIND) {
+    if (!blocked_info.overtake_permission_allowed &&
+        blocked_info.stationary_no_pass_safe_pass_constraint_active &&
+        !blocked_info.stationary_no_pass_safe_pass_start_approved) {
+      // 禁止区間の停止障害物例外は毎周期Gate 2・freshness・同一対象を
+      // 再承認する。失効したPASSを同側候補だけで継続せず、同周期にPASSを
+      // 除外済みのYIELD、または安全評価済みRECOVERYへ閉じる。
+      next = selected == CandidateType::YIELD_BEHIND
+                 ? BehaviorMode::YIELD_BEHIND
+                 : BehaviorMode::ABORT_RECOVERY;
+    } else if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;
     } else if (blocked_info.side_by_side) {
       next = current;
@@ -393,8 +442,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
                  ? BehaviorMode::SIDE_BY_SIDE_KEEP
                  : BehaviorMode::FREE_RUN;
     } else {
-      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                  : BehaviorMode::FREE_RUN;
+      next = hasFollowBlockedTarget(blocked_info) ? BehaviorMode::FOLLOW_BLOCKED
+                                                  : BehaviorMode::FREE_RUN;
     }
     break;
   case BehaviorMode::ABORT_RECOVERY:
@@ -402,8 +451,7 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     if (blocked_info.ego_wall_clearance_m <
             config_.yield_rejoin_wall_clearance_m ||
         !lateralReleaseReady(blocked_info,
-                             config_.recovery_release_lateral_error_m) ||
-        shouldHoldHighSpeedCurveRecovery(config_, blocked_info)) {
+                             config_.recovery_release_lateral_error_m)) {
       next = BehaviorMode::ABORT_RECOVERY;
     } else if (selected == CandidateType::YIELD_BEHIND) {
       next = BehaviorMode::YIELD_BEHIND;
@@ -412,8 +460,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
                  ? BehaviorMode::SIDE_BY_SIDE_KEEP
                  : BehaviorMode::FREE_RUN;
     } else {
-      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                  : BehaviorMode::FREE_RUN;
+      next = hasFollowBlockedTarget(blocked_info) ? BehaviorMode::FOLLOW_BLOCKED
+                                                  : BehaviorMode::FREE_RUN;
     }
     break;
   case BehaviorMode::SIDE_BY_SIDE_KEEP:
@@ -425,8 +473,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
       next = BehaviorMode::SIDE_BY_SIDE_KEEP;
     } else if (!blocked_info.side_by_side ||
                selected != CandidateType::SIDE_BY_SIDE_KEEP) {
-      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                  : BehaviorMode::FREE_RUN;
+      next = hasFollowBlockedTarget(blocked_info) ? BehaviorMode::FOLLOW_BLOCKED
+                                                  : BehaviorMode::FREE_RUN;
     }
     break;
   case BehaviorMode::YIELD_BEHIND:
@@ -434,11 +482,11 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
     {
       const bool hold_future_yield =
           shouldHoldFutureYield(now_sec, blocked_info);
-      const bool lateral_ready = blocked_info.ego_wall_clearance_m >=
-                                     config_.yield_rejoin_wall_clearance_m &&
-                                 lateralReleaseReady(
-                                     blocked_info,
-                                     config_.yield_release_lateral_error_m);
+      const bool lateral_ready =
+          blocked_info.ego_wall_clearance_m >=
+              config_.yield_rejoin_wall_clearance_m &&
+          lateralReleaseReady(blocked_info,
+                              config_.yield_release_lateral_error_m);
       const double rejoin_gap =
           blocked_info.corner_side_by_side
               ? std::max(config_.yield_rejoin_gap_m,
@@ -448,6 +496,8 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
         next = BehaviorMode::YIELD_BEHIND;
       } else if (blocked_info.nearest_index >= 0 &&
                  blocked_info.front_delta_s >= rejoin_gap) {
+        next = BehaviorMode::FOLLOW_BLOCKED;
+      } else if (blocked_info.parallel_follow_candidate) {
         next = BehaviorMode::FOLLOW_BLOCKED;
       } else if (!blocked_info.blocked && !blocked_info.side_by_side) {
         next = BehaviorMode::FREE_RUN;
@@ -459,17 +509,19 @@ BehaviorMode BehaviorStateMachine::update(double now_sec, BehaviorMode current,
   case BehaviorMode::SPEED_GUARD:
     // generic lateral/wall/health guardが続く間は状態も維持し、FREE_RUNと
     // SPEED_GUARDの1周期振動を避ける。
-    if (blocked_info.pass_decision_frozen) {
+    if (blocked_info.pass_decision_frozen ||
+        blocked_info.post_abort_curve_hold_active) {
       next = BehaviorMode::SPEED_GUARD;
     } else {
-      next = blocked_info.blocked ? BehaviorMode::FOLLOW_BLOCKED
-                                  : BehaviorMode::FREE_RUN;
+      next = hasFollowBlockedTarget(blocked_info) ? BehaviorMode::FOLLOW_BLOCKED
+                                                  : BehaviorMode::FREE_RUN;
     }
     break;
   }
 
   // 処理ブロック: 遷移後の内部保持状態を整理する。
-  // 設計意図: YIELD/SAFE_STOP以外へ戻ったら、未来譲りholdを残して次の判断を縛らない。
+  // 設計意図:
+  // YIELD/SAFE_STOP以外へ戻ったら、未来譲りholdを残して次の判断を縛らない。
   markIfChanged(now_sec, current, next);
   if (next != BehaviorMode::YIELD_BEHIND && next != BehaviorMode::SAFE_STOP) {
     future_yield_hold_active_ = false;

@@ -16,6 +16,12 @@ aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/hybrid_co
 aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/pure_pursuit_mpc_horizon.param.yaml
 ```
 
+この専用設定では `primary_source=pure_pursuit` の通常出力も
+`fallback_accel_max_mps2` でclampされます。FREE_RUNでPure Pursuitが要求した
+加速を1.3 m/s²で頭打ちにしないため、専用値は `2.0 m/s²` です。これはMPCの
+`a_max=3.0 m/s²` 未満で、`fallback_decel_min_mps2` と `stop_decel_mps2` は
+`-1.5 m/s²` のままです。
+
 Pure Pursuit fallback 側の launch パラメータは以下にあります。
 
 ```text

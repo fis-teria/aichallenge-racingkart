@@ -129,6 +129,12 @@ def _decision_summary(
                     "blocked",
                     "side_by_side",
                     "corner_side_by_side",
+                    "parallel_follow_candidate",
+                    "parallel_follow_feasible",
+                    "parallel_follow_vehicle_id",
+                    "parallel_follow_delta_s",
+                    "parallel_follow_delta_d",
+                    "parallel_follow_relative_speed_mps",
                     "corner_abs_curvature",
                     "front_vehicle_id",
                     "front_distance_m",
@@ -165,6 +171,12 @@ def _decision_overview(metrics: dict[str, Any], timeseries: list[dict[str, str]]
                 "corner_side_by_side_samples": sum(
                     1 for row in domain_rows if _truthy(row.get("corner_side_by_side"))
                 ),
+                "parallel_follow_samples": sum(
+                    1 for row in domain_rows if _truthy(row.get("parallel_follow_candidate"))
+                ),
+                "parallel_follow_feasible_samples": sum(
+                    1 for row in domain_rows if _truthy(row.get("parallel_follow_feasible"))
+                ),
                 "active_override_samples": sum(1 for row in domain_rows if _truthy(row.get("active_override"))),
                 "front_vehicle_samples": sum(1 for row in domain_rows if _filled(row.get("front_vehicle_id"))),
                 "selected_counts": _top_counts(domain_rows, "selected"),
@@ -181,6 +193,8 @@ def _decision_overview(metrics: dict[str, Any], timeseries: list[dict[str, str]]
             "blocked_samples",
             "side_by_side_samples",
             "corner_side_by_side_samples",
+            "parallel_follow_samples",
+            "parallel_follow_feasible_samples",
             "active_override_samples",
             "front_vehicle_samples",
             "selected_counts",
@@ -220,6 +234,9 @@ def _decision_samples(rows: list[dict[str, str]]) -> list[dict[str, str]]:
             row.get("blocked"),
             row.get("side_by_side"),
             row.get("corner_side_by_side"),
+            row.get("parallel_follow_candidate"),
+            row.get("parallel_follow_feasible"),
+            row.get("parallel_follow_vehicle_id"),
             row.get("active_override"),
             row.get("front_vehicle_id"),
             row.get("can_pass_left"),
@@ -241,6 +258,7 @@ def _is_interesting_decision_row(row: dict[str, str]) -> bool:
         _truthy(row.get("blocked"))
         or _truthy(row.get("side_by_side"))
         or _truthy(row.get("corner_side_by_side"))
+        or _truthy(row.get("parallel_follow_candidate"))
         or _truthy(row.get("active_override"))
         or _filled(row.get("front_vehicle_id"))
         or _filled(row.get("side_vehicle_id"))

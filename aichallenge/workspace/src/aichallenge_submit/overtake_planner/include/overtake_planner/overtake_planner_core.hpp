@@ -73,8 +73,19 @@ private:
   bool
   promoteSlowObstacleChain(BlockedInfo &blocked,
                            const std::vector<OpponentState> &opponents) const;
+  void classifyEarlyStationaryParallelPassTarget(
+      double now_sec, const ReentryInputStatus &reentry_input,
+      BlockedInfo &blocked,
+      const std::vector<OpponentState> &opponents);
+  void classifyParallelFollowCandidate(
+      double now_sec, const EgoState &ego, BlockedInfo &blocked,
+      const std::vector<OpponentState> &opponents) const;
   void classifyStationaryFrontObstacle(
       double now_sec, const EgoState &ego, BlockedInfo &blocked,
+      const std::vector<OpponentState> &opponents) const;
+  void classifyBrakingFollowTarget(
+      double now_sec, const EgoState &ego,
+      const ReentryInputStatus &reentry_input, BlockedInfo &blocked,
       const std::vector<OpponentState> &opponents) const;
   bool revalidatePublishedLateral(
       const PlannerOutput &output, const CandidateTrajectory &base_candidate,
@@ -95,7 +106,8 @@ private:
                                 const std::vector<OpponentState> &opponents);
   void clearLocalizedLateralProfile();
   void setLocalizedProfileMarkers(double target_s_m);
-  double targetOffsetForPass(CandidateType pass_type) const;
+  double targetOffsetForPass(CandidateType pass_type, double ego_d_m,
+                             double opponent_d_m = 0.0) const;
   // 横並びで相手が縦方向に前へ出ている場合は、無理に並走せず後ろへ譲る。
   bool shouldYieldBehindSideBySide(const EgoState &ego,
                                    const BlockedInfo &blocked_info) const;
@@ -133,11 +145,36 @@ private:
   ReentryMpcHealthState reentry_mpc_health_state_{
       ReentryMpcHealthState::HEALTHY};
   int slow_front_exception_count_{0};
+  std::string slow_front_exception_id_{};
+  std::string early_stationary_parallel_pass_id_{};
+  int early_stationary_parallel_pass_count_{0};
+  // PREPARE中に別IDや入力欠損でpermission例外を引き継がないための一周期ラッチ。
+  std::string stationary_parallel_permission_prepare_id_{};
   bool leader_priority_hold_active_{false};
   std::string leader_priority_hold_id_{};
   double leader_priority_hold_until_sec_{
       std::numeric_limits<double>::quiet_NaN()};
   bool straight_overtake_start_allowed_{true};
+  // 一度安全コリドー外へ出た車両は、内側へ戻る途中だけsoft wallでも
+  // RECOVERYを継続する。通常のsoft guardを横overrideへ昇格させないための文脈。
+  bool wall_recovery_latched_{false};
+  // gentle curve safe PASSを開始した後に、次周期の通常PASS候補へ戻って
+  // 速度・横移動上限が外れないよう、PREPARE/OVERTAKE中だけ制限をラッチする。
+  bool gentle_curve_safe_pass_constraint_latched_{false};
+  double gentle_curve_safe_pass_anchor_d_m_{
+      std::numeric_limits<double>::quiet_NaN()};
+  // 初回の制限PASSで決めた速度上限は、PREPARE/OVERTAKE中に緩めない。
+  // 以後の曲率が高くなった場合だけ、より低い上限へ更新する。
+  double gentle_curve_safe_pass_speed_cap_mps_{
+      std::numeric_limits<double>::quiet_NaN()};
+  // 停止障害物の禁止区間PASSは、PREPARE/OVERTAKE中も開始時の横移動・速度
+  // 制約を緩めない。対象が消えるかGate 2を失えば直ちに解除する。
+  bool stationary_no_pass_safe_pass_constraint_latched_{false};
+  std::string stationary_no_pass_safe_pass_target_id_{};
+  double stationary_no_pass_safe_pass_anchor_d_m_{
+      std::numeric_limits<double>::quiet_NaN()};
+  double stationary_no_pass_safe_pass_speed_cap_mps_{
+      std::numeric_limits<double>::quiet_NaN()};
   std::vector<double> last_published_lateral_offsets_;
   double last_published_lateral_target_sec_{
       std::numeric_limits<double>::quiet_NaN()};
@@ -146,6 +183,9 @@ private:
   std::vector<double> high_speed_curve_lateral_hold_offsets_;
   double high_speed_curve_lateral_hold_sec_{
       std::numeric_limits<double>::quiet_NaN()};
+  // 再合流を安全に完了した後だけ使う高速カーブの現d保持。ABORT中のPASSを
+  // そのまま再利用せず、解除後に通常状態機械で改めて評価させる。
+  bool post_abort_curve_hold_active_{false};
 };
 
 } // namespace overtake_planner

@@ -27,9 +27,10 @@ plannerの判断そのものは `OvertakePlannerCore` に任せ、このファ�
 1. `reference_package`, `reference_csv`, `own_vehicle_id` を読む。
 2. `PlannerConfig` に対応する大量のparameterを宣言して読む。
 3. `FrenetFrame::loadCsv()` で参照線をロードする。
-4. section safety ruleを読む。
-5. `OvertakePlannerCore` を生成する。
-6. publisher/subscriber/timerを作る。
+4. 有効時は `FrenetFrame::loadCorridorCsv()` で参照照合済みの物理回廊をロードする。失敗時はoverrideを無効化する。
+5. section safety ruleを読む。
+6. `OvertakePlannerCore` を生成する。
+7. publisher/subscriber/timerを作る。
 
 重要なpublisher:
 
@@ -78,7 +79,7 @@ name,start_wp,end_wp,allow_overtake
 
 `start_wp/end_wp` は参照線の `s` に変換されます。
 `allow_overtake=false` の区間では、通常は追い越し開始せず `FOLLOW_BLOCKED` を維持します。
-停止/低速の前方車だけは、Core側の `slow_front_exception_*` 条件を満たすと例外的にPASS開始できます。
+停止/低速の直接前走車だけは、`slow_front_permission_exception_enabled=true` とCore側の `slow_front_exception_*` 条件を満たし、SafetyEvaluator通過済みPASSとfreshな入力がそろう場合に限り例外的にPASS開始できます。
 
 ## `updateMpcHealth()`
 

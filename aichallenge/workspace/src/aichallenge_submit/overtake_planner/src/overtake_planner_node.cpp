@@ -227,12 +227,89 @@ invalidLongitudinalSafetyConfig(const PlannerConfig &config) {
        !std::isfinite(config.reentry_v2x_snapshot_stale_time_sec) ||
        config.reentry_v2x_snapshot_stale_time_sec <= 0.0 ||
        !std::isfinite(config.reentry_hold_v_max_mps) ||
-       config.reentry_hold_v_max_mps <= 0.0)) {
+       config.reentry_hold_v_max_mps <= 0.0 ||
+       !std::isfinite(config.post_abort_curve_hold_v_max_mps) ||
+       config.post_abort_curve_hold_v_max_mps <= 0.0)) {
     return "invalid reentry gate safety parameter";
   }
   if (!std::isfinite(config.normal_recovery_speed_only_v_max_mps) ||
       config.normal_recovery_speed_only_v_max_mps <= 0.0) {
     return "normal_recovery_speed_only_v_max_mps must be finite and > 0";
+  }
+  if (config.gentle_curve_safe_pass_enabled &&
+      (!std::isfinite(config.gentle_curve_safe_pass_max_curvature_m_inv) ||
+       config.gentle_curve_safe_pass_max_curvature_m_inv <= 0.0 ||
+       !std::isfinite(config.gentle_curve_safe_pass_v_max_mps) ||
+       config.gentle_curve_safe_pass_v_max_mps <= 0.0 ||
+       !std::isfinite(
+           config.gentle_curve_safe_pass_max_lateral_displacement_m) ||
+       config.gentle_curve_safe_pass_max_lateral_displacement_m <= 0.0 ||
+       !std::isfinite(config.gentle_curve_safe_pass_max_lateral_accel_mps2) ||
+       config.gentle_curve_safe_pass_max_lateral_accel_mps2 <= 0.0)) {
+    return "invalid gentle curve safe pass safety parameter";
+  }
+  if (config.stationary_no_pass_safe_pass_enabled &&
+      (!std::isfinite(
+           config.stationary_no_pass_safe_pass_max_curvature_m_inv) ||
+       config.stationary_no_pass_safe_pass_max_curvature_m_inv <= 0.0 ||
+       !std::isfinite(config.stationary_no_pass_safe_pass_v_max_mps) ||
+       config.stationary_no_pass_safe_pass_v_max_mps <= 0.0 ||
+       !std::isfinite(
+           config.stationary_no_pass_safe_pass_max_lateral_displacement_m) ||
+       config.stationary_no_pass_safe_pass_max_lateral_displacement_m <= 0.0 ||
+       !std::isfinite(
+           config.stationary_no_pass_safe_pass_max_lateral_accel_mps2) ||
+       config.stationary_no_pass_safe_pass_max_lateral_accel_mps2 <= 0.0 ||
+       !std::isfinite(config.stationary_no_pass_safe_pass_max_cbf_slack) ||
+       config.stationary_no_pass_safe_pass_max_cbf_slack < 0.0)) {
+    return "invalid stationary no-pass safe pass safety parameter";
+  }
+  if (config.braking_follow_enabled &&
+      (!std::isfinite(config.braking_follow_max_distance_m) ||
+       config.braking_follow_max_distance_m <= 0.0 ||
+       !std::isfinite(config.braking_follow_trigger_margin_m) ||
+       config.braking_follow_trigger_margin_m < 0.0)) {
+    return "invalid braking follow safety parameter";
+  }
+  if (config.follow_gap_closing_enabled &&
+      (!std::isfinite(config.follow_gap_closing_target_gap_m) ||
+       config.follow_gap_closing_target_gap_m < config.safety_ellipse_a_m ||
+       !std::isfinite(config.follow_gap_closing_engage_gap_m) ||
+       config.follow_gap_closing_engage_gap_m <
+           config.follow_gap_closing_target_gap_m ||
+       !std::isfinite(config.follow_trigger_s_m) ||
+       config.follow_trigger_s_m <= config.follow_gap_closing_engage_gap_m ||
+       !std::isfinite(config.follow_gap_closing_speed_gain_per_m) ||
+       config.follow_gap_closing_speed_gain_per_m <= 0.0 ||
+       !std::isfinite(config.follow_gap_closing_max_speed_bonus_mps) ||
+       config.follow_gap_closing_max_speed_bonus_mps <= 0.0 ||
+       !std::isfinite(config.follow_gap_closing_assumed_accel_mps2) ||
+       config.follow_gap_closing_assumed_accel_mps2 <= 0.0 ||
+       config.follow_gap_closing_assumed_accel_mps2 > 3.0)) {
+    return "invalid follow gap closing safety parameter";
+  }
+  if (!std::isfinite(config.pass_speed_cap_mps) ||
+      config.pass_speed_cap_mps <= 0.0 ||
+      !std::isfinite(config.pass_assumed_accel_mps2) ||
+      config.pass_assumed_accel_mps2 <= 0.0 ||
+      config.pass_assumed_accel_mps2 > 3.0 ||
+      !std::isfinite(config.pass_target_lateral_margin_m) ||
+      config.pass_target_lateral_margin_m < 0.0) {
+    return "invalid pass acceleration safety parameter";
+  }
+  if (config.pass_target_policy != "legacy_fixed_offset" &&
+      config.pass_target_policy != "minimum_clearance") {
+    return "pass_target_policy must be legacy_fixed_offset or minimum_clearance";
+  }
+  if (config.early_stationary_parallel_pass_enabled &&
+      (!std::isfinite(config.early_stationary_parallel_pass_distance_m) ||
+       config.early_stationary_parallel_pass_distance_m <= 0.0 ||
+       !std::isfinite(config.early_stationary_parallel_pass_lateral_width_m) ||
+       config.early_stationary_parallel_pass_lateral_width_m <=
+           config.same_corridor_width_m ||
+       config.early_stationary_parallel_pass_lateral_width_m >
+           config.parallel_side_margin_m)) {
+    return "invalid early stationary parallel pass parameter";
   }
   return std::nullopt;
 }
@@ -255,6 +332,12 @@ public:
         "overtake_permission_package", "overtake_planner");
     const auto overtake_permission_csv = declare_parameter<std::string>(
         "overtake_permission_csv", "config/overtake_permission.csv");
+    const auto drivable_corridor_package = declare_parameter<std::string>(
+        "drivable_corridor_package", "overtake_planner");
+    const auto drivable_corridor_csv = declare_parameter<std::string>(
+        "drivable_corridor_csv", "config/final_ver3_drivable_corridor.csv");
+    const bool drivable_corridor_enabled = declare_parameter<bool>(
+        "drivable_corridor_enabled", true);
     own_vehicle_id_ = resolveOwnVehicleId(
         declare_parameter<std::string>("own_vehicle_id", "auto"), get_logger());
     ignore_near_ego_m_ = declare_parameter<double>("ignore_near_ego_m", 1.0);
@@ -302,6 +385,12 @@ public:
         declare_parameter<double>("parallel_side_s_m", 12.0);
     config.parallel_side_margin_m =
         declare_parameter<double>("parallel_side_margin_m", 4.0);
+    config.parallel_follow_enabled =
+        declare_parameter<bool>("parallel_follow_enabled", false);
+    config.parallel_follow_s_m =
+        declare_parameter<double>("parallel_follow_s_m", 12.0);
+    config.parallel_follow_lateral_width_m =
+        declare_parameter<double>("parallel_follow_lateral_width_m", 1.20);
     config.side_yield_s_m = declare_parameter<double>("side_yield_s_m", 0.30);
     config.side_by_side_target_gap_m =
         declare_parameter<double>("side_by_side_target_gap_m", 0.75);
@@ -338,6 +427,23 @@ public:
     config.straight_overtake_release_hysteresis_m_inv =
         declare_parameter<double>("straight_overtake_release_hysteresis_m_inv",
                                   0.005);
+    config.gentle_curve_safe_pass_enabled =
+        declare_parameter<bool>("gentle_curve_safe_pass_enabled", false);
+    config.gentle_curve_safe_pass_max_curvature_m_inv = declare_parameter<double>(
+        "gentle_curve_safe_pass_max_curvature_m_inv", 0.0);
+    config.gentle_curve_safe_pass_v_max_mps =
+        declare_parameter<double>("gentle_curve_safe_pass_v_max_mps", 0.0);
+    config.gentle_curve_safe_pass_max_lateral_displacement_m =
+        declare_parameter<double>(
+            "gentle_curve_safe_pass_max_lateral_displacement_m", 0.0);
+    config.gentle_curve_safe_pass_max_lateral_accel_mps2 =
+        declare_parameter<double>(
+            "gentle_curve_safe_pass_max_lateral_accel_mps2", 0.0);
+    config.gentle_curve_safe_pass_max_cbf_slack =
+        declare_parameter<double>("gentle_curve_safe_pass_max_cbf_slack", 0.0);
+    config.gentle_curve_safe_pass_bypass_mode_hold_enabled =
+        declare_parameter<bool>("gentle_curve_safe_pass_bypass_mode_hold_enabled",
+                                false);
     config.overtake_permission_profile_enabled =
         declare_parameter<bool>("overtake_permission_profile_enabled", true);
     config.default_overtake_allowed =
@@ -346,6 +452,8 @@ public:
         declare_parameter<double>("overtake_permission_lookahead_m", 8.0);
     config.slow_front_exception_enabled =
         declare_parameter<bool>("slow_front_exception_enabled", true);
+    config.slow_front_permission_exception_enabled = declare_parameter<bool>(
+        "slow_front_permission_exception_enabled", false);
     config.slow_front_exception_speed_mps =
         declare_parameter<double>("slow_front_exception_speed_mps", 1.0);
     config.slow_front_exception_distance_m =
@@ -359,6 +467,38 @@ public:
         declare_parameter<bool>("slow_obstacle_chain_enabled", true);
     config.slow_obstacle_chain_distance_m =
         declare_parameter<double>("slow_obstacle_chain_distance_m", 12.0);
+    config.early_stationary_parallel_pass_enabled = declare_parameter<bool>(
+        "early_stationary_parallel_pass_enabled", false);
+    config.early_stationary_parallel_permission_exception_enabled =
+        declare_parameter<bool>(
+            "early_stationary_parallel_permission_exception_enabled", false);
+    config.early_stationary_parallel_pass_distance_m = declare_parameter<double>(
+        "early_stationary_parallel_pass_distance_m", 8.0);
+    config.early_stationary_parallel_pass_lateral_width_m =
+        declare_parameter<double>(
+            "early_stationary_parallel_pass_lateral_width_m", 1.5);
+    config.stationary_no_pass_safe_pass_enabled = declare_parameter<bool>(
+        "stationary_no_pass_safe_pass_enabled", false);
+    config.stationary_no_pass_safe_pass_max_curvature_m_inv =
+        declare_parameter<double>(
+            "stationary_no_pass_safe_pass_max_curvature_m_inv", 0.0);
+    config.stationary_no_pass_safe_pass_v_max_mps = declare_parameter<double>(
+        "stationary_no_pass_safe_pass_v_max_mps", 0.0);
+    config.stationary_no_pass_safe_pass_max_lateral_displacement_m =
+        declare_parameter<double>(
+            "stationary_no_pass_safe_pass_max_lateral_displacement_m", 0.0);
+    config.stationary_no_pass_safe_pass_max_lateral_accel_mps2 =
+        declare_parameter<double>(
+            "stationary_no_pass_safe_pass_max_lateral_accel_mps2", 0.0);
+    config.stationary_no_pass_safe_pass_max_cbf_slack =
+        declare_parameter<double>(
+            "stationary_no_pass_safe_pass_max_cbf_slack", 0.0);
+    config.braking_follow_enabled =
+        declare_parameter<bool>("braking_follow_enabled", false);
+    config.braking_follow_max_distance_m = declare_parameter<double>(
+        "braking_follow_max_distance_m", 0.0);
+    config.braking_follow_trigger_margin_m = declare_parameter<double>(
+        "braking_follow_trigger_margin_m", 0.0);
     config.large_lateral_error_threshold_m =
         declare_parameter<double>("large_lateral_error_threshold_m", 0.60);
     config.large_lateral_error_v_max_mps =
@@ -394,6 +534,10 @@ public:
         declare_parameter<double>("reentry_hold_v_max_mps", 0.50);
     config.reentry_mpc_degraded_hold_v_max_mps =
         declare_parameter<double>("reentry_mpc_degraded_hold_v_max_mps", 3.0);
+    config.post_abort_curve_hold_v_max_mps =
+        declare_parameter<double>("post_abort_curve_hold_v_max_mps", 4.0);
+    config.reentry_mpc_latency_degraded_enter_samples = declare_parameter<int>(
+        "reentry_mpc_latency_degraded_enter_samples", 1);
     config.reentry_mpc_unhealthy_enter_samples =
         declare_parameter<int>("reentry_mpc_unhealthy_enter_samples", 2);
     config.reentry_mpc_healthy_release_samples =
@@ -402,6 +546,8 @@ public:
         declare_parameter<bool>("reentry_require_mpc_health", true);
     config.left_offset_m = declare_parameter<double>("left_offset_m", 0.70);
     config.right_offset_m = declare_parameter<double>("right_offset_m", -0.70);
+    config.pass_target_policy = declare_parameter<std::string>(
+        "pass_target_policy", "legacy_fixed_offset");
     config.overtake_lateral_profile_mode = declare_parameter<std::string>(
         "overtake_lateral_profile_mode", "legacy");
     config.pass_horizon_publish_mode = declare_parameter<std::string>(
@@ -426,6 +572,24 @@ public:
         declare_parameter<double>("merge_distance_m", 12.0);
     config.follow_speed_margin_mps =
         declare_parameter<double>("follow_speed_margin_mps", 0.20);
+    config.follow_gap_closing_enabled =
+        declare_parameter<bool>("follow_gap_closing_enabled", false);
+    config.follow_gap_closing_target_gap_m =
+        declare_parameter<double>("follow_gap_closing_target_gap_m", 5.0);
+    config.follow_gap_closing_engage_gap_m =
+        declare_parameter<double>("follow_gap_closing_engage_gap_m", 6.0);
+    config.follow_gap_closing_speed_gain_per_m = declare_parameter<double>(
+        "follow_gap_closing_speed_gain_per_m", 0.10);
+    config.follow_gap_closing_max_speed_bonus_mps = declare_parameter<double>(
+        "follow_gap_closing_max_speed_bonus_mps", 0.30);
+    config.follow_gap_closing_assumed_accel_mps2 = declare_parameter<double>(
+        "follow_gap_closing_assumed_accel_mps2", 3.0);
+    config.pass_speed_cap_mps =
+        declare_parameter<double>("pass_speed_cap_mps", 10.0);
+    config.pass_assumed_accel_mps2 =
+        declare_parameter<double>("pass_assumed_accel_mps2", 3.0);
+    config.pass_target_lateral_margin_m = declare_parameter<double>(
+        "pass_target_lateral_margin_m", 0.10);
     config.recovery_v_max_mps =
         declare_parameter<double>("recovery_v_max_mps", 8.5);
     config.wall_margin_recovery_v_max_mps =
@@ -545,10 +709,26 @@ public:
         resolveReferencePath(reference_package, reference_csv);
     if (!frame.loadCsv(reference_path, &error)) {
       RCLCPP_ERROR(get_logger(), "%s", error.c_str());
+      config.enabled = false;
     } else {
       RCLCPP_INFO(
           get_logger(), "loaded overtake reference: %s (%zu points, %.2f m)",
           reference_path.c_str(), frame.reference().size(), frame.length());
+      if (drivable_corridor_enabled) {
+        const auto corridor_path = resolveReferencePath(
+            drivable_corridor_package, drivable_corridor_csv);
+        if (!frame.loadCorridorCsv(corridor_path, &error)) {
+          RCLCPP_ERROR(
+              get_logger(),
+              "failed to load verified drivable corridor; disabling planner "
+              "override: %s",
+              error.c_str());
+          config.enabled = false;
+        } else {
+          RCLCPP_INFO(get_logger(), "loaded overtake drivable corridor: %s",
+                      corridor_path.c_str());
+        }
+      }
     }
     frame_ = frame;
     config.section_safety_rules = readSectionSafetyRules(frame_);
@@ -610,6 +790,8 @@ private:
     bool side_by_side{false};
     bool corner_side_by_side{false};
     bool parallel_side_candidate{false};
+    bool parallel_follow_candidate{false};
+    bool parallel_follow_feasible{false};
     bool future_side_by_side{false};
     bool future_corner_side_by_side{false};
     bool future_yield_required{false};
@@ -633,9 +815,11 @@ private:
     bool pass_decision_frozen{false};
     std::string pass_decision_freeze_reason{};
     double future_wall_clearance_m{std::numeric_limits<double>::infinity()};
+    double ego_wall_clearance_m{std::numeric_limits<double>::infinity()};
     std::string front_vehicle_id{};
     std::string side_vehicle_id{};
     std::string parallel_side_vehicle_id{};
+    std::string parallel_follow_vehicle_id{};
     bool leader_priority_active{false};
     bool leader_priority_latched{false};
     std::string leader_priority_id{};
@@ -1113,6 +1297,16 @@ private:
         << output.blocked_info.overtake_permission_section_name << "\","
         << "\"overtake_permission_reason\":\""
         << output.blocked_info.overtake_permission_reason << "\","
+        << "\"confirmed_stationary_parallel_permission_exception\":"
+        << (output.blocked_info
+                    .confirmed_stationary_parallel_permission_exception
+                ? "true"
+                : "false")
+        << ","
+        << "\"permission_start_exception_active\":"
+        << (output.blocked_info.permission_start_exception_active ? "true"
+                                                                   : "false")
+        << ","
         << "\"front_vehicle_low_speed\":"
         << (output.blocked_info.front_vehicle_low_speed ? "true" : "false")
         << ","
@@ -1150,6 +1344,37 @@ private:
         << "\"stationary_front_available_brake_distance_m\":"
         << jsonNumber(
                output.blocked_info.stationary_front_available_brake_distance_m)
+        << ","
+        << "\"braking_follow_active\":"
+        << (output.blocked_info.braking_follow_active ? "true" : "false")
+        << ","
+        << "\"braking_follow_feasible\":"
+        << (output.blocked_info.braking_follow_feasible ? "true" : "false")
+        << ","
+        << "\"braking_follow_id\":\""
+        << output.blocked_info.braking_follow_id << "\","
+        << "\"braking_follow_delta_s\":"
+        << jsonNumber(output.blocked_info.braking_follow_delta_s) << ","
+        << "\"braking_follow_required_distance_m\":"
+        << jsonNumber(output.blocked_info.braking_follow_required_distance_m)
+        << ","
+        << "\"braking_follow_available_distance_m\":"
+        << jsonNumber(output.blocked_info.braking_follow_available_distance_m)
+        << ","
+        << "\"braking_follow_speed_cap_mps\":"
+        << jsonNumber(output.blocked_info.braking_follow_speed_cap_mps) << ","
+        << "\"stationary_no_pass_safe_pass_eligible\":"
+        << (output.blocked_info.stationary_no_pass_safe_pass_eligible ? "true"
+                                                                       : "false")
+        << ","
+        << "\"stationary_no_pass_safe_pass_start_approved\":"
+        << (output.blocked_info.stationary_no_pass_safe_pass_start_approved
+                ? "true"
+                : "false")
+        << ","
+        << "\"stationary_no_pass_safe_pass_speed_cap_mps\":"
+        << jsonNumber(
+               output.blocked_info.stationary_no_pass_safe_pass_speed_cap_mps)
         << ","
         << "\"future_side_by_side\":"
         << (output.blocked_info.future_side_by_side ? "true" : "false") << ","
@@ -1234,6 +1459,30 @@ private:
         << (output.blocked_info.parallel_side_direction_known ? "true"
                                                               : "false")
         << ","
+        << "\"parallel_follow_candidate\":"
+        << (output.blocked_info.parallel_follow_candidate ? "true" : "false")
+        << ","
+        << "\"parallel_follow_feasible\":"
+        << (output.blocked_info.parallel_follow_feasible ? "true" : "false")
+        << ","
+        << "\"parallel_follow_vehicle_id\":\""
+        << output.blocked_info.parallel_follow_id << "\","
+        << "\"parallel_follow_delta_s\":"
+        << jsonNumber(output.blocked_info.parallel_follow_delta_s) << ","
+        << "\"parallel_follow_delta_d\":"
+        << jsonNumber(output.blocked_info.parallel_follow_delta_d) << ","
+        << "\"parallel_follow_relative_speed_mps\":"
+        << jsonNumber(output.blocked_info.parallel_follow_rel_v) << ","
+        << "\"parallel_follow_s_dot_mps\":"
+        << jsonNumber(output.blocked_info.parallel_follow_s_dot_mps) << ","
+        << "\"parallel_follow_same_direction\":"
+        << (output.blocked_info.parallel_follow_same_direction ? "true"
+                                                               : "false")
+        << ","
+        << "\"parallel_follow_direction_known\":"
+        << (output.blocked_info.parallel_follow_direction_known ? "true"
+                                                                : "false")
+        << ","
         << "\"leader_priority_active\":"
         << (output.blocked_info.leader_priority_active ? "true" : "false")
         << ","
@@ -1271,6 +1520,24 @@ private:
         << (output.blocked_info.pass_right_candidate_feasible ? "true"
                                                               : "false")
         << ","
+        << "\"pass_left_candidate_target_d_m\":"
+        << jsonNumber(output.blocked_info.pass_left_candidate_target_d_m)
+        << ","
+        << "\"pass_right_candidate_target_d_m\":"
+        << jsonNumber(output.blocked_info.pass_right_candidate_target_d_m)
+        << ","
+        << "\"pass_left_candidate_corridor_min_margin_m\":"
+        << jsonNumber(
+               output.blocked_info.pass_left_candidate_corridor_min_margin_m)
+        << ","
+        << "\"pass_right_candidate_corridor_min_margin_m\":"
+        << jsonNumber(
+               output.blocked_info.pass_right_candidate_corridor_min_margin_m)
+        << ","
+        << "\"pass_left_candidate_reject_reason\":\""
+        << output.blocked_info.pass_left_candidate_reject_reason << "\","
+        << "\"pass_right_candidate_reject_reason\":\""
+        << output.blocked_info.pass_right_candidate_reject_reason << "\","
         << "\"pass_gap_required_m\":"
         << jsonNumber(output.blocked_info.pass_gap_required_m) << ","
         << "\"pass_decision_frozen\":"
@@ -1283,6 +1550,8 @@ private:
         << "\"ego_y\":" << jsonNumber(ego.y) << ","
         << "\"ego_s\":" << jsonNumber(ego.frenet.s) << ","
         << "\"ego_lateral_offset\":" << jsonNumber(ego.frenet.d) << ","
+        << "\"ego_wall_clearance_m\":"
+        << jsonNumber(output.blocked_info.ego_wall_clearance_m) << ","
         << "\"ego_speed_mps\":" << jsonNumber(ego.v) << ","
         << "\"target_lateral_offset_m\":"
         << jsonNumber(output.target_lateral_offset_m) << ","
@@ -1404,6 +1673,10 @@ private:
     snapshot.corner_side_by_side = output.blocked_info.corner_side_by_side;
     snapshot.parallel_side_candidate =
         output.blocked_info.parallel_side_candidate;
+    snapshot.parallel_follow_candidate =
+        output.blocked_info.parallel_follow_candidate;
+    snapshot.parallel_follow_feasible =
+        output.blocked_info.parallel_follow_feasible;
     snapshot.future_side_by_side = output.blocked_info.future_side_by_side;
     snapshot.future_corner_side_by_side =
         output.blocked_info.future_corner_side_by_side;
@@ -1443,9 +1716,12 @@ private:
         output.blocked_info.pass_decision_freeze_reason;
     snapshot.future_wall_clearance_m =
         output.blocked_info.future_wall_clearance_m;
+    snapshot.ego_wall_clearance_m = output.blocked_info.ego_wall_clearance_m;
     snapshot.front_vehicle_id = output.blocked_info.nearest_id;
     snapshot.side_vehicle_id = output.blocked_info.side_id;
     snapshot.parallel_side_vehicle_id = output.blocked_info.parallel_side_id;
+    snapshot.parallel_follow_vehicle_id =
+        output.blocked_info.parallel_follow_id;
     snapshot.leader_priority_active =
         output.blocked_info.leader_priority_active;
     snapshot.leader_priority_latched =
@@ -1501,7 +1777,8 @@ private:
     return snapshot.mode != BehaviorMode::FREE_RUN ||
            snapshot.selected != CandidateType::FASTEST || snapshot.blocked ||
            snapshot.side_by_side || snapshot.corner_side_by_side ||
-           snapshot.parallel_side_candidate || snapshot.future_side_by_side ||
+           snapshot.parallel_side_candidate ||
+           snapshot.parallel_follow_candidate || snapshot.future_side_by_side ||
            snapshot.future_corner_side_by_side ||
            snapshot.future_yield_required || snapshot.active_override ||
            snapshot.safe_stop_triggered || snapshot.start_grace_active ||
@@ -1519,6 +1796,7 @@ private:
            !snapshot.front_vehicle_id.empty() ||
            !snapshot.side_vehicle_id.empty() ||
            !snapshot.parallel_side_vehicle_id.empty() ||
+           !snapshot.parallel_follow_vehicle_id.empty() ||
            snapshot.leader_priority_active || has_pass_gap_context ||
            !snapshot.reason.empty();
   }
@@ -1540,6 +1818,9 @@ private:
         current.side_by_side != previous.side_by_side ||
         current.corner_side_by_side != previous.corner_side_by_side ||
         current.parallel_side_candidate != previous.parallel_side_candidate ||
+        current.parallel_follow_candidate !=
+            previous.parallel_follow_candidate ||
+        current.parallel_follow_feasible != previous.parallel_follow_feasible ||
         current.future_side_by_side != previous.future_side_by_side ||
         current.future_corner_side_by_side !=
             previous.future_corner_side_by_side ||
@@ -1577,9 +1858,13 @@ private:
             previous.pass_decision_freeze_reason ||
         std::abs(current.future_wall_clearance_m -
                  previous.future_wall_clearance_m) > 0.05 ||
+        std::abs(current.ego_wall_clearance_m -
+                 previous.ego_wall_clearance_m) > 0.05 ||
         current.front_vehicle_id != previous.front_vehicle_id ||
         current.side_vehicle_id != previous.side_vehicle_id ||
         current.parallel_side_vehicle_id != previous.parallel_side_vehicle_id ||
+        current.parallel_follow_vehicle_id !=
+            previous.parallel_follow_vehicle_id ||
         current.leader_priority_active != previous.leader_priority_active ||
         current.leader_priority_latched != previous.leader_priority_latched ||
         current.leader_priority_id != previous.leader_priority_id ||
@@ -1658,6 +1943,9 @@ private:
         "front_id=%s front_ds=%.2f "
         "front_dd=%.2f rel_v=%.2f side_id=%s side_ds=%.2f side_dd=%.2f "
         "side_s_dot=%.2f parallel_id=%s parallel_ds=%.2f parallel_dd=%.2f "
+        "parallel_follow=%d parallel_follow_feasible=%d "
+        "parallel_follow_id=%s parallel_follow_ds=%.2f "
+        "parallel_follow_dd=%.2f "
         "leader_priority=%d leader_latched=%d leader_id=%s "
         "leader_ds=%.2f leader_reason=%s "
         "can_left=%d can_right=%d pass_gap_reason=%s "
@@ -1666,9 +1954,14 @@ private:
         "permission_allowed=%d permission_section=%s permission_reason=%s "
         "front_low_speed=%d slow_exception=%d slow_exception_count=%d "
         "slow_chain=%d slow_chain_id=%s front_speed=%.2f "
+        "early_stationary_parallel=%d early_stationary_parallel_id=%s "
+        "early_stationary_parallel_count=%d "
+        "early_stationary_parallel_permission_exception=%d "
+        "permission_start_exception=%d "
         "future_wall_clearance=%.2f yield_reason=%s "
         "pass_frozen=%d pass_freeze_reason=%s "
-        "ego_s=%.2f ego_d=%.2f target_d=%.2f min_cbf_h=%.3f cbf_slack=%.3f "
+        "ego_s=%.2f ego_d=%.2f ego_wall_clearance=%.2f target_d=%.2f "
+        "min_cbf_h=%.3f cbf_slack=%.3f "
         "safe_stop_triggered=%d start_grace=%d safe_stop_reason=%s "
         "safe_stop_reject_reason=%s "
         "safe_stop_trigger_count=%d safe_stop_hold_count=%d "
@@ -1695,6 +1988,11 @@ private:
         output.blocked_info.parallel_side_id.c_str(),
         output.blocked_info.parallel_side_delta_s,
         output.blocked_info.parallel_side_delta_d,
+        output.blocked_info.parallel_follow_candidate,
+        output.blocked_info.parallel_follow_feasible,
+        output.blocked_info.parallel_follow_id.c_str(),
+        output.blocked_info.parallel_follow_delta_s,
+        output.blocked_info.parallel_follow_delta_d,
         output.blocked_info.leader_priority_active,
         output.blocked_info.leader_priority_latched,
         output.blocked_info.leader_priority_id.c_str(),
@@ -1715,11 +2013,17 @@ private:
         output.blocked_info.slow_obstacle_chain_active,
         output.blocked_info.slow_obstacle_chain_id.c_str(),
         output.blocked_info.front_vehicle_speed_mps,
+        output.blocked_info.early_stationary_parallel_pass_target,
+        output.blocked_info.early_stationary_parallel_pass_id.c_str(),
+        output.blocked_info.early_stationary_parallel_pass_count,
+        output.blocked_info.confirmed_stationary_parallel_permission_exception,
+        output.blocked_info.permission_start_exception_active,
         output.blocked_info.future_wall_clearance_m,
         output.blocked_info.yield_reason.c_str(),
         output.blocked_info.pass_decision_frozen,
         output.blocked_info.pass_decision_freeze_reason.c_str(), ego.frenet.s,
-        ego.frenet.d, output.target_lateral_offset_m, output.min_cbf_h,
+        ego.frenet.d, output.blocked_info.ego_wall_clearance_m,
+        output.target_lateral_offset_m, output.min_cbf_h,
         output.cbf_slack, output.safe_stop_triggered, output.start_grace_active,
         output.safe_stop_reason.c_str(), output.safe_stop_reject_reason.c_str(),
         output.safe_stop_trigger_count, output.safe_stop_hold_count,

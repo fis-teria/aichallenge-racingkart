@@ -316,9 +316,9 @@ PASSでは、この最終 `d[]` を再度SafetyEvaluatorへ通します。unsafe
 - `FOLLOW`
   - 中心方向へ寄せ、前走車より少し低い速度上限
 - `PASS_LEFT`
-  - `left_offset_m` へ横移動
+  - `minimum_clearance` では相手の必要楕円間隔を満たす最小dへ横移動し、raw profile全区間が回廊内の場合だけ採用
 - `PASS_RIGHT`
-  - `right_offset_m` へ横移動
+  - `minimum_clearance` では相手の必要楕円間隔を満たす最小dへ横移動し、raw profile全区間が回廊内の場合だけ採用
 - `RECOVERY`
   - 中心線へ戻る
 - `SIDE_BY_SIDE_KEEP`
@@ -425,7 +425,13 @@ FOLLOW、RECOVERY、SIDE_BY_SIDE_KEEP、YIELD_BEHIND、SAFE_STOPで目標速度�
 - `FASTEST`
   - `v_passthrough_mps`
 - `FOLLOW`
-  - `opponent.v - follow_speed_margin_mps`
+  - 通常は `opponent.v - follow_speed_margin_mps`
+  - `follow_gap_closing_*` が有効で、同一コリドーの通常前走車とのgapが
+    `follow_gap_closing_engage_gap_m` 以上、入力fresh、MPC健全、横並び/譲り/
+    停止低速障害物でない時だけ、最大 `follow_gap_closing_max_speed_bonus_mps` を加える
+  - bonusを使う候補の `s(t)` は
+    `follow_gap_closing_assumed_accel_mps2` で即時加速する最遠到達距離として
+    SafetyEvaluatorへ渡し、通らなければ候補を採用しない
 - `SIDE_BY_SIDE_KEEP`
   - `side_by_side_speed_cap_mps`
   - 相手速度より `yield_speed_margin_mps` だけ低い値も見る
@@ -519,6 +525,7 @@ overrideがない、または選ばれた候補がunsafeな場合だけ `SPEED_G
 - `default_overtake_allowed`
 - `overtake_permission_lookahead_m`
 - `slow_front_exception_enabled`
+- `slow_front_permission_exception_enabled`
 - `slow_front_exception_speed_mps`
 - `slow_front_exception_distance_m`
 - `slow_front_exception_required_cycles`
@@ -628,7 +635,7 @@ overtake decision:
 - 左右どちらのpass gapが失われても、追い越し方向を即反転せず `YIELD_BEHIND` を選ぶ
 - 直線限定ゲートが閉じている区間では、gapがあっても追い越し開始へ入らない
 - 追い越し許可CSVで `allow_overtake=false` の区間では、gapがあっても追い越し開始へ入らず `FOLLOW_BLOCKED` を維持する
-- `allow_overtake=false` でも、前方車が停止/低速条件を連続で満たす場合だけ `slow_front_exception_active=true` としてPASS開始を許可する
+- `allow_overtake=false` でも、`slow_front_permission_exception_enabled=true` で、前方車が停止/低速条件を連続で満たし、現在地点が禁止、SafetyEvaluator通過済みPASS、freshな全入力、横並び/未来譲りなしをすべて満たす場合だけPASS開始を許可する。lookahead先だけの禁止、高曲率、車列昇格は例外化しない
 - 1台目通過後に2台目が `parallel_side_candidate` として見える停止車列では、条件を満たす場合だけ `slow_obstacle_chain_active=true` として前方閉塞へ昇格する
 - `overtake_permission_lookahead_m` 内に不可区間がある場合は、現在位置が許可区間でも追い越し開始を抑制する
 - 大きい横ずれ中は、parallel side candidateや壁リスクがあれば `RECOVERY` を優先する

@@ -114,7 +114,22 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
             {"time_sec": 1.0, "target_speed_mps": 6.0, "mpc_status": "solved", "mpc_solve_time_ms": 4.0},
         ],
         overtake_debug_timeseries=[
-            {"time_sec": 0.0, "mode": "FOLLOW_BLOCKED", "front_delta_s": 5.0, "front_vehicle_id": "d2"},
+            {
+                "time_sec": 0.0,
+                "mode": "FOLLOW_BLOCKED",
+                "front_delta_s": 5.0,
+                "front_vehicle_id": "d2",
+                "ego_wall_clearance_m": 0.35,
+                "parallel_follow_candidate": True,
+                "parallel_follow_feasible": True,
+                "parallel_follow_vehicle_id": "d3",
+                "parallel_follow_delta_s": 5.0,
+                "parallel_follow_delta_d": -0.95,
+                "parallel_follow_relative_speed_mps": -0.8,
+                "parallel_follow_s_dot_mps": 0.8,
+                "parallel_follow_same_direction": True,
+                "parallel_follow_direction_known": True,
+            },
             {
                 "time_sec": 1.0,
                 "mode": "PREPARE_OVERTAKE_LEFT",
@@ -125,6 +140,7 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
                 "active_override": True,
                 "pass_gap_reason": "ok",
                 "min_cbf_h": 0.8,
+                "ego_wall_clearance_m": 0.22,
             },
             {
                 "time_sec": 2.0,
@@ -152,11 +168,17 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
     assert attempts[0]["result"] == "success"
     metrics = json.loads((tmp_path / "overtake_metrics.json").read_text(encoding="utf-8"))
     assert metrics["domains"]["d1"]["analysis_available"] is True
+    assert metrics["domains"]["d1"]["min_ego_wall_clearance_m"] == 0.22
     with (tmp_path / "overtake_timeseries.csv").open("r", encoding="utf-8", newline="") as handle:
         timeseries = list(csv.DictReader(handle))
     assert timeseries[1]["selected"] == "PASS_LEFT"
     assert timeseries[1]["active_override"] == "True"
     assert timeseries[1]["pass_gap_reason"] == "ok"
+    assert timeseries[1]["ego_wall_clearance_m"] == "0.22"
+    assert timeseries[0]["parallel_follow_candidate"] == "True"
+    assert timeseries[0]["parallel_follow_feasible"] == "True"
+    assert timeseries[0]["parallel_follow_vehicle_id"] == "d3"
+    assert timeseries[0]["parallel_follow_delta_d"] == "-0.95"
 
 
 def test_generate_overtake_report_surfaces_decision_metrics(tmp_path: Path) -> None:
@@ -203,6 +225,12 @@ def test_generate_overtake_report_surfaces_decision_metrics(tmp_path: Path) -> N
             "selected",
             "blocked",
             "side_by_side",
+            "parallel_follow_candidate",
+            "parallel_follow_feasible",
+            "parallel_follow_vehicle_id",
+            "parallel_follow_delta_s",
+            "parallel_follow_delta_d",
+            "parallel_follow_relative_speed_mps",
             "front_vehicle_id",
             "front_distance_m",
             "front_delta_d",
@@ -224,6 +252,12 @@ def test_generate_overtake_report_surfaces_decision_metrics(tmp_path: Path) -> N
                 "selected": "FOLLOW",
                 "blocked": "true",
                 "side_by_side": "false",
+                "parallel_follow_candidate": "true",
+                "parallel_follow_feasible": "true",
+                "parallel_follow_vehicle_id": "d3",
+                "parallel_follow_delta_s": "5.0",
+                "parallel_follow_delta_d": "-0.95",
+                "parallel_follow_relative_speed_mps": "-0.8",
                 "front_vehicle_id": "d2",
                 "front_distance_m": 5.0,
                 "front_delta_d": 0.1,
@@ -267,6 +301,8 @@ def test_generate_overtake_report_surfaces_decision_metrics(tmp_path: Path) -> N
     assert "PASS_LEFT" in html
     assert "right_gap_narrow" in html
     assert "active_override_samples" in html
+    assert "parallel_follow_samples" in html
+    assert "d3" in html
 
 
 def test_generate_overtake_report_keeps_single_vehicle_debug_quiet(tmp_path: Path) -> None:

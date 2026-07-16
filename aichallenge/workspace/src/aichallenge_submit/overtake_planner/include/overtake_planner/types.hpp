@@ -101,6 +101,13 @@ struct CandidateTrajectory {
   // 下流MPC/PPへの即時速度上限。各周期で先頭要素が直ちに消費される。
   std::vector<double> v_ref;
   bool feasible{true};
+  // PASS目標へ到達するまでのs依存安全回廊を事前に通過できるか。
+  // SafetyEvaluatorはこのfalseをwall/CBF評価より先にrejectする。
+  bool pass_target_corridor_valid{true};
+  // PASS候補で実際に計画した最終横目標と、raw profile全区間の最小壁余裕。
+  // debugでは選択候補ではなく左右候補そのものを追えるようにする。
+  double planned_target_d_m{std::numeric_limits<double>::quiet_NaN()};
+  double corridor_min_margin_m{std::numeric_limits<double>::quiet_NaN()};
   double score{0.0};
   double min_safety_margin{std::numeric_limits<double>::infinity()};
   double cbf_slack{0.0};
@@ -163,12 +170,28 @@ struct BlockedInfo {
   double parallel_side_s_dot_mps{0.0};
   bool parallel_side_direction_known{false};
   bool parallel_side_same_direction{true};
+  bool parallel_follow_candidate{false};
+  bool parallel_follow_feasible{false};
+  bool parallel_follow_hold_lateral{false};
+  int parallel_follow_index{-1};
+  std::string parallel_follow_id{};
+  double parallel_follow_delta_s{std::numeric_limits<double>::infinity()};
+  double parallel_follow_delta_d{0.0};
+  double parallel_follow_rel_v{0.0};
+  double parallel_follow_s_dot_mps{0.0};
+  bool parallel_follow_direction_known{false};
+  bool parallel_follow_same_direction{true};
   bool slow_obstacle_chain_active{false};
   std::string slow_obstacle_chain_id{};
   double slow_obstacle_chain_delta_s{std::numeric_limits<double>::infinity()};
   double slow_obstacle_chain_delta_d{0.0};
   double slow_obstacle_chain_speed_mps{
       std::numeric_limits<double>::quiet_NaN()};
+  // 同一コリドーには未進入だが、停止した前方parallel車をPASS候補だけ先行評価する文脈。
+  // blocked/FOLLOWへは昇格させず、PASSがGate 2を通らない限り通常走行を置き換えない。
+  bool early_stationary_parallel_pass_target{false};
+  std::string early_stationary_parallel_pass_id{};
+  int early_stationary_parallel_pass_count{0};
   // parallel観測とは分離した、前方で停止またはほぼ停止している対象の判定。
   bool stationary_front_obstacle{false};
   std::string stationary_front_id{};
@@ -205,17 +228,87 @@ struct BlockedInfo {
   bool pass_right_candidate_generated{false};
   bool pass_left_candidate_feasible{false};
   bool pass_right_candidate_feasible{false};
+  double pass_left_candidate_target_d_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  double pass_right_candidate_target_d_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  double pass_left_candidate_corridor_min_margin_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  double pass_right_candidate_corridor_min_margin_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  std::string pass_left_candidate_reject_reason{};
+  std::string pass_right_candidate_reject_reason{};
+  // early stationary PASSがGate 2で不成立の間、中心線へ横断せず現在dを
+  // SafetyEvaluator済みRECOVERY候補で保持する。reentry holdとは別文脈。
+  bool early_stationary_parallel_pass_hold_lateral{false};
+  // 停止障害物へ制動距離で接近したFOLLOWは、通常ラインへ横切らず現dを
+  // SafetyEvaluatorへ渡す。成立しない時も同じ現d RECOVERYだけを再評価する。
+  bool braking_follow_active{false};
+  bool braking_follow_hold_lateral{false};
+  bool braking_follow_feasible{false};
+  int braking_follow_index{-1};
+  std::string braking_follow_id{};
+  double braking_follow_delta_s{std::numeric_limits<double>::infinity()};
+  double braking_follow_required_distance_m{
+      std::numeric_limits<double>::infinity()};
+  double braking_follow_available_distance_m{
+      std::numeric_limits<double>::infinity()};
+  double braking_follow_speed_cap_mps{
+      std::numeric_limits<double>::quiet_NaN()};
+  // 追越禁止区間の停止parallel車に対する、限定PASS開始例外の最終承認。
+  // permission CSV自体の診断値は変更せず、freshness・同一ID確認・曲率・
+  // future/reentry除外・SafetyEvaluator通過を同じ周期に満たす場合だけtrue。
+  bool confirmed_stationary_parallel_permission_exception{false};
+  // current-section permissionを例外的に開始できる最終承認。direct slow-frontと
+  // confirmed stationary-parallelのどちらでもtrueになるが、CSV診断値は変えない。
+  bool permission_start_exception_active{false};
   // 復帰ゲートが閉じている間はRECOVERY候補を中心線へ動かさず、現在横位置を保持する。
   bool reentry_hold_active{false};
   // NaNなら従来のreentry_hold_v_max_mpsを使う。MPC
   // solve遅延だけの短時間holdは、
   // SafetyEvaluatorを通した現d保持候補に限って別の低速capを指定する。
   double reentry_hold_speed_cap_mps{std::numeric_limits<double>::quiet_NaN()};
+  // ABORTの復帰が安全に完了した直後、高速カーブ中だけ現dを保持する。
+  // この間はPASS候補を開始せず、Coreが毎周期RECOVERYをSafetyEvaluatorへ通す。
+  bool post_abort_curve_hold_active{false};
   double pass_gap_required_m{0.0};
   double corner_abs_curvature{0.0};
   bool straight_overtake_start_allowed{true};
   double overtake_start_abs_curvature{0.0};
   std::string overtake_start_gate_reason{};
+  // 通常のstraight gateが閉じた緩い曲線でだけ使う、制限済みPASS候補の診断。
+  // trueでもSafetyEvaluatorを通るまでは開始gateを開かない。
+  bool gentle_curve_safe_pass_eligible{false};
+  bool gentle_curve_safe_pass_constraint_active{false};
+  // 同周期に制限済みPASSがSafetyEvaluatorを通った時だけtrue。mode holdの
+  // 例外にも使うため、曲率だけで開いたgateとは分離して保持する。
+  bool gentle_curve_safe_pass_start_approved{false};
+  // 制限済みPASSの横移動は開始dを基準にする。NaNなら候補生成時の現在dを使う。
+  double gentle_curve_safe_pass_anchor_d_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  // 曲率から求めたPASS速度上限。SafetyEvaluatorが扱わない横加速度を
+  // candidate生成とPREPARE/OVERTAKE継続中の両方で制限する。NaNなら例外PASS不可。
+  double gentle_curve_safe_pass_speed_cap_mps{
+      std::numeric_limits<double>::quiet_NaN()};
+  // 禁止区間の停止障害物だけを対象にする制限PASS。通常のcurve gateや
+  // permission CSVは変更せず、この候補が同周期のGate 2を通った時だけ
+  // permission_start_exception_activeを立てる。
+  bool stationary_no_pass_safe_pass_eligible{false};
+  bool stationary_no_pass_safe_pass_constraint_active{false};
+  bool stationary_no_pass_safe_pass_start_approved{false};
+  double stationary_no_pass_safe_pass_anchor_d_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  double stationary_no_pass_safe_pass_speed_cap_mps{
+      std::numeric_limits<double>::quiet_NaN()};
+  // 直接前走車との大きなgapを詰めるFOLLOWだけでtrue。横並び、低速障害物、
+  // stale/MPC不健全、future yieldでは常にfalseへ閉じる。
+  bool follow_gap_closing_allowed{false};
+  // PASSで速度上限を現在速度より上げてよいのは、FOLLOW gap-closingと同等の
+  // freshness/MPC health条件を満たす周期だけ。falseならPASS候補も現速度で予測する。
+  bool pass_acceleration_allowed{false};
+  // falseはPREPARE/OVERTAKE開始済みの同側PASS。開始時に確認済みの目標到達性を
+  // 相手dの一時変動で再判定せず、現在horizonのSafetyEvaluatorだけを継続する。
+  bool pass_target_corridor_preflight_required{true};
   bool overtake_permission_allowed{true};
   std::string overtake_permission_section_name{};
   std::string overtake_permission_reason{"default_allowed"};
@@ -347,6 +440,9 @@ struct PlannerConfig {
   bool parallel_side_detection_enabled{true};
   double parallel_side_s_m{12.0};
   double parallel_side_margin_m{4.0};
+  bool parallel_follow_enabled{false};
+  double parallel_follow_s_m{12.0};
+  double parallel_follow_lateral_width_m{1.20};
   double side_yield_s_m{0.30};
   double side_by_side_target_gap_m{0.75};
   double side_by_side_shift_distance_m{7.0};
@@ -365,18 +461,56 @@ struct PlannerConfig {
   double straight_overtake_max_curvature_m_inv{0.025};
   double straight_overtake_lookahead_m{12.0};
   double straight_overtake_release_hysteresis_m_inv{0.005};
+  // 直線限定gateを緩めるのではなく、緩い曲線だけで小さく遅いPASS候補を
+  // SafetyEvaluatorへ先に通すための明示opt-in。0以下の上限は無効扱い。
+  bool gentle_curve_safe_pass_enabled{false};
+  double gentle_curve_safe_pass_max_curvature_m_inv{0.0};
+  double gentle_curve_safe_pass_v_max_mps{0.0};
+  double gentle_curve_safe_pass_max_lateral_displacement_m{0.0};
+  // 曲線PASSだけに課す横加速度上限[m/s^2]。有限の正値でなければ例外PASSは
+  // fail-closedにする。候補速度は sqrt(a_lat_max / abs(kappa)) 以下へ制限する。
+  double gentle_curve_safe_pass_max_lateral_accel_mps2{0.0};
+  double gentle_curve_safe_pass_max_cbf_slack{0.0};
+  // trueでも時間だけでgateは延長しない。同周期のSafetyEvaluator承認済みPASSが
+  // pass_safe_required_cyclesに達した時だけFOLLOWの最低holdを例外化する。
+  bool gentle_curve_safe_pass_bypass_mode_hold_enabled{false};
   bool overtake_permission_profile_enabled{true};
   bool default_overtake_allowed{true};
   double overtake_permission_lookahead_m{8.0};
   bool slow_front_exception_enabled{true};
+  // falseなら停止/低速障害物でも禁止permissionを例外許可しない。
+  // 有効時もSafetyEvaluator通過済みPASSだけを開始対象にする。
+  bool slow_front_permission_exception_enabled{false};
   double slow_front_exception_speed_mps{1.0};
   double slow_front_exception_distance_m{8.0};
   int slow_front_exception_required_cycles{3};
   // 0以下ならslow front例外で曲率gateを開かない。有限の正値を設定しても
-  // permission、候補SafetyEvaluator、壁/CBFの制約は迂回しない。
+  // 壁/CBFと候補SafetyEvaluatorは迂回しない。permission例外は別の明示設定が
+  // 有効な時だけ、低速連続判定済みかつSafetyEvaluatorを通ったPASSに限る。
   double slow_front_exception_max_start_curvature_m_inv{0.0};
   bool slow_obstacle_chain_enabled{true};
   double slow_obstacle_chain_distance_m{12.0};
+  // 停止した前方parallel車だけを、同一コリドーに入る前からPASSのSafetyEvaluatorへ載せる。
+  // 通常のwide parallel/FOLLOW/permission例外には使わない明示opt-in。
+  bool early_stationary_parallel_pass_enabled{false};
+  // 停止parallel車のcurrent-section permission例外。early PASS probeとは別opt-inで、
+  // falseならCSVの追越禁止をそのまま維持する。
+  bool early_stationary_parallel_permission_exception_enabled{false};
+  double early_stationary_parallel_pass_distance_m{8.0};
+  double early_stationary_parallel_pass_lateral_width_m{1.5};
+  // 現在の追越禁止区間で停止障害物を回避するための、通常PASSとは分離した
+  // Gate 2限定の低速PASS設定。0以下/falseは経路全体を閉じる。
+  bool stationary_no_pass_safe_pass_enabled{false};
+  double stationary_no_pass_safe_pass_max_curvature_m_inv{0.0};
+  double stationary_no_pass_safe_pass_v_max_mps{0.0};
+  double stationary_no_pass_safe_pass_max_lateral_displacement_m{0.0};
+  double stationary_no_pass_safe_pass_max_lateral_accel_mps2{0.0};
+  double stationary_no_pass_safe_pass_max_cbf_slack{0.0};
+  // 停止/極低速車に対するFOLLOW開始距離は、固定距離ではなくこの余裕を
+  // 加えた制動到達距離で決める。max_distanceは探索上限であり開始閾値ではない。
+  bool braking_follow_enabled{false};
+  double braking_follow_max_distance_m{0.0};
+  double braking_follow_trigger_margin_m{0.0};
   double large_lateral_error_threshold_m{0.60};
   double large_lateral_error_v_max_mps{2.5};
   double min_pass_gap_m{1.80};
@@ -401,11 +535,20 @@ struct PlannerConfig {
   // solve遅延だけの時は、SafetyEvaluatorを通した現d保持に限りこのcapを使う。
   // stale/infeasible/CBF制約は常にreentry_hold_v_max_mps以下へ閉じる。
   double reentry_mpc_degraded_hold_v_max_mps{3.0};
+  // reentry許可・中心収束後の高速カーブで使う現d保持の上限。ABORTを
+  // 継続させず、SafetyEvaluatorを通したSPEED_GUARDへ分離する。
+  double post_abort_curve_hold_v_max_mps{4.0};
+  // 新規MPC sampleでslow solveがこの回数続いた時だけ現d holdへ入る。
+  // 1は従来互換、2以上なら単発latencyはspeed capだけに留める。
+  int reentry_mpc_latency_degraded_enter_samples{1};
   int reentry_mpc_unhealthy_enter_samples{2};
   int reentry_mpc_healthy_release_samples{3};
   bool reentry_require_mpc_health{true};
   double left_offset_m{0.70};
   double right_offset_m{-0.70};
+  // legacy_fixed_offsetは既存の固定±dを優先する互換モード。
+  // minimum_clearanceは相手楕円間隔を満たす最小横移動だけを目標にする。
+  std::string pass_target_policy{"legacy_fixed_offset"};
   std::string overtake_lateral_profile_mode{"legacy"};
   std::string pass_horizon_publish_mode{"prepare_and_overtake"};
   double localized_avoidance_start_before_target_m{6.0};
@@ -418,6 +561,21 @@ struct PlannerConfig {
   double pass_distance_m{20.0};
   double merge_distance_m{12.0};
   double follow_speed_margin_mps{0.20};
+  // 通常FOLLOWの前走車より遅いcapは維持しつつ、十分大きな同一レーンgapだけを
+  // 小さなbonusで詰める。加速を含むs(t)はSafetyEvaluatorへ渡す。
+  bool follow_gap_closing_enabled{false};
+  double follow_gap_closing_target_gap_m{5.0};
+  double follow_gap_closing_engage_gap_m{6.0};
+  double follow_gap_closing_speed_gain_per_m{0.10};
+  double follow_gap_closing_max_speed_bonus_mps{0.30};
+  // 下流の許容最大加速以上を使い、最遠到達距離を保守的に予測する。
+  double follow_gap_closing_assumed_accel_mps2{3.0};
+  // PASSは速度capだけを上げて安全予測を据え置かない。想定加速を含むs(t)で
+  // SafetyEvaluatorを通した時だけ、下流へこの上限を出す。
+  double pass_speed_cap_mps{10.0};
+  double pass_assumed_accel_mps2{3.0};
+  // 前走車中心から必要楕円間隔よりさらに確保する横方向余裕。
+  double pass_target_lateral_margin_m{0.10};
   double max_overtake_v_bonus_mps{0.30};
   double recovery_v_max_mps{8.5};
   double wall_margin_recovery_v_max_mps{8.5};
@@ -474,6 +632,33 @@ struct PlannerConfig {
   double safe_stop_lateral_error_threshold_m{0.40};
   double safe_stop_release_speed_mps{0.50};
 };
+
+// 入力: PASS方向、現在の自車d、対象車d、必要横離隔。
+// 出力: CandidateBuilderとCoreの局所profileが共通で使うPASS目標d。
+// 処理概要: minimum_clearanceでは余計に壁側へ寄せず、相手楕円間隔を満たす
+// 最小横移動を選ぶ。対象が無い呼出しでは使わず、従来offsetは別途fallbackする。
+inline double passTargetOffset(const PlannerConfig &config,
+                               CandidateType pass_type, double ego_d_m,
+                               double opponent_d_m,
+                               double required_gap_m) {
+  if (pass_type == CandidateType::PASS_LEFT) {
+    const double required_target_d = opponent_d_m + required_gap_m;
+    if (config.pass_target_policy == "minimum_clearance") {
+      return ego_d_m > required_target_d ? ego_d_m : required_target_d;
+    }
+    return config.left_offset_m > required_target_d ? config.left_offset_m
+                                                     : required_target_d;
+  }
+  if (pass_type == CandidateType::PASS_RIGHT) {
+    const double required_target_d = opponent_d_m - required_gap_m;
+    if (config.pass_target_policy == "minimum_clearance") {
+      return ego_d_m < required_target_d ? ego_d_m : required_target_d;
+    }
+    return config.right_offset_m < required_target_d ? config.right_offset_m
+                                                      : required_target_d;
+  }
+  return ego_d_m;
+}
 
 struct PlannerOutput {
   // ROSノードへ返す最終結果。override配列、debug指標、選択理由を含める。

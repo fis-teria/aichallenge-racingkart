@@ -55,6 +55,7 @@ BlockedInfo BlockedRiskAnalyzer::detectBlocked(
     const EgoState &ego, const std::vector<OpponentState> &opponents,
     double now_sec) const {
   BlockedInfo info;
+  bool nearest_front_is_side_by_side = false;
   // 処理ブロック: 各相手車を鮮度、進行方向、相対s/dで分類する。
   // 設計意図: 逆走や古い点を早めに除外し、前方閉塞と横並びを別々の状態として保持する。
   for (std::size_t i = 0; i < opponents.size(); ++i) {
@@ -123,7 +124,15 @@ BlockedInfo BlockedRiskAnalyzer::detectBlocked(
     if (!front || !same_corridor) {
       continue;
     }
-    if (delta_s < info.front_delta_s) {
+    // 横並び車両はside riskとして保持しつつ、別の通常前走車がいるなら
+    // PASS/FOLLOWの対象をそちらへ固定する。横並び車を近傍前走車として
+    // 優先すると、独立した前走障害物を見失うためである。
+    const bool select_as_front =
+        info.nearest_index < 0 ||
+        (!side_by_side && nearest_front_is_side_by_side) ||
+        (side_by_side == nearest_front_is_side_by_side &&
+         delta_s < info.front_delta_s);
+    if (select_as_front) {
       info.nearest_index = static_cast<int>(i);
       info.nearest_id = opp.id;
       info.front_delta_s = delta_s;
@@ -133,6 +142,7 @@ BlockedInfo BlockedRiskAnalyzer::detectBlocked(
       info.front_s_dot_mps = s_dot;
       info.front_direction_known = direction_known;
       info.front_same_direction = same_direction;
+      nearest_front_is_side_by_side = side_by_side;
     }
   }
 
@@ -153,8 +163,6 @@ BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
     const std::vector<PredictedOpponent> &predictions,
     BehaviorMode mode) const {
   BlockedInfo out = blocked_info;
-  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
-  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
   const double ellipse_gap =
       config_.safety_ellipse_b_m * std::sqrt(1.0 + config_.min_ellipse_h);
   out.pass_gap_required_m = std::max(config_.min_pass_gap_m, ellipse_gap);
@@ -173,8 +181,12 @@ BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
   }
 
   const auto &target = opponents[static_cast<std::size_t>(target_index)];
-  double min_left_gap = upper_d - target.frenet.d;
-  double min_right_gap = target.frenet.d - lower_d;
+  const auto target_bounds = frame_.corridorBounds(
+      target.frenet.s, config_.d_min_m, config_.d_max_m);
+  double min_left_gap =
+      target_bounds.d_max - config_.min_wall_margin_m - target.frenet.d;
+  double min_right_gap =
+      target.frenet.d - (target_bounds.d_min + config_.min_wall_margin_m);
 
   // 処理ブロック: 現在位置だけでなく予測dも含めて最小隙間を見る。
   // 設計意図: 相手が将来壁側へ寄る場合、現在は空いて見える追い越しラインも不許可にする。
@@ -182,9 +194,15 @@ BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
     if (pred.id != target.id) {
       continue;
     }
-    for (double d : pred.d) {
-      min_left_gap = std::min(min_left_gap, upper_d - d);
-      min_right_gap = std::min(min_right_gap, d - lower_d);
+    const std::size_t count = std::min(pred.s.size(), pred.d.size());
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto bounds = frame_.corridorBounds(pred.s[i], config_.d_min_m,
+                                                 config_.d_max_m);
+      min_left_gap = std::min(
+          min_left_gap, bounds.d_max - config_.min_wall_margin_m - pred.d[i]);
+      min_right_gap = std::min(
+          min_right_gap, pred.d[i] -
+                             (bounds.d_min + config_.min_wall_margin_m));
     }
     break;
   }
@@ -215,9 +233,11 @@ BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
 // 入力: Frenet横位置d。
 // 出力: 左右壁マージンのうち小さい方の余裕[m]。
 // 処理概要: 負値なら安全コリドー外として、譲り/復帰/速度ガードの判断に使う。
-double BlockedRiskAnalyzer::wallClearance(double d) const {
-  const double lower_d = config_.d_min_m + config_.min_wall_margin_m;
-  const double upper_d = config_.d_max_m - config_.min_wall_margin_m;
+double BlockedRiskAnalyzer::wallClearance(double s, double d) const {
+  const auto bounds =
+      frame_.corridorBounds(s, config_.d_min_m, config_.d_max_m);
+  const double lower_d = bounds.d_min + config_.min_wall_margin_m;
+  const double upper_d = bounds.d_max - config_.min_wall_margin_m;
   return std::min(d - lower_d, upper_d - d);
 }
 

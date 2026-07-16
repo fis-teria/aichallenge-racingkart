@@ -457,6 +457,7 @@ def _write_overtake_debug_timeseries(run_id: str, domains: list[DomainResult], p
         "ego_y",
         "ego_s",
         "ego_lateral_offset",
+        "ego_wall_clearance_m",
         "ego_speed_mps",
         "target_lateral_offset_m",
         "min_cbf_h",

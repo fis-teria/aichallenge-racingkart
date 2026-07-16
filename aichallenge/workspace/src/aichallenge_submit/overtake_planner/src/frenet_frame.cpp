@@ -179,6 +179,109 @@ bool FrenetFrame::loadCsv(const std::string &path, std::string *error) {
   return true;
 }
 
+// 入力: 路面境界をFrenet s/dで記録したCSVと、失敗時の理由を書き込む任意のerror。
+// 出力: 参照CSVと同じサンプル列ならtrue。対応しないprofileはfalse。
+// 処理概要: 参照線と異なるコースの回廊を安全制約へ誤適用しないよう、s列を照合して読む。
+bool FrenetFrame::loadCorridorCsv(const std::string &path, std::string *error) {
+  if (reference_.size() < 2) {
+    if (error != nullptr) {
+      *error = "cannot load corridor before reference csv";
+    }
+    return false;
+  }
+
+  std::ifstream ifs(path);
+  if (!ifs) {
+    if (error != nullptr) {
+      *error = "failed to open corridor csv: " + path;
+    }
+    return false;
+  }
+
+  std::string line;
+  if (!std::getline(ifs, line)) {
+    if (error != nullptr) {
+      *error = "empty corridor csv: " + path;
+    }
+    return false;
+  }
+  const auto names = splitCsvLine(line);
+  std::unordered_map<std::string, std::size_t> header;
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    header[names[i]] = i;
+  }
+  if (header.find("s_m") == header.end() ||
+      header.find("d_min_m") == header.end() ||
+      header.find("d_max_m") == header.end()) {
+    if (error != nullptr) {
+      *error = "corridor csv must contain s_m,d_min_m,d_max_m: " + path;
+    }
+    return false;
+  }
+
+  std::vector<FrenetCorridorPoint> corridor;
+  while (std::getline(ifs, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    const auto row = splitCsvLine(line);
+    FrenetCorridorPoint point;
+    point.s = readCell(row, header, "s_m",
+                       std::numeric_limits<double>::quiet_NaN());
+    point.d_min = readCell(row, header, "d_min_m",
+                           std::numeric_limits<double>::quiet_NaN());
+    point.d_max = readCell(row, header, "d_max_m",
+                           std::numeric_limits<double>::quiet_NaN());
+    if (!std::isfinite(point.s) || !std::isfinite(point.d_min) ||
+        !std::isfinite(point.d_max) || point.d_min >= point.d_max) {
+      if (error != nullptr) {
+        *error = "invalid corridor row in: " + path;
+      }
+      return false;
+    }
+    corridor.push_back(point);
+  }
+
+  if (corridor.size() != reference_.size()) {
+    if (error != nullptr) {
+      *error = "corridor/reference point count mismatch: " + path;
+    }
+    return false;
+  }
+  constexpr double kSMatchToleranceM = 1.0e-3;
+  for (std::size_t i = 0; i < corridor.size(); ++i) {
+    if (i > 0 && corridor[i].s <= corridor[i - 1].s) {
+      if (error != nullptr) {
+        *error = "corridor s_m must be strictly increasing: " + path;
+      }
+      return false;
+    }
+    if (std::abs(corridor[i].s - reference_[i].s) > kSMatchToleranceM) {
+      if (error != nullptr) {
+        *error = "corridor s_m does not match reference csv: " + path;
+      }
+      return false;
+    }
+    if (i > 0 &&
+        std::max(corridor[i - 1].d_min, corridor[i].d_min) >=
+            std::min(corridor[i - 1].d_max, corridor[i].d_max)) {
+      if (error != nullptr) {
+        *error = "adjacent corridor bounds do not overlap: " + path;
+      }
+      return false;
+    }
+  }
+  if (std::max(corridor.back().d_min, corridor.front().d_min) >=
+      std::min(corridor.back().d_max, corridor.front().d_max)) {
+    if (error != nullptr) {
+      *error = "closing corridor bounds do not overlap: " + path;
+    }
+    return false;
+  }
+  setCorridor(std::move(corridor));
+  return true;
+}
+
 // 入力: 参照点列。sがNaNの点を含んでいてもよい。
 // 出力: 内部reference_とtrack_length_を更新する。
 // 処理概要: 欠損sを距離累積で補い、閉ループコースとして全長を計算する。
@@ -205,6 +308,15 @@ void FrenetFrame::setReference(std::vector<ReferencePoint> reference) {
   } else {
     track_length_ = 0.0;
   }
+  // 参照を更新したら、以前のコースに由来する回廊を残さない。
+  corridor_.clear();
+}
+
+// 入力: 参照線と同じs列の路面境界プロファイル。
+// 出力: 内部回廊を更新する。
+// 処理概要: テストと起動時ロードで同じs依存境界を使えるよう、参照線とは別に保持する。
+void FrenetFrame::setCorridor(std::vector<FrenetCorridorPoint> corridor) {
+  corridor_ = std::move(corridor);
 }
 
 // 入力: 任意のs座標[m]。
@@ -239,26 +351,45 @@ double FrenetFrame::deltaS(double from_s, double to_s) const {
 // 処理概要: 最近傍参照点を探し、参照接線に対する横ずれdとyaw誤差を計算する。
 FrenetPose FrenetFrame::cartesianToFrenet(double x, double y,
                                           double yaw) const {
-  // 最近傍の参照点を探し、その接線方向に対する横ずれdを計算する簡易変換。
+  // 最近傍「点」ではなく全線分へ射影する。点への量子化は約1 mごとのs飛びを
+  // 作り、相手とのdelta_s、curve gate、局所回避の開始位置を不連続にしていた。
   FrenetPose pose;
-  if (reference_.empty()) {
+  if (reference_.size() < 2 || track_length_ <= 0.0) {
     return pose;
   }
   double best_dist_sq = std::numeric_limits<double>::infinity();
   for (std::size_t i = 0; i < reference_.size(); ++i) {
-    const double dx = x - reference_[i].x;
-    const double dy = y - reference_[i].y;
+    const std::size_t next = (i + 1) % reference_.size();
+    const auto &a = reference_[i];
+    const auto &b = reference_[next];
+    const double segment_x = b.x - a.x;
+    const double segment_y = b.y - a.y;
+    const double segment_length_sq =
+        segment_x * segment_x + segment_y * segment_y;
+    if (segment_length_sq <= 1.0e-12) {
+      continue;
+    }
+    const double projection_ratio = std::clamp(
+        ((x - a.x) * segment_x + (y - a.y) * segment_y) /
+            segment_length_sq,
+        0.0, 1.0);
+    const double projected_x = a.x + projection_ratio * segment_x;
+    const double projected_y = a.y + projection_ratio * segment_y;
+    const double dx = x - projected_x;
+    const double dy = y - projected_y;
     const double dist_sq = dx * dx + dy * dy;
     if (dist_sq < best_dist_sq) {
       best_dist_sq = dist_sq;
+      const double segment_s =
+          next == 0 ? track_length_ - a.s : b.s - a.s;
+      pose.s = wrapS(a.s + projection_ratio * std::max(0.0, segment_s));
       pose.index = i;
     }
   }
 
-  const auto &ref = reference_[pose.index];
+  const auto ref = interpolate(pose.s);
   const double dx = x - ref.x;
   const double dy = y - ref.y;
-  pose.s = ref.s;
   pose.d = std::cos(ref.yaw) * dy - std::sin(ref.yaw) * dx;
   pose.yaw_error = normalizeAngle(yaw - ref.yaw);
   return pose;
@@ -280,7 +411,20 @@ ReferencePoint FrenetFrame::interpolate(double s) const {
     return reference_.front();
   }
   if (upper == reference_.end()) {
-    return reference_.back();
+    // wrapSはlast.sより後の閉路seamも返す。最後の点で固定すると、seam上の
+    // candidate x/y/yawが停止し、Frenetへの再投影と追い越し候補が崩れる。
+    const auto &a = reference_.back();
+    const auto &b = reference_.front();
+    const double denom = std::max(1.0e-6, track_length_ - a.s);
+    const double ratio = (wrapped - a.s) / denom;
+    ReferencePoint out;
+    out.s = wrapped;
+    out.x = a.x + (b.x - a.x) * ratio;
+    out.y = a.y + (b.y - a.y) * ratio;
+    out.yaw = normalizeAngle(a.yaw + normalizeAngle(b.yaw - a.yaw) * ratio);
+    out.kappa = a.kappa + (b.kappa - a.kappa) * ratio;
+    out.v_ref = a.v_ref + (b.v_ref - a.v_ref) * ratio;
+    return out;
   }
   const auto &b = *upper;
   const auto &a = *(upper - 1);
@@ -304,6 +448,45 @@ ReferencePoint FrenetFrame::frenetToCartesian(double s, double d) const {
   ReferencePoint out = interpolate(s);
   out.x = out.x - d * std::sin(out.yaw);
   out.y = out.y + d * std::cos(out.yaw);
+  return out;
+}
+
+// 入力: 評価したいsと、profile未ロード時の固定境界。
+// 出力: そのsで使える物理境界。profileがあれば隣接sampleの狭い側を返す。
+// 処理概要: sample間を線形に広げると実境界を越える可能性があるため、各線分で
+// 左境界は小さい方、右境界は大きい方を採用してfail-closedにする。
+FrenetCorridorBounds FrenetFrame::corridorBounds(
+    double s, double fallback_d_min, double fallback_d_max) const {
+  FrenetCorridorBounds out{fallback_d_min, fallback_d_max};
+  if (corridor_.size() < 2 || track_length_ <= 0.0) {
+    return out;
+  }
+  const double wrapped = wrapS(s);
+  auto upper = std::upper_bound(
+      corridor_.begin(), corridor_.end(), wrapped,
+      [](double value, const FrenetCorridorPoint &point) {
+        return value < point.s;
+      });
+  std::size_t lower_index = 0;
+  std::size_t upper_index = 0;
+  if (upper == corridor_.begin()) {
+    lower_index = 0;
+    upper_index = 1;
+  } else if (upper == corridor_.end()) {
+    lower_index = corridor_.size() - 1;
+    upper_index = 0;
+  } else {
+    lower_index = static_cast<std::size_t>(upper - corridor_.begin() - 1);
+    upper_index = static_cast<std::size_t>(upper - corridor_.begin());
+  }
+  const auto &a = corridor_[lower_index];
+  const auto &b = corridor_[upper_index];
+  out.d_min = std::max(a.d_min, b.d_min);
+  out.d_max = std::min(a.d_max, b.d_max);
+  if (!std::isfinite(out.d_min) || !std::isfinite(out.d_max) ||
+      out.d_min >= out.d_max) {
+    return FrenetCorridorBounds{fallback_d_min, fallback_d_max};
+  }
   return out;
 }
 

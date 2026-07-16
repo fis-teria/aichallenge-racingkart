@@ -3,14 +3,21 @@ overtake_planner_node:
     enabled: true
     reference_package: "multi_purpose_mpc_ros"
     reference_csv: "env/final_ver3/traj_mincurv_manual.csv"
+    # final_ver3参照とlanelet2実境界から生成したs依存の走行可能回廊。
+    # 読込み・参照照合に失敗した場合はoverride自体を無効化してfail-closedにする。
+    drivable_corridor_enabled: true
+    drivable_corridor_package: "overtake_planner"
+    drivable_corridor_csv: "config/final_ver3_drivable_corridor.csv"
     # "auto" resolves to d${ROS_DOMAIN_ID}; set d1..d4 explicitly to override.
     own_vehicle_id: "auto"
     ego_stale_time_sec: 0.50
     control_rate_hz: 20.0
     horizon_points: 50
     horizon_dt_sec: 0.025
-    lookahead_s_m: 10.0
-    follow_trigger_s_m: 5.0
+    lookahead_s_m: 15.0
+    # PASS評価とgap-closingを十分手前から継続する。PASS候補が安全なら選択し、
+    # 開始不可時だけFOLLOWで4.5 mを目標に詰める。
+    follow_trigger_s_m: 12.0
     same_corridor_width_m: 0.90
     same_direction_filter_enabled: true
     same_direction_min_speed_mps: 0.30
@@ -21,11 +28,16 @@ overtake_planner_node:
     future_side_yield_wall_clearance_m: 0.35
     dv_block_threshold_mps: 0.20
     opponent_stale_time_sec: 0.50
-    side_by_side_s_m: 4.0
+    side_by_side_s_m: 1.0
     side_margin_m: 1.20
     parallel_side_detection_enabled: true
     parallel_side_s_m: 12.0
     parallel_side_margin_m: 4.0
+    # same_corridor外でも、SafetyEvaluatorを通った前方parallel車には現在dを
+    # 保持してFOLLOWする。密集時に未許可の中心復帰でABORTへ入るのを防ぐ。
+    parallel_follow_enabled: true
+    parallel_follow_s_m: 12.0
+    parallel_follow_lateral_width_m: 1.20
     side_yield_s_m: 0.30
     side_by_side_target_gap_m: 0.75
     side_by_side_shift_distance_m: 7.0
@@ -44,19 +56,60 @@ overtake_planner_node:
     straight_overtake_max_curvature_m_inv: 0.025
     straight_overtake_lookahead_m: 12.0
     straight_overtake_release_hysteresis_m_inv: 0.005
+    # 通常のcurve gateは維持。0.090 1/m以下で制限済みPASSをSafetyEvaluatorが
+    # 通した時だけ開始する。PASS速度は10 m/s固定ではなく、次の横加速度上限から
+    # sqrt(a_lat_max / |kappa|) 以下にし、PREPARE/OVERTAKE中も緩めない。
+    gentle_curve_safe_pass_enabled: true
+    gentle_curve_safe_pass_max_curvature_m_inv: 0.090
+    gentle_curve_safe_pass_v_max_mps: 10.0
+    # safety_ellipse_b=1.8, min_h=0.20, margin=0.10 の必要横gap 2.072 m以上。
+    # 実candidateは引き続きs依存回廊、wall margin、SafetyEvaluatorで絞る。
+    gentle_curve_safe_pass_max_lateral_displacement_m: 2.20
+    gentle_curve_safe_pass_max_lateral_accel_mps2: 4.0
+    gentle_curve_safe_pass_max_cbf_slack: 0.0
+    # 時間でgateを延長せず、同周期もSafetyEvaluatorを通った制限PASSだけが
+    # pass_safe_required_cycles達成時にFOLLOWの最低holdを通過できる。
+    gentle_curve_safe_pass_bypass_mode_hold_enabled: true
     overtake_permission_profile_enabled: true
     overtake_permission_package: "overtake_planner"
     overtake_permission_csv: "config/overtake_permission.csv"
     default_overtake_allowed: true
     overtake_permission_lookahead_m: 8.0
     slow_front_exception_enabled: true
+    slow_front_permission_exception_enabled: true
     slow_front_exception_speed_mps: 1.0
     slow_front_exception_distance_m: 8.0
     slow_front_exception_required_cycles: 3
-    # 停止/低速前走車でも、曲率gateを開くのは緩い曲線まで。permission/CBFは維持する。
+    # 停止/低速前走車でも、曲率gateを開くのは緩い曲線まで。permission例外を明示ONに
+    # した場合だけ、現在地点が禁止かつSafetyEvaluatorを通ったPASSを許可する。
+    # lookahead禁止、壁/CBF、横並び/未来譲りは維持する。
     slow_front_exception_max_start_curvature_m_inv: 0.040
     slow_obstacle_chain_enabled: true
     slow_obstacle_chain_distance_m: 12.0
+    # 停止した前方parallel車だけを、同一走行コリドーへ入る前からPASS候補として
+    # Gate 2へ載せる。全V2X fresh/included とMPC healthy、停止・同方向を満たす時だけで、
+    # 動く/古い/逆向き車や、通常のwide parallelには適用しない。
+    early_stationary_parallel_pass_enabled: true
+    # 禁止区間でも、確認済みの停止parallel車に対してGate 2を通ったPASSだけを
+    # 開始できる。CSVのpermission診断値はfalseのまま保持し、lookahead禁止、
+    # curve/future-yield/reentry/壁・CBF拒否は例外化しない。
+    early_stationary_parallel_permission_exception_enabled: true
+    early_stationary_parallel_pass_distance_m: 8.0
+    early_stationary_parallel_pass_lateral_width_m: 1.50
+    # 停止車(既存stationary_obstacle_speed_threshold_mps以下)だけを、禁止区間でも
+    # Gate 2通過時に回避PASSへ入れる。通常のcurve/permission gateは緩めない。
+    # 0.350 1/mまででも、候補速度はsqrt(2.0/|kappa|)以下かつ3.0 m/s以下。
+    stationary_no_pass_safe_pass_enabled: true
+    stationary_no_pass_safe_pass_max_curvature_m_inv: 0.350
+    stationary_no_pass_safe_pass_v_max_mps: 3.0
+    stationary_no_pass_safe_pass_max_lateral_displacement_m: 2.20
+    stationary_no_pass_safe_pass_max_lateral_accel_mps2: 2.0
+    stationary_no_pass_safe_pass_max_cbf_slack: 0.0
+    # 停止車への追従は固定距離で待たず、応答遅れ・制動能力・楕円余裕から
+    # 必要距離を計算して現d保持FOLLOWを早期に開始する。
+    braking_follow_enabled: true
+    braking_follow_max_distance_m: 30.0
+    braking_follow_trigger_margin_m: 2.0
     large_lateral_error_threshold_m: 0.60
     large_lateral_error_v_max_mps: 10.0
     min_pass_gap_m: 1.8
@@ -82,12 +135,21 @@ overtake_planner_node:
     reentry_hold_v_max_mps: 0.50
     # solve timeだけの一過性劣化では、全相手に再評価した現d holdに限り
     # このcapで待機する。CBF/stale/infeasibleは常にreentry_hold_v_max_mps。
-    reentry_mpc_degraded_hold_v_max_mps: 3.0
-    reentry_mpc_unhealthy_enter_samples: 2
+    reentry_mpc_degraded_hold_v_max_mps: 10.0
+    # ABORTの再合流が許可・中心収束した後、高速カーブ中だけ現dを保持する。
+    # PASSは凍結し、毎周期SafetyEvaluatorを通したRECOVERYをこの上限で出す。
+    post_abort_curve_hold_v_max_mps: 10.0
+    # 単発slow solveは速度capのみ。連続sampleでだけ現d holdへ遷移する。
+    reentry_mpc_latency_degraded_enter_samples: 2
+    reentry_mpc_unhealthy_enter_samples: 3
     reentry_mpc_healthy_release_samples: 3
     reentry_require_mpc_health: true
-    left_offset_m: 0.70
-    right_offset_m: -0.70
+    # legacy_fixed_offsetでだけ使う互換用の固定目標d。
+    # 通常はminimum_clearanceにより、必要楕円間隔を満たす最小横移動を使い、
+    # 壁側へ余計に寄せない。壁/CBF/SafetyEvaluatorは緩めない。
+    left_offset_m: 2.10
+    right_offset_m: -2.10
+    pass_target_policy: "minimum_clearance"  # legacy_fixed_offset / minimum_clearance
     overtake_lateral_profile_mode: "localized_latched"  # legacy / localized_latched
     pass_horizon_publish_mode: "overtake_only"  # prepare_and_overtake / overtake_only
     localized_avoidance_start_before_target_m: 6.0
@@ -98,8 +160,22 @@ overtake_planner_node:
     maneuver_latch_target_update_alpha: 0.0
     prepare_distance_m: 8.0
     merge_distance_m: 12.0
-    follow_speed_margin_mps: 0.01
-    recovery_v_max_mps: 8.5
+    follow_speed_margin_mps: 0.00
+    # PASS不成立時だけ、十分大きい同一レーン車間を相手と同等以上で詰める。
+    # 横並び、低速障害物、stale、future yield、MPC不健全では無効化し、
+    # 3.0 m/s^2での最遠到達距離をSafetyEvaluatorへ渡す。
+    follow_gap_closing_enabled: true
+    follow_gap_closing_target_gap_m: 4.5
+    follow_gap_closing_engage_gap_m: 10.0
+    follow_gap_closing_speed_gain_per_m: 0.15
+    follow_gap_closing_max_speed_bonus_mps: 0.80
+    follow_gap_closing_assumed_accel_mps2: 3.0
+    # PASSのv_refとSafetyEvaluatorのs(t)を一致させる。入力fresh/MPC健全時だけ
+    # 3.0 m/s^2を仮定して評価し、stale時は現速度を超えるPASSを出さない。
+    pass_speed_cap_mps: 10.0
+    pass_assumed_accel_mps2: 3.0
+    pass_target_lateral_margin_m: 0.10
+    recovery_v_max_mps: 10.0
     wall_margin_recovery_v_max_mps: 8.5
     outside_corridor_recovery_centering_time_sec: 1.0
     v_passthrough_mps: 50.0
@@ -131,10 +207,12 @@ overtake_planner_node:
     side_by_side_leader_priority_v_max_mps: 10.0
     wall_risk_speed_guard_enabled: true
     wall_soft_margin_m: 0.25
-    wall_risk_v_max_mps: 8.0
+    wall_risk_v_max_mps: 10.0
     mpc_health_speed_guard_enabled: true
-    mpc_health_infeasible_count_threshold: 1
-    mpc_health_solve_time_warn_ms: 80.0
+    # mpc_infeasible_countは連続回数。単発をhard failureにせず、3回連続から閉じる。
+    mpc_health_infeasible_count_threshold: 3
+    # 直近3台runの通常solve(約288--394 ms)を常時異常にしない上限。
+    mpc_health_solve_time_warn_ms: 450.0
     mpc_health_v_max_mps: 10.0
     mpc_health_stale_time_sec: 0.60
     recovery_speed_guard_enabled: true

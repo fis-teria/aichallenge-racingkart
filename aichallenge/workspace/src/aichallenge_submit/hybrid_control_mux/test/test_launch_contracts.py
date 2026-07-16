@@ -31,6 +31,24 @@ def test_no_pass_normal_recovery_uses_current_race_cap_profile():
     assert config["recovery_speed_guard_v_max_mps"] == 10.0
 
 
+def test_follow_gap_closing_has_a_reachable_follow_window():
+    config_path = (
+        _aichallenge_submit_root()
+        / "overtake_planner/config/overtake_planner.param.yaml"
+    )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))["overtake_planner_node"][
+        "ros__parameters"
+    ]
+
+    assert config["follow_gap_closing_enabled"] is True
+    assert config["follow_gap_closing_target_gap_m"] >= config["safety_ellipse_a_m"]
+    assert (
+        config["follow_gap_closing_target_gap_m"]
+        <= config["follow_gap_closing_engage_gap_m"]
+        < config["follow_trigger_s_m"]
+    )
+
+
 def test_pure_pursuit_launch_wires_timing_and_vehicle_geometry():
     root = _parse_launch("aichallenge_submit_launch/launch/control/pure_pursuit.launch.xml")
     params = {
@@ -262,6 +280,24 @@ def test_pure_pursuit_mpc_horizon_keeps_mpc_as_horizon_generator():
     assert mux_args["input_pure_pursuit_cmd"] == (
         "/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd"
     )
+
+
+def test_pure_pursuit_mpc_horizon_allows_free_run_acceleration_without_changing_braking():
+    config_path = (
+        _aichallenge_submit_root()
+        / "hybrid_control_mux/config/pure_pursuit_mpc_horizon.param.yaml"
+    )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))["hybrid_control_mux_node"][
+        "ros__parameters"
+    ]
+
+    # primary Pure Pursuit also traverses this clamp.  Keep the free-run
+    # acceleration below MPC a_max=3.0 without weakening the 1.5 m/s^2
+    # braking/stop paths.
+    assert config["primary_source"] == "pure_pursuit"
+    assert config["fallback_accel_max_mps2"] == 2.0
+    assert config["fallback_decel_min_mps2"] == -1.5
+    assert config["stop_decel_mps2"] == -1.5
 
 
 def test_pure_pursuit_mpc_horizon_config_publishes_neutral_outside_overtake():

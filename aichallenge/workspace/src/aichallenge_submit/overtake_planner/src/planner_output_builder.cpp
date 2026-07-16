@@ -128,6 +128,7 @@ bool shouldUseStrictOpponentCollisionFallback(const PlannerConfig &config,
          blocked.future_side_by_side || blocked.future_corner_side_by_side ||
          blocked.future_yield_required ||
          blocked.future_parallel_interaction ||
+         blocked.parallel_follow_candidate ||
          blocked.stationary_front_obstacle ||
          blocked.slow_obstacle_chain_active ||
          blocked.front_vehicle_low_speed ||
@@ -298,6 +299,8 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
       config_.mpc_health_infeasible_count_threshold > 0 &&
       mpc_health.infeasible_count >=
           config_.mpc_health_infeasible_count_threshold;
+  const bool mpc_health_infeasible_soft_guard =
+      mpc_health.infeasible_count > 0 && !mpc_health_infeasible_guard;
   const bool mpc_health_solve_time_guard =
       config_.mpc_health_solve_time_warn_ms > 0.0 &&
       std::isfinite(mpc_health.solve_time_ms) &&
@@ -308,13 +311,15 @@ PlannerOutputBuilder::build(const PlannerOutputBuildInput &input) const {
       mpc_health.age_sec > config_.mpc_health_stale_time_sec;
   const bool mpc_health_speed_guard_condition =
       mpc_health.valid &&
-      (mpc_health_infeasible_guard || mpc_health_solve_time_guard ||
-       mpc_health_stale_guard);
+      (mpc_health_infeasible_guard || mpc_health_infeasible_soft_guard ||
+       mpc_health_solve_time_guard || mpc_health_stale_guard);
   const bool mpc_health_speed_guard_applies =
       config_.mpc_health_speed_guard_enabled && mpc_health_speed_guard_condition;
   if (allow_speed_guard && mpc_health_speed_guard_applies) {
     const std::string reason =
         mpc_health_infeasible_guard   ? "mpc_health_infeasible_guard"
+        : mpc_health_infeasible_soft_guard
+            ? "mpc_health_infeasible_soft_guard"
         : mpc_health_solve_time_guard ? "mpc_health_solve_time_guard"
                                       : "mpc_health_stale_guard";
     requestSpeedCap(config_.mpc_health_v_max_mps, reason);

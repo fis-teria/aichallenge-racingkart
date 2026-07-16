@@ -31,6 +31,7 @@ TIMESERIES_FIELDS = [
     "target_vehicle_id",
     "target_lateral_offset_m",
     "ego_lateral_offset",
+    "ego_wall_clearance_m",
     "reference_curvature",
     "target_speed_mps",
     "min_cbf_h",
@@ -47,6 +48,15 @@ TIMESERIES_FIELDS = [
     "side_by_side",
     "corner_side_by_side",
     "corner_abs_curvature",
+    "parallel_follow_candidate",
+    "parallel_follow_feasible",
+    "parallel_follow_vehicle_id",
+    "parallel_follow_delta_s",
+    "parallel_follow_delta_d",
+    "parallel_follow_relative_speed_mps",
+    "parallel_follow_s_dot_mps",
+    "parallel_follow_same_direction",
+    "parallel_follow_direction_known",
     "side_vehicle_id",
     "side_delta_s",
     "side_delta_d",
@@ -230,6 +240,9 @@ def compute_overtake_metrics(
         + [_float(row.get("closest_vehicle_distance_m")) for row in timeseries]
     )
     min_cbf_h = _min([_float(row.get("min_cbf_h")) for row in attempts] + [_float(row.get("min_cbf_h")) for row in timeseries])
+    min_ego_wall_clearance = _min(
+        [_float(row.get("ego_wall_clearance_m")) for row in timeseries]
+    )
     max_cbf_slack = _max(
         [_float(row.get("max_cbf_slack")) for row in attempts] + [_float(row.get("cbf_slack")) for row in timeseries]
     )
@@ -257,6 +270,7 @@ def compute_overtake_metrics(
         "collision_count": collision_count,
         "penalty_count": penalty_count,
         "min_vehicle_distance_m": min_vehicle_distance,
+        "min_ego_wall_clearance_m": min_ego_wall_clearance,
         "min_cbf_h": min_cbf_h,
         "max_cbf_slack": max_cbf_slack,
         "mpc_infeasible_count": mpc_infeasible_count,
@@ -286,6 +300,7 @@ def _merge_row(base: dict[str, object], overtake: dict[str, object], speed: dict
         "target_vehicle_id": _first_value(overtake, "target_vehicle_id", "front_vehicle_id"),
         "target_lateral_offset_m": _first_value(overtake, "target_lateral_offset_m"),
         "ego_lateral_offset": _first_value(overtake, "ego_lateral_offset"),
+        "ego_wall_clearance_m": _first_value(overtake, "ego_wall_clearance_m"),
         "reference_curvature": _first_value(base, "trajectory_curvature_1pm", "reference_curvature"),
         "target_speed_mps": _first_value(speed, "target_speed_mps", "global_cap_mps", "command_speed_mps"),
         "min_cbf_h": _first_value(overtake, "min_cbf_h", "min_ellipse_h"),
@@ -302,6 +317,19 @@ def _merge_row(base: dict[str, object], overtake: dict[str, object], speed: dict
         "side_by_side": _first_value(overtake, "side_by_side"),
         "corner_side_by_side": _first_value(overtake, "corner_side_by_side"),
         "corner_abs_curvature": _first_value(overtake, "corner_abs_curvature"),
+        "parallel_follow_candidate": _first_value(overtake, "parallel_follow_candidate"),
+        "parallel_follow_feasible": _first_value(overtake, "parallel_follow_feasible"),
+        "parallel_follow_vehicle_id": _first_value(overtake, "parallel_follow_vehicle_id"),
+        "parallel_follow_delta_s": _first_value(overtake, "parallel_follow_delta_s"),
+        "parallel_follow_delta_d": _first_value(overtake, "parallel_follow_delta_d"),
+        "parallel_follow_relative_speed_mps": _first_value(
+            overtake, "parallel_follow_relative_speed_mps"
+        ),
+        "parallel_follow_s_dot_mps": _first_value(overtake, "parallel_follow_s_dot_mps"),
+        "parallel_follow_same_direction": _first_value(overtake, "parallel_follow_same_direction"),
+        "parallel_follow_direction_known": _first_value(
+            overtake, "parallel_follow_direction_known"
+        ),
         "side_vehicle_id": _first_value(overtake, "side_vehicle_id"),
         "side_delta_s": _first_value(overtake, "side_delta_s"),
         "side_delta_d": _first_value(overtake, "side_delta_d"),

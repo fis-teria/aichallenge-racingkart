@@ -134,7 +134,7 @@ Coreから見ると「候補種別を指定して、候補軌道を1本作る」
 現在の `s` と `overtake_permission_lookahead_m` 先までを見て、新規追い越し開始を許可する区間かを判定します。
 `config/overtake_permission.csv` の `allow_overtake=false` に入ると、PASS候補が安全でも状態機械は `FOLLOW_BLOCKED` を維持します。
 
-低速前方車例外はこの後段で評価され、停止/低速車が近距離で連続検出された場合だけ `slow_front_exception_active=true` として不可区間でもPASS開始を許します。
+低速前方車例外はこの後段で評価されます。`slow_front_permission_exception_enabled=true` の場合だけ、停止/低速の直接前走車を近距離で連続検出し、現在地点が不可区間、PASS候補がSafetyEvaluator通過済み、入力fresh、横並び/未来譲り/reentry holdなしをすべて満たす時に限り、不可区間でもPASS開始を許します。lookahead先だけの禁止、高曲率、停止車列への昇格は例外化しません。
 
 ## `sectionContainsS()`
 

@@ -12,6 +12,9 @@ namespace overtake_planner
 // 処理概要: 設定を値で保持し、評価中に外部パラメータが変わらないようにする。
 SafetyEvaluator::SafetyEvaluator(PlannerConfig config) : config_(config) {}
 
+SafetyEvaluator::SafetyEvaluator(const FrenetFrame &frame, PlannerConfig config)
+    : frame_(&frame), config_(config) {}
+
 // 入力: 候補軌道上の自車位置/姿勢と、同じ時刻の相手車位置。
 // 出力: 安全楕円の余裕h。0より大きいほど楕円外側、負値は衝突領域内。
 // 処理概要: 相対位置を自車body座標へ回し、前後/左右で別半径の楕円制約に変換する。
@@ -49,12 +52,24 @@ bool SafetyEvaluator::evaluate(
   candidate.blocking_opponent_id.clear();
   candidate.blocking_time_sec = std::numeric_limits<double>::quiet_NaN();
 
+  if (!candidate.pass_target_corridor_valid) {
+    candidate.feasible = false;
+    candidate.reject_reason = "pass_target_unreachable";
+    return false;
+  }
+
   // 処理ブロック: 壁との安全余裕を先に確認する。
   // 設計意図: 壁違反は相手車有無に関係なく危険なので、計算量の大きい相手車評価より前に落とす。
-  for (double d : candidate.d) {
+  for (std::size_t i = 0; i < candidate.d.size(); ++i) {
     // 横オフセットが壁マージンを割る候補は、他車を見る前に即rejectする。
-    if (d < config_.d_min_m + config_.min_wall_margin_m ||
-        d > config_.d_max_m - config_.min_wall_margin_m) {
+    const double s = i < candidate.s.size() ? candidate.s[i] : 0.0;
+    const auto bounds = frame_ == nullptr
+                            ? FrenetCorridorBounds{config_.d_min_m,
+                                                  config_.d_max_m}
+                            : frame_->corridorBounds(s, config_.d_min_m,
+                                                     config_.d_max_m);
+    if (candidate.d[i] < bounds.d_min + config_.min_wall_margin_m ||
+        candidate.d[i] > bounds.d_max - config_.min_wall_margin_m) {
       candidate.feasible = false;
       candidate.reject_reason = "wall_margin";
       return false;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "overtake_planner/frenet_frame.hpp"
 #include "overtake_planner/types.hpp"
 
 #include <vector>
@@ -11,6 +12,7 @@ class SafetyEvaluator
 {
 public:
   explicit SafetyEvaluator(PlannerConfig config);
+  SafetyEvaluator(const FrenetFrame &frame, PlannerConfig config);
 
   // 候補軌道が壁マージンと他車楕円マージンを満たすかを評価する。
   bool evaluate(
@@ -23,6 +25,7 @@ public:
     double opp_x, double opp_y) const;
 
 private:
+  const FrenetFrame *frame_{nullptr};
   PlannerConfig config_;
 };
 
