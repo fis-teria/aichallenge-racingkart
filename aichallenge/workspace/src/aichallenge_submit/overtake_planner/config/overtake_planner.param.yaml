@@ -1,6 +1,8 @@
 overtake_planner_node:
   ros__parameters:
     enabled: true
+    supervisor_v2_shadow_enabled: true
+    supervisor_v2_abort_release_cycles: 3
     reference_package: "multi_purpose_mpc_ros"
     reference_csv: "env/final_ver3/traj_mincurv_manual.csv"
     # final_ver3参照とlanelet2実境界から生成したs依存の走行可能回廊。
@@ -111,7 +113,7 @@ overtake_planner_node:
     braking_follow_max_distance_m: 30.0
     braking_follow_trigger_margin_m: 2.0
     large_lateral_error_threshold_m: 0.60
-    large_lateral_error_v_max_mps: 10.0
+    large_lateral_error_v_max_mps: 3.0
     min_pass_gap_m: 1.8
     pass_gap_hysteresis_m: 0.25
     dynamic_pass_candidate_enabled: true
@@ -123,6 +125,8 @@ overtake_planner_node:
     # Planner safety prediction. Keep <= the verified active controller deceleration.
     # The default hybrid MPC permits -1.0 m/s^2; PP/mux fallback permits -1.5 m/s^2.
     max_brake_decel_mps2: 1.0
+    safety_constraint_normal_speed_limit_mps: 10.0
+    safety_constraint_release_safe_cycles: 3
     longitudinal_response_delay_sec: 0.25
     stationary_obstacle_speed_threshold_mps: 0.30
     # 通常ライン復帰は全fresh V2X車両に対するRECOVERY軌道評価が連続で通るまで禁止する。
@@ -135,10 +139,10 @@ overtake_planner_node:
     reentry_hold_v_max_mps: 0.50
     # solve timeだけの一過性劣化では、全相手に再評価した現d holdに限り
     # このcapで待機する。CBF/stale/infeasibleは常にreentry_hold_v_max_mps。
-    reentry_mpc_degraded_hold_v_max_mps: 10.0
+    reentry_mpc_degraded_hold_v_max_mps: 3.0
     # ABORTの再合流が許可・中心収束した後、高速カーブ中だけ現dを保持する。
     # PASSは凍結し、毎周期SafetyEvaluatorを通したRECOVERYをこの上限で出す。
-    post_abort_curve_hold_v_max_mps: 10.0
+    post_abort_curve_hold_v_max_mps: 3.0
     # 単発slow solveは速度capのみ。連続sampleでだけ現d holdへ遷移する。
     reentry_mpc_latency_degraded_enter_samples: 2
     reentry_mpc_unhealthy_enter_samples: 3
@@ -175,8 +179,10 @@ overtake_planner_node:
     pass_speed_cap_mps: 10.0
     pass_assumed_accel_mps2: 3.0
     pass_target_lateral_margin_m: 0.10
-    recovery_v_max_mps: 10.0
-    wall_margin_recovery_v_max_mps: 8.5
+    recovery_v_max_mps: 3.0
+    # MPC/PPが許容し得る最大加速でRecoveryの最遠到達s(t)を評価する。
+    recovery_assumed_accel_mps2: 3.0
+    wall_margin_recovery_v_max_mps: 0.5
     outside_corridor_recovery_centering_time_sec: 1.0
     v_passthrough_mps: 50.0
     d_min_m: -1.35
@@ -196,7 +202,7 @@ overtake_planner_node:
     high_speed_curve_lateral_hold_release_speed_mps: 2.5
     high_speed_curve_lateral_hold_release_curvature_m_inv: 0.025
     speed_only_fallback_enabled: true
-    speed_only_fallback_v_max_mps: 10.0
+    speed_only_fallback_v_max_mps: 0.5
     # 追越禁止区間でreentry gateが許可した通常復帰だけのレース上限。fail-safe capとは別。
     normal_recovery_speed_only_v_max_mps: 10.0
     opponent_collision_fallback_v_max_mps: 0.5
@@ -204,19 +210,20 @@ overtake_planner_node:
     side_by_side_leader_priority_enter_s_m: 1.0
     side_by_side_leader_priority_release_s_m: 0.3
     side_by_side_leader_priority_hold_sec: 1.0
-    side_by_side_leader_priority_v_max_mps: 10.0
+    # opponent_collision / safe-stop候補不成立時にも使われるためfail-safe上限に固定。
+    side_by_side_leader_priority_v_max_mps: 3.0
     wall_risk_speed_guard_enabled: true
     wall_soft_margin_m: 0.25
-    wall_risk_v_max_mps: 10.0
+    wall_risk_v_max_mps: 0.5
     mpc_health_speed_guard_enabled: true
     # mpc_infeasible_countは連続回数。単発をhard failureにせず、3回連続から閉じる。
     mpc_health_infeasible_count_threshold: 3
     # 直近3台runの通常solve(約288--394 ms)を常時異常にしない上限。
     mpc_health_solve_time_warn_ms: 450.0
-    mpc_health_v_max_mps: 10.0
+    mpc_health_v_max_mps: 0.5
     mpc_health_stale_time_sec: 0.60
     recovery_speed_guard_enabled: true
-    recovery_speed_guard_v_max_mps: 10.0
+    recovery_speed_guard_v_max_mps: 0.5
     section_safety_profile_enabled: true
     # Add same-length arrays to enable section presets, e.g. names/profiles/start_wp/end_wp.
     safe_stop_enabled: true

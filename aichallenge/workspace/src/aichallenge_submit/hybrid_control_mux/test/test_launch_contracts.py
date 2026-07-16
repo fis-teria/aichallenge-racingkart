@@ -12,7 +12,7 @@ def _parse_launch(relative_path: str) -> ET.Element:
     return ET.parse(_aichallenge_submit_root() / relative_path).getroot()
 
 
-def test_no_pass_normal_recovery_uses_current_race_cap_profile():
+def test_fail_safe_caps_cannot_fall_through_to_race_speed():
     config_path = (
         _aichallenge_submit_root()
         / "overtake_planner/config/overtake_planner.param.yaml"
@@ -22,13 +22,19 @@ def test_no_pass_normal_recovery_uses_current_race_cap_profile():
     ]["ros__parameters"]
 
     assert config["normal_recovery_speed_only_v_max_mps"] == 10.0
-    assert config["speed_only_fallback_v_max_mps"] == 10.0
+    assert config["speed_only_fallback_v_max_mps"] == 0.5
     assert config["opponent_collision_fallback_v_max_mps"] == 0.5
+    assert config["side_by_side_leader_priority_v_max_mps"] <= 3.0
     assert config["side_by_side_speed_cap_mps"] == 7.5
     assert config["corner_yield_v_max_mps"] == 10.0
-    assert config["large_lateral_error_v_max_mps"] == 10.0
-    assert config["mpc_health_v_max_mps"] == 10.0
-    assert config["recovery_speed_guard_v_max_mps"] == 10.0
+    assert config["large_lateral_error_v_max_mps"] <= 3.0
+    assert config["reentry_mpc_degraded_hold_v_max_mps"] <= 3.0
+    assert config["post_abort_curve_hold_v_max_mps"] <= 3.0
+    assert config["recovery_v_max_mps"] <= 3.0
+    assert config["wall_margin_recovery_v_max_mps"] == 0.5
+    assert config["wall_risk_v_max_mps"] == 0.5
+    assert config["mpc_health_v_max_mps"] == 0.5
+    assert config["recovery_speed_guard_v_max_mps"] == 0.5
 
 
 def test_follow_gap_closing_has_a_reachable_follow_window():
@@ -280,6 +286,81 @@ def test_pure_pursuit_mpc_horizon_keeps_mpc_as_horizon_generator():
     assert mux_args["input_pure_pursuit_cmd"] == (
         "/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd"
     )
+    assert mux_args["require_safety_constraint"] == "$(var use_overtake_planner)"
+    assert mux_args["input_safety_constraint"] == "/overtake/safety_constraint"
+    assert mux_args["input_overtake_plan"] == "/overtake/plan"
+
+
+def test_hybrid_mux_exposes_typed_safety_constraint_contract():
+    root = _parse_launch("hybrid_control_mux/launch/hybrid_control_mux.launch.xml")
+    launch_args = {
+        element.attrib.get("name"): element.attrib.get("default")
+        for element in root.findall("arg")
+    }
+    params = {
+        element.attrib.get("name"): element.attrib.get("value")
+        for element in root.iter("param")
+    }
+    remaps = {
+        element.attrib.get("from"): element.attrib.get("to")
+        for element in root.iter("remap")
+    }
+
+    assert launch_args["require_safety_constraint"] == "false"
+    assert launch_args["input_safety_constraint"] == "/overtake/safety_constraint"
+    assert launch_args["input_overtake_plan"] == "/overtake/plan"
+    assert params["require_safety_constraint"] == "$(var require_safety_constraint)"
+    assert remaps["input/safety_constraint"] == "$(var input_safety_constraint)"
+    assert remaps["input/overtake_plan"] == "$(var input_overtake_plan)"
+
+
+def test_v2_shadow_topics_are_not_controller_inputs():
+    submit_root = _aichallenge_submit_root()
+    controller_paths = [
+        submit_root / "hybrid_control_mux/hybrid_control_mux/hybrid_control_mux_node.py",
+        submit_root / "simple_pure_pursuit/src/simple_pure_pursuit.cpp",
+        submit_root / "multi_purpose_mpc_ros/multi_purpose_mpc_ros/mpc_controller.py",
+    ]
+
+    for path in controller_paths:
+        assert "/overtake/v2/shadow/" not in path.read_text(encoding="utf-8")
+
+    for launch_path in submit_root.rglob("*.launch.xml"):
+        root = ET.parse(launch_path).getroot()
+        for element in root.iter():
+            if element.tag not in {"arg", "remap"}:
+                continue
+            if element.attrib.get("name") in {
+                "input_overtake_plan",
+                "input_safety_constraint",
+            } or element.attrib.get("from") in {
+                "input/overtake_plan",
+                "input/safety_constraint",
+            }:
+                serialized = " ".join(element.attrib.values())
+                assert "/overtake/v2/shadow/" not in serialized
+
+
+def test_hybrid_profiles_have_only_mux_wired_to_final_control_command():
+    for relative_path in (
+        "aichallenge_submit_launch/launch/control/hybrid_delay_aware_mpc.launch.xml",
+        "aichallenge_submit_launch/launch/control/pure_pursuit_mpc_horizon.launch.xml",
+    ):
+        root = _parse_launch(relative_path)
+        final_output_wires = [
+            element
+            for element in root.iter("arg")
+            if element.attrib.get("name") == "output_control_cmd"
+            and element.attrib.get("value") == "/control/command/control_cmd"
+        ]
+
+        assert len(final_output_wires) == 1
+        parent = next(
+            include
+            for include in root.iter("include")
+            if final_output_wires[0] in list(include)
+        )
+        assert "hybrid_control_mux.launch.xml" in parent.attrib.get("file", "")
 
 
 def test_pure_pursuit_mpc_horizon_allows_free_run_acceleration_without_changing_braking():

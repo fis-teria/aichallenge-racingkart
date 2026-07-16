@@ -23,6 +23,10 @@
       # planner request, exact MPC horizon provenance, and mux choice are all
       # needed to prove planner/MPC trajectory agreement after a run.
       - /overtake/reference_override
+      - /overtake/safety_constraint
+      - /overtake/plan
+      - /overtake/v2/shadow/plan
+      - /overtake/v2/shadow/safety_constraint
       - /mpc/predicted_horizon
       - /mpc/predicted_horizon_contract
       - /hybrid_control/mpc/predicted_horizon

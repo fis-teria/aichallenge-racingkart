@@ -1,13 +1,289 @@
 import pytest
 
 from hybrid_control_mux.core import (
+    ControlLoopWatchdog,
     HybridMuxConfig,
     HybridMuxCore,
     MpcHealth,
     RecoveryMuxState,
+    RosClockProgressWatchdog,
+    SafetyConstraintAuthority,
+    SafetyConstraintState,
     SteeringLimiter,
     SteeringLimiterConfig,
+    apply_safety_constraint,
 )
+
+
+def safety_constraint(
+    constraint_generation: int,
+    *,
+    plan_generation: int = 7,
+    valid: bool = True,
+    stop_requested: bool = False,
+    release_authorized: bool = False,
+    speed_limit_mps: float = 2.0,
+    required_brake_decel_mps2: float = 0.0,
+) -> SafetyConstraintState:
+    return SafetyConstraintState(
+        constraint_generation=constraint_generation,
+        plan_generation=plan_generation,
+        valid=valid,
+        stop_requested=stop_requested,
+        release_authorized=release_authorized,
+        speed_limit_mps=speed_limit_mps,
+        required_brake_decel_mps2=required_brake_decel_mps2,
+    )
+
+
+def safety_authority(*, required: bool = True) -> SafetyConstraintAuthority:
+    return SafetyConstraintAuthority(
+        required=required,
+        timeout_sec=0.2,
+        maximum_speed_limit_mps=15.0,
+        maximum_brake_decel_mps2=6.0,
+    )
+
+
+def test_speed_limit_cannot_increase_without_explicit_release():
+    authority = safety_authority()
+    first = authority.evaluate(
+        safety_constraint(10), received_time_sec=1.0, now_sec=1.0
+    )
+    denied = authority.evaluate(
+        safety_constraint(11, speed_limit_mps=6.0),
+        received_time_sec=1.1,
+        now_sec=1.1,
+    )
+
+    assert first.speed_limit_mps == 2.0
+    assert denied.speed_limit_mps == 2.0
+    assert denied.reason == "safety_constraint_relaxation_not_authorized"
+
+
+def test_new_generation_explicit_release_can_raise_speed_limit():
+    authority = safety_authority()
+    authority.evaluate(safety_constraint(10), received_time_sec=1.0, now_sec=1.0)
+    released = authority.evaluate(
+        safety_constraint(11, speed_limit_mps=6.0, release_authorized=True),
+        received_time_sec=1.1,
+        now_sec=1.1,
+    )
+
+    assert not released.stop_required
+    assert released.speed_limit_mps == 6.0
+
+
+def test_same_generation_changed_payload_forces_stop():
+    authority = safety_authority()
+    authority.evaluate(safety_constraint(10), received_time_sec=1.0, now_sec=1.0)
+    conflict = authority.evaluate(
+        safety_constraint(10, speed_limit_mps=6.0, release_authorized=True),
+        received_time_sec=1.1,
+        now_sec=1.1,
+    )
+
+    assert conflict.stop_required
+    assert conflict.reason == "safety_constraint_same_generation_conflict"
+
+
+def test_older_generation_and_plan_generation_regression_force_stop():
+    authority = safety_authority()
+    authority.evaluate(safety_constraint(10), received_time_sec=1.0, now_sec=1.0)
+
+    old_constraint = authority.evaluate(
+        safety_constraint(9), received_time_sec=1.1, now_sec=1.1
+    )
+    old_plan = authority.evaluate(
+        safety_constraint(11, plan_generation=6),
+        received_time_sec=1.1,
+        now_sec=1.1,
+    )
+
+    assert old_constraint.stop_required
+    assert old_constraint.reason == "safety_constraint_generation_regression"
+    assert old_plan.stop_required
+    assert old_plan.reason == "safety_constraint_plan_generation_regression"
+
+
+@pytest.mark.parametrize(
+    ("constraint", "received_time_sec", "now_sec", "reason"),
+    [
+        (None, None, 1.0, "safety_constraint_missing"),
+        (safety_constraint(1), 1.0, 1.3, "safety_constraint_stale"),
+        (
+            safety_constraint(1, valid=False),
+            1.0,
+            1.0,
+            "safety_constraint_invalid",
+        ),
+        (
+            safety_constraint(1, speed_limit_mps=float("nan")),
+            1.0,
+            1.0,
+            "safety_constraint_invalid",
+        ),
+        (
+            safety_constraint(1, required_brake_decel_mps2=float("inf")),
+            1.0,
+            1.0,
+            "safety_constraint_invalid",
+        ),
+    ],
+)
+def test_missing_stale_invalid_or_nonfinite_constraint_forces_stop(
+    constraint, received_time_sec, now_sec, reason
+):
+    decision = safety_authority().evaluate(
+        constraint, received_time_sec=received_time_sec, now_sec=now_sec
+    )
+
+    assert decision.stop_required
+    assert decision.reason == reason
+
+
+def test_plan_generation_mismatch_forces_stop_when_active_plan_is_known():
+    decision = safety_authority().evaluate(
+        safety_constraint(1, plan_generation=7),
+        received_time_sec=1.0,
+        now_sec=1.0,
+        active_plan_generation=8,
+    )
+
+    assert decision.stop_required
+    assert decision.reason == "safety_constraint_plan_generation_mismatch"
+
+
+def test_timestamp_regression_and_wrong_frame_force_stop():
+    authority = safety_authority()
+    first = safety_constraint(1)
+    first = SafetyConstraintState(
+        **{**first.__dict__, "header_stamp_ns": 100}
+    )
+    authority.evaluate(
+        first, received_time_sec=1.0, now_sec=1.0
+    )
+    regressed = safety_constraint(2)
+    regressed = SafetyConstraintState(
+        **{**regressed.__dict__, "header_stamp_ns": 99}
+    )
+    wrong_frame = safety_constraint(2)
+    wrong_frame = SafetyConstraintState(
+        **{**wrong_frame.__dict__, "frame_id": "odom"}
+    )
+
+    regression_decision = authority.evaluate(
+        regressed, received_time_sec=1.1, now_sec=1.1
+    )
+    assert regression_decision.stop_required
+    assert regression_decision.reason == "safety_constraint_timestamp_regression"
+    assert authority.evaluate(
+        wrong_frame, received_time_sec=1.1, now_sec=1.1
+    ).stop_required
+
+
+def test_stale_fault_requires_consecutive_explicit_safe_release():
+    authority = safety_authority()
+    authority.evaluate(
+        safety_constraint(1), received_time_sec=1.0, now_sec=1.0
+    )
+    stale = authority.evaluate(
+        safety_constraint(1), received_time_sec=1.0, now_sec=1.3
+    )
+    assert stale.stop_required
+
+    releases = [
+        SafetyConstraintState(
+            **{
+                **safety_constraint(2, release_authorized=True).__dict__,
+                "header_stamp_ns": stamp_ns,
+            }
+        )
+        for stamp_ns in (1, 2, 3)
+    ]
+    first = authority.evaluate(releases[0], received_time_sec=1.31, now_sec=1.31)
+    second = authority.evaluate(releases[1], received_time_sec=1.32, now_sec=1.32)
+    third = authority.evaluate(releases[2], received_time_sec=1.33, now_sec=1.33)
+
+    assert first.stop_required
+    assert second.stop_required
+    assert not third.stop_required
+
+
+def test_startup_missing_does_not_block_first_valid_low_constraint():
+    authority = safety_authority()
+    assert authority.evaluate(
+        None, received_time_sec=None, now_sec=1.0
+    ).stop_required
+
+    first_valid = authority.evaluate(
+        safety_constraint(1, speed_limit_mps=0.5),
+        received_time_sec=1.01,
+        now_sec=1.01,
+    )
+
+    assert not first_valid.stop_required
+    assert first_valid.speed_limit_mps == 0.5
+
+
+def test_required_brake_overrides_only_weaker_acceleration():
+    authority = safety_authority()
+    decision = authority.evaluate(
+        safety_constraint(1, required_brake_decel_mps2=1.2),
+        received_time_sec=1.0,
+        now_sec=1.0,
+    )
+
+    assert apply_safety_constraint(8.0, 2.0, decision) == (2.0, -1.2)
+    assert apply_safety_constraint(8.0, -0.5, decision) == (2.0, -1.2)
+    assert apply_safety_constraint(8.0, -2.0, decision) == (2.0, -2.0)
+
+
+def test_stop_constraint_also_enforces_required_braking():
+    authority = safety_authority()
+    decision = authority.evaluate(
+        safety_constraint(
+            1, stop_requested=True, required_brake_decel_mps2=1.2
+        ),
+        received_time_sec=1.0,
+        now_sec=1.0,
+    )
+
+    assert apply_safety_constraint(8.0, -0.5, decision) == (0.0, -1.2)
+
+
+def test_constraint_latch_is_independent_of_controller_source_switch():
+    authority = safety_authority()
+    decision = authority.evaluate(
+        safety_constraint(10), received_time_sec=1.0, now_sec=1.0
+    )
+
+    for _source in ("mpc", "pure_pursuit", "mpc"):
+        speed_mps, _ = apply_safety_constraint(8.0, 1.0, decision)
+        assert speed_mps == 2.0
+
+
+def test_control_loop_watchdog_uses_supplied_steady_time():
+    watchdog = ControlLoopWatchdog(maximum_gap_sec=0.06)
+
+    first = watchdog.update(1.0)
+    on_time = watchdog.update(1.02)
+    late = watchdog.update(1.10)
+
+    assert not first.deadline_missed
+    assert not on_time.deadline_missed
+    assert late.deadline_missed
+    assert late.publish_gap_sec == pytest.approx(0.08)
+
+
+def test_ros_clock_progress_watchdog_detects_stall_and_regression():
+    watchdog = RosClockProgressWatchdog(maximum_stall_sec=0.2)
+
+    assert not watchdog.update(100, 1.0).stalled
+    assert not watchdog.update(100, 1.1).stalled
+    assert watchdog.update(100, 1.21).stalled
+    assert watchdog.update(99, 1.22).reason == "ros_clock_regression"
+    assert not watchdog.update(101, 1.23).stalled
 
 
 def test_uses_mpc_when_healthy():

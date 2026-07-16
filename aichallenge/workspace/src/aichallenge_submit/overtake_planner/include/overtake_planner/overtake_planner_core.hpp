@@ -5,6 +5,7 @@
 #include "overtake_planner/frenet_frame.hpp"
 #include "overtake_planner/future_side_by_side_risk_analyzer.hpp"
 #include "overtake_planner/safety_evaluator.hpp"
+#include "overtake_planner/overtake_supervisor_v2.hpp"
 #include "overtake_planner/types.hpp"
 
 #include <limits>
@@ -123,6 +124,7 @@ private:
   FutureSideBySideRiskAnalyzer future_side_risk_;
   SafetyEvaluator safety_;
   BehaviorStateMachine state_machine_;
+  OvertakeSupervisorV2 supervisor_v2_;
   BehaviorMode mode_{BehaviorMode::FREE_RUN};
   double first_valid_update_sec_{std::numeric_limits<double>::quiet_NaN()};
   double first_motion_update_sec_{std::numeric_limits<double>::quiet_NaN()};

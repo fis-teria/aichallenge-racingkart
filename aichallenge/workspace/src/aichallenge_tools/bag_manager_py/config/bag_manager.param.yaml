@@ -9,6 +9,12 @@
       - /awsim/status
       - /delay_aware_mpc/debug
       - /mpc/speed_profile_debug
+      - /hybrid_control_mux/debug
+      - /overtake/reference_override
+      - /overtake/safety_constraint
+      - /overtake/plan
+      - /overtake/v2/shadow/plan
+      - /overtake/v2/shadow/safety_constraint
       - /debug/overtake/mode
       - /debug/overtake/metrics
       - /v2x/vehicle_positions

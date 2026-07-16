@@ -142,6 +142,16 @@ overtake_planner::PlannerConfig makeConfig() {
   config.safety_ellipse_b_m = 0.25;
   config.min_ellipse_h = 0.1;
   config.lateral_target_max_step_m = 100.0;
+  // Core fixtureは各guardを個別に検証するため、未指定guardがruntimeの
+  // fail-safe profile (0.5 m/s)で結果を上書きしない旧単体値を使う。
+  // 実運用YAMLの低速値はlaunch contract testで別途固定する。
+  config.recovery_v_max_mps = 8.5;
+  config.wall_margin_recovery_v_max_mps = 8.5;
+  config.post_abort_curve_hold_v_max_mps = 4.0;
+  config.speed_only_fallback_v_max_mps = 1.0;
+  config.wall_risk_v_max_mps = 5.0;
+  config.mpc_health_v_max_mps = 3.0;
+  config.recovery_speed_guard_v_max_mps = 3.0;
   return config;
 }
 
@@ -555,6 +565,30 @@ TEST(CandidateBuilder,
   for (const double speed_cap_mps : recovery.v_ref) {
     EXPECT_LE(speed_cap_mps, config.reentry_hold_v_max_mps);
     EXPECT_LT(speed_cap_mps, ego.v);
+  }
+}
+
+TEST(CandidateBuilder, RecoveryAccelerationIsIncludedInSafetyPrediction) {
+  const auto frame = makeStraightFrame();
+  auto config = makeConfig();
+  config.recovery_v_max_mps = 4.0;
+  config.recovery_assumed_accel_mps2 = 3.0;
+  overtake_planner::CandidateBuilder builder(frame, config);
+
+  auto ego = makeEgo(frame, 5.0, 0.4);
+  ego.v = 0.6;
+  const auto recovery = builder.makeCandidate(
+      overtake_planner::CandidateType::RECOVERY, ego, {}, {});
+
+  ASSERT_FALSE(recovery.v_ref.empty());
+  ASSERT_EQ(recovery.v_ref.size(), recovery.predicted_speed_mps.size());
+  for (std::size_t i = 0; i < recovery.v_ref.size(); ++i) {
+    const double t = static_cast<double>(i) * config.horizon_dt_sec;
+    const double expected_speed = std::min(
+        config.recovery_v_max_mps,
+        ego.v + config.recovery_assumed_accel_mps2 * t);
+    EXPECT_DOUBLE_EQ(recovery.v_ref[i], config.recovery_v_max_mps);
+    EXPECT_NEAR(recovery.predicted_speed_mps[i], expected_speed, 1.0e-9);
   }
 }
 
@@ -2192,8 +2226,10 @@ TEST(OvertakePlannerCore, SafeStopReleaseHandsOffToRecoveryUntilCentered) {
   EXPECT_LT(std::abs(second.target_lateral_offset_m),
             std::abs(near_wall.frenet.d));
   ASSERT_FALSE(second.speed_caps.empty());
-  EXPECT_NEAR(second.speed_caps.back(), config.recovery_speed_guard_v_max_mps,
-              1.0e-9);
+  // RECOVERYは下流最大加速を含むs(t)でSafetyEvaluatorを通すため、停止後も
+  // guard上限までは再加速でき、ABORT/復帰を永久化しない。
+  EXPECT_NEAR(second.speed_caps.back(),
+              config.recovery_speed_guard_v_max_mps, 1.0e-9);
 }
 
 TEST(OvertakePlannerCore, SafeStopReleaseRequiresCenteredEgoBeforeFreeRun) {

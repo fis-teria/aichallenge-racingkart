@@ -9,22 +9,31 @@ from typing import Optional
 import rclpy
 from autoware_auto_control_msgs.msg import AckermannControlCommand
 from multi_purpose_mpc_ros_msgs.msg import (
+    OvertakePlan,
     RecoveryControlCommand,
     RecoveryPermit,
     RecoveryStatus,
+    SafetyConstraint,
     SafetyStopStatus,
 )
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from std_msgs.msg import String
 
 from hybrid_control_mux.core import (
+    ControlLoopWatchdog,
     HybridMuxConfig,
     HybridMuxCore,
     MpcHealth,
     RecoveryMuxState,
+    RosClockProgressWatchdog,
+    SafetyConstraintAuthority,
+    SafetyConstraintDecision,
+    SafetyConstraintState,
     SteeringLimitResult,
     SteeringLimiter,
     SteeringLimiterConfig,
+    apply_safety_constraint,
 )
 
 
@@ -42,6 +51,26 @@ class HybridControlMuxNode(Node):
         )
         self.mpc_health_timeout_sec = float(
             self.declare_parameter("mpc_health_timeout_sec", 0.75).value
+        )
+        self.safety_constraint_enabled = bool(
+            self.declare_parameter("safety_constraint_enabled", True).value
+        )
+        self.require_safety_constraint = bool(
+            self.declare_parameter("require_safety_constraint", False).value
+        )
+        self.safety_constraint_timeout_sec = float(
+            self.declare_parameter("safety_constraint_timeout_sec", 0.20).value
+        )
+        self.overtake_plan_timeout_sec = float(
+            self.declare_parameter("overtake_plan_timeout_sec", 0.20).value
+        )
+        self.safety_constraint_max_speed_mps = float(
+            self.declare_parameter("safety_constraint_max_speed_mps", 15.0).value
+        )
+        self.safety_constraint_max_brake_decel_mps2 = float(
+            self.declare_parameter(
+                "safety_constraint_max_brake_decel_mps2", 1.5
+            ).value
         )
         self.fallback_speed_mps = float(
             self.declare_parameter("fallback_speed_mps", 2.0).value
@@ -87,6 +116,7 @@ class HybridControlMuxNode(Node):
             self.declare_parameter("steering_log_throttle_sec", 1.0).value
         )
         self.last_steering_limit_log_sec = -1.0e9
+        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
 
         config = HybridMuxConfig(
             primary_source=str(
@@ -115,6 +145,39 @@ class HybridControlMuxNode(Node):
             ),
         )
         self.core = HybridMuxCore(config)
+        self.safety_authority = SafetyConstraintAuthority(
+            required=self.safety_constraint_enabled and self.require_safety_constraint,
+            timeout_sec=self.safety_constraint_timeout_sec,
+            maximum_speed_limit_mps=self.safety_constraint_max_speed_mps,
+            maximum_brake_decel_mps2=self.safety_constraint_max_brake_decel_mps2,
+        )
+        period = 1.0 / max(1.0, self.control_rate_hz)
+        self.control_loop_watchdog = ControlLoopWatchdog(
+            float(
+                self.declare_parameter(
+                    "control_loop_max_gap_sec", max(0.10, period * 3.0)
+                ).value
+            )
+        )
+        self.ros_clock_watchdog = RosClockProgressWatchdog(
+            float(
+                self.declare_parameter(
+                    "ros_clock_stall_timeout_sec", 0.20
+                ).value
+            )
+        )
+        self.control_fault_clear_safe_cycles = max(
+            1,
+            int(
+                self.declare_parameter(
+                    "control_fault_clear_safe_cycles", 3
+                ).value
+            ),
+        )
+        self.control_fault_latched = False
+        self.control_fault_clear_cycles = 0
+        self.control_fault_reason = ""
+        self.control_fault_last_release_stamp_ns: Optional[int] = None
         self.steering_limiter = SteeringLimiter(
             SteeringLimiterConfig(
                 enabled=bool(self.declare_parameter("enable_steering_rate_limit", True).value),
@@ -138,16 +201,30 @@ class HybridControlMuxNode(Node):
 
         self.mpc_cmd: Optional[AckermannControlCommand] = None
         self.mpc_cmd_time_sec: Optional[float] = None
+        self.mpc_cmd_stamp_ns: Optional[int] = None
         self.pure_pursuit_cmd: Optional[AckermannControlCommand] = None
         self.pure_pursuit_cmd_time_sec: Optional[float] = None
+        self.pure_pursuit_cmd_stamp_ns: Optional[int] = None
         self.recovery_cmd: Optional[RecoveryControlCommand] = None
         self.recovery_cmd_time_sec: Optional[float] = None
+        self.recovery_cmd_stamp_ns: Optional[int] = None
         self.recovery_status: Optional[RecoveryStatus] = None
         self.recovery_status_time_sec: Optional[float] = None
+        self.recovery_status_stamp_ns: Optional[int] = None
         self.recovery_permit: Optional[RecoveryPermit] = None
         self.recovery_permit_time_sec: Optional[float] = None
+        self.recovery_permit_stamp_ns: Optional[int] = None
         self.external_safety_status: Optional[SafetyStopStatus] = None
         self.external_safety_time_sec: Optional[float] = None
+        self.external_safety_stamp_ns: Optional[int] = None
+        self.external_stop_latched = False
+        self.safety_constraint: Optional[SafetyConstraintState] = None
+        self.safety_constraint_time_sec: Optional[float] = None
+        self.safety_constraint_header_stamp_ns: Optional[int] = None
+        self.overtake_plan_generation: Optional[int] = None
+        self.overtake_plan_time_sec: Optional[float] = None
+        self.overtake_plan_header_stamp_ns: Optional[int] = None
+        self.overtake_plan_valid = False
         self.mpc_health = MpcHealth()
         self.mpc_health_time_sec: Optional[float] = None
         self.last_debug_publish_sec = -1.0e9
@@ -189,39 +266,206 @@ class HybridControlMuxNode(Node):
             self.on_external_safety_status,
             1,
         )
+        self.create_subscription(
+            SafetyConstraint,
+            "input/safety_constraint",
+            self.on_safety_constraint,
+            1,
+        )
+        self.create_subscription(
+            OvertakePlan,
+            "input/overtake_plan",
+            self.on_overtake_plan,
+            1,
+        )
         self.create_subscription(String, "input/mpc_health", self.on_mpc_health, 1)
         self.control_pub = self.create_publisher(AckermannControlCommand, "output/control_cmd", 1)
         self.debug_pub = self.create_publisher(String, "output/debug", 1)
 
-        period = 1.0 / max(1.0, self.control_rate_hz)
-        self.timer = self.create_timer(period, self.on_timer)
+        self.timer = self.create_timer(
+            period, self.on_timer, clock=self.steady_clock
+        )
 
     def now_sec(self) -> float:
-        return self.get_clock().now().nanoseconds / 1.0e9
+        return self.steady_clock.now().nanoseconds / 1.0e9
 
     def on_mpc_cmd(self, msg: AckermannControlCommand) -> None:
+        receipt_time_sec, stamp_ns, timestamp_advanced = self._advance_receipt_time(
+            self.mpc_cmd_time_sec,
+            self.mpc_cmd_stamp_ns,
+            self._stamp_ns(msg.stamp),
+        )
+        if not timestamp_advanced:
+            return
         self.mpc_cmd = msg
-        self.mpc_cmd_time_sec = self.now_sec()
+        self.mpc_cmd_time_sec = receipt_time_sec
+        self.mpc_cmd_stamp_ns = stamp_ns
 
     def on_pure_pursuit_cmd(self, msg: AckermannControlCommand) -> None:
+        (
+            receipt_time_sec,
+            stamp_ns,
+            timestamp_advanced,
+        ) = self._advance_receipt_time(
+            self.pure_pursuit_cmd_time_sec,
+            self.pure_pursuit_cmd_stamp_ns,
+            self._stamp_ns(msg.stamp),
+        )
+        if not timestamp_advanced:
+            return
         self.pure_pursuit_cmd = msg
-        self.pure_pursuit_cmd_time_sec = self.now_sec()
+        self.pure_pursuit_cmd_time_sec = receipt_time_sec
+        self.pure_pursuit_cmd_stamp_ns = stamp_ns
 
     def on_recovery_cmd(self, msg: RecoveryControlCommand) -> None:
+        (
+            receipt_time_sec,
+            stamp_ns,
+            timestamp_advanced,
+        ) = self._advance_receipt_time(
+            self.recovery_cmd_time_sec,
+            self.recovery_cmd_stamp_ns,
+            self._stamp_ns(msg.header.stamp),
+        )
+        if not timestamp_advanced:
+            return
         self.recovery_cmd = msg
-        self.recovery_cmd_time_sec = self.now_sec()
+        self.recovery_cmd_time_sec = receipt_time_sec
+        self.recovery_cmd_stamp_ns = stamp_ns
 
     def on_recovery_status(self, msg: RecoveryStatus) -> None:
+        (
+            receipt_time_sec,
+            stamp_ns,
+            timestamp_advanced,
+        ) = self._advance_receipt_time(
+            self.recovery_status_time_sec,
+            self.recovery_status_stamp_ns,
+            self._stamp_ns(msg.header.stamp),
+        )
+        if not timestamp_advanced:
+            return
         self.recovery_status = msg
-        self.recovery_status_time_sec = self.now_sec()
+        self.recovery_status_time_sec = receipt_time_sec
+        self.recovery_status_stamp_ns = stamp_ns
 
     def on_recovery_permit(self, msg: RecoveryPermit) -> None:
+        (
+            receipt_time_sec,
+            stamp_ns,
+            timestamp_advanced,
+        ) = self._advance_receipt_time(
+            self.recovery_permit_time_sec,
+            self.recovery_permit_stamp_ns,
+            self._stamp_ns(msg.header.stamp),
+        )
+        if not timestamp_advanced:
+            return
         self.recovery_permit = msg
-        self.recovery_permit_time_sec = self.now_sec()
+        self.recovery_permit_time_sec = receipt_time_sec
+        self.recovery_permit_stamp_ns = stamp_ns
 
     def on_external_safety_status(self, msg: SafetyStopStatus) -> None:
+        (
+            receipt_time_sec,
+            stamp_ns,
+            timestamp_advanced,
+        ) = self._advance_receipt_time(
+            self.external_safety_time_sec,
+            self.external_safety_stamp_ns,
+            self._stamp_ns(msg.header.stamp),
+        )
+        if not bool(msg.valid) or bool(msg.stop_requested):
+            self.external_safety_status = msg
+            self.external_stop_latched = True
+            if timestamp_advanced:
+                self.external_safety_time_sec = receipt_time_sec
+                self.external_safety_stamp_ns = stamp_ns
+            return
+        if not timestamp_advanced:
+            return
         self.external_safety_status = msg
-        self.external_safety_time_sec = self.now_sec()
+        self.external_safety_time_sec = receipt_time_sec
+        self.external_safety_stamp_ns = stamp_ns
+        self.external_stop_latched = False
+
+    def on_safety_constraint(self, msg: SafetyConstraint) -> None:
+        header_stamp_ns = self._stamp_ns(msg.header.stamp)
+        self.safety_constraint = SafetyConstraintState(
+            constraint_generation=int(msg.constraint_generation),
+            plan_generation=int(msg.plan_generation),
+            valid=bool(msg.valid),
+            stop_requested=bool(msg.stop_requested),
+            release_authorized=bool(msg.release_authorized),
+            speed_limit_mps=float(msg.speed_limit_mps),
+            required_brake_decel_mps2=float(msg.required_brake_decel_mps2),
+            header_stamp_ns=header_stamp_ns,
+            frame_id=str(msg.header.frame_id),
+            reason=str(msg.reason),
+        )
+        (
+            self.safety_constraint_time_sec,
+            self.safety_constraint_header_stamp_ns,
+            _,
+        ) = self._advance_receipt_time(
+            self.safety_constraint_time_sec,
+            self.safety_constraint_header_stamp_ns,
+            header_stamp_ns,
+        )
+
+    def on_overtake_plan(self, msg: OvertakePlan) -> None:
+        header_stamp_ns = self._stamp_ns(msg.header.stamp)
+        timestamp_monotonic = (
+            self.overtake_plan_header_stamp_ns is None
+            or header_stamp_ns >= self.overtake_plan_header_stamp_ns
+        )
+        self.overtake_plan_generation = int(msg.plan_generation)
+        (
+            self.overtake_plan_time_sec,
+            advanced_stamp_ns,
+            _,
+        ) = self._advance_receipt_time(
+            self.overtake_plan_time_sec,
+            self.overtake_plan_header_stamp_ns,
+            header_stamp_ns,
+        )
+        trajectory_header_matches = (
+            str(msg.trajectory.header.frame_id) == str(msg.header.frame_id)
+            and self._stamp_ns(msg.trajectory.header.stamp) == header_stamp_ns
+        )
+        trajectory_points_valid = bool(msg.trajectory.points) and all(
+            math.isfinite(float(point.pose.position.x))
+            and math.isfinite(float(point.pose.position.y))
+            and math.isfinite(float(point.longitudinal_velocity_mps))
+            and float(point.longitudinal_velocity_mps) >= 0.0
+            for point in msg.trajectory.points
+        )
+        trajectory_contract_required = bool(msg.trajectory_authorized) or bool(
+            msg.lateral_maneuver_required
+        )
+        trajectory_contract_valid = (
+            not trajectory_contract_required
+            or (
+                bool(msg.trajectory_authorized)
+                and trajectory_header_matches
+                and trajectory_points_valid
+            )
+        )
+        self.overtake_plan_valid = (
+            str(msg.header.frame_id) == "map"
+            and header_stamp_ns >= 0
+            and timestamp_monotonic
+            and int(msg.phase)
+            in (
+                int(OvertakePlan.FREE_RUN),
+                int(OvertakePlan.ATTACK_FOLLOW),
+                int(OvertakePlan.PASSING),
+                int(OvertakePlan.ABORT_HOLD),
+            )
+            and trajectory_contract_valid
+        )
+        if timestamp_monotonic:
+            self.overtake_plan_header_stamp_ns = advanced_stamp_ns
 
     def on_mpc_health(self, msg: String) -> None:
         now_sec = self.now_sec()
@@ -242,6 +486,68 @@ class HybridControlMuxNode(Node):
 
     def on_timer(self) -> None:
         now_sec = self.now_sec()
+        watchdog = self.control_loop_watchdog.update(now_sec)
+        ros_clock_watchdog = self.ros_clock_watchdog.update(
+            int(self.get_clock().now().nanoseconds), now_sec
+        )
+        plan_fresh = self._fresh(
+            self.overtake_plan_time_sec, now_sec, self.overtake_plan_timeout_sec
+        )
+        active_plan_generation = None
+        if self.require_safety_constraint:
+            active_plan_generation = (
+                self.overtake_plan_generation
+                if plan_fresh
+                and self.overtake_plan_valid
+                and self.overtake_plan_generation is not None
+                else -1
+            )
+        constraint_decision = self.safety_authority.evaluate(
+            self.safety_constraint if self.safety_constraint_enabled else None,
+            received_time_sec=(
+                self.safety_constraint_time_sec
+                if self.safety_constraint_enabled
+                else None
+            ),
+            now_sec=now_sec,
+            active_plan_generation=active_plan_generation,
+        )
+        active_control_fault_reason = ""
+        if watchdog.deadline_missed:
+            active_control_fault_reason = "control_loop_deadline_missed"
+        elif ros_clock_watchdog.stalled:
+            active_control_fault_reason = ros_clock_watchdog.reason
+        if active_control_fault_reason:
+            self.control_fault_latched = True
+            self.control_fault_clear_cycles = 0
+            self.control_fault_reason = active_control_fault_reason
+            self.control_fault_last_release_stamp_ns = None
+        elif self.control_fault_latched:
+            explicit_safe_release = (
+                not constraint_decision.stop_required
+                and self.safety_constraint is not None
+                and self.safety_constraint.release_authorized
+            )
+            if explicit_safe_release:
+                release_stamp_ns = self.safety_constraint.header_stamp_ns
+                if (
+                    self.control_fault_last_release_stamp_ns is None
+                    or release_stamp_ns
+                    > self.control_fault_last_release_stamp_ns
+                ):
+                    self.control_fault_clear_cycles += 1
+                    self.control_fault_last_release_stamp_ns = release_stamp_ns
+            else:
+                self.control_fault_clear_cycles = 0
+                self.control_fault_last_release_stamp_ns = None
+            if (
+                self.control_fault_clear_cycles
+                >= self.control_fault_clear_safe_cycles
+            ):
+                self.control_fault_latched = False
+                self.control_fault_clear_cycles = 0
+                self.control_fault_reason = ""
+                self.control_fault_last_release_stamp_ns = None
         mpc_cmd_fresh = self._fresh(self.mpc_cmd_time_sec, now_sec, self.mpc_cmd_timeout_sec)
         pp_cmd_fresh = self._fresh(
             self.pure_pursuit_cmd_time_sec, now_sec, self.pure_pursuit_cmd_timeout_sec
@@ -249,7 +555,17 @@ class HybridControlMuxNode(Node):
         health = self._current_health(now_sec)
         recovery_state = self._current_recovery_state(now_sec)
 
-        if not self.enabled:
+        if self.external_stop_latched:
+            decision_source = "stop"
+            reason = "external_safety_stop"
+            fallback_active = True
+            solved_cycles = 0
+        elif self.control_fault_latched:
+            decision_source = "stop"
+            reason = self.control_fault_reason or "control_fault_latched"
+            fallback_active = True
+            solved_cycles = 0
+        elif not self.enabled:
             decision_source = "mpc" if mpc_cmd_fresh else "stop"
             reason = "disabled"
             fallback_active = False
@@ -270,6 +586,10 @@ class HybridControlMuxNode(Node):
         selected_input_cmd = self._selected_input_command(decision_source)
         cmd = self._select_command(
             decision_source, now_sec, selected_input_cmd)
+        if self.safety_constraint_enabled:
+            cmd, decision_source, reason = self._apply_safety_constraint(
+                cmd, decision_source, reason, constraint_decision, now_sec
+            )
         steering_result = self._limit_steering(cmd, decision_source, now_sec)
         self.control_pub.publish(cmd)
         self._publish_debug(
@@ -285,6 +605,18 @@ class HybridControlMuxNode(Node):
             selected_input_cmd=selected_input_cmd,
             output_cmd=cmd,
             steering_result=steering_result,
+            constraint_decision=constraint_decision,
+            control_loop_deadline_missed=watchdog.deadline_missed,
+            control_publish_gap_sec=watchdog.publish_gap_sec,
+            ros_clock_stalled=ros_clock_watchdog.stalled,
+            ros_clock_stagnant_duration_sec=(
+                ros_clock_watchdog.stagnant_duration_sec
+            ),
+            control_fault_latched=self.control_fault_latched,
+            control_fault_clear_cycles=self.control_fault_clear_cycles,
+            overtake_plan_fresh=plan_fresh,
+            overtake_plan_valid=self.overtake_plan_valid,
+            active_plan_generation=active_plan_generation,
         )
 
         if decision_source != self.last_source:
@@ -293,6 +625,38 @@ class HybridControlMuxNode(Node):
                 f"mpc_status={health.status} mpc_infeasible={health.infeasible_count}"
             )
             self.last_source = decision_source
+
+    def _apply_safety_constraint(
+        self,
+        cmd: AckermannControlCommand,
+        source: str,
+        reason: str,
+        decision: SafetyConstraintDecision,
+        now_sec: float,
+    ) -> tuple[AckermannControlCommand, str, str]:
+        if not (
+            math.isfinite(float(cmd.longitudinal.speed))
+            and math.isfinite(float(cmd.longitudinal.acceleration))
+        ):
+            return self._stop_command(now_sec), "stop", "invalid_tracking_command"
+        if decision.stop_required:
+            stop_cmd = self._stop_command(now_sec)
+            if decision.required_brake_decel_mps2 > 0.0:
+                stop_cmd.longitudinal.acceleration = min(
+                    float(stop_cmd.longitudinal.acceleration),
+                    -decision.required_brake_decel_mps2,
+                )
+            return stop_cmd, "stop", decision.reason
+        speed_mps, acceleration_mps2 = apply_safety_constraint(
+            float(cmd.longitudinal.speed),
+            float(cmd.longitudinal.acceleration),
+            decision,
+        )
+        cmd.longitudinal.speed = speed_mps
+        cmd.longitudinal.acceleration = acceleration_mps2
+        if decision.reason == "safety_constraint_relaxation_not_authorized":
+            reason = decision.reason
+        return cmd, source, reason
 
     def _select_command(
         self,
@@ -500,6 +864,16 @@ class HybridControlMuxNode(Node):
         selected_input_cmd: Optional[AckermannControlCommand],
         output_cmd: AckermannControlCommand,
         steering_result: SteeringLimitResult,
+        constraint_decision: SafetyConstraintDecision,
+        control_loop_deadline_missed: bool,
+        control_publish_gap_sec: float,
+        ros_clock_stalled: bool,
+        ros_clock_stagnant_duration_sec: float,
+        control_fault_latched: bool,
+        control_fault_clear_cycles: int,
+        overtake_plan_fresh: bool,
+        overtake_plan_valid: bool,
+        active_plan_generation: Optional[int],
     ) -> None:
         if self.debug_publish_period_sec <= 0.0:
             return
@@ -545,6 +919,34 @@ class HybridControlMuxNode(Node):
                 "steering_angle_limited": steering_result.angle_limited,
                 "steering_rate_limited": steering_result.rate_limited,
                 "steering_limiter_reset": steering_result.limiter_reset,
+                "safety_constraint_enabled": self.safety_constraint_enabled,
+                "safety_constraint_required": self.require_safety_constraint,
+                "safety_constraint_reason": constraint_decision.reason,
+                "safety_constraint_stop_required": constraint_decision.stop_required,
+                "safety_constraint_generation": constraint_decision.constraint_generation,
+                "safety_constraint_plan_generation": constraint_decision.plan_generation,
+                "safety_constraint_speed_limit_mps": constraint_decision.speed_limit_mps,
+                "safety_constraint_required_brake_decel_mps2": (
+                    constraint_decision.required_brake_decel_mps2
+                ),
+                "overtake_plan_fresh": overtake_plan_fresh,
+                "overtake_plan_valid": overtake_plan_valid,
+                "active_plan_generation": active_plan_generation,
+                "external_stop_latched": self.external_stop_latched,
+                "control_loop_deadline_missed": control_loop_deadline_missed,
+                "ros_clock_stalled": ros_clock_stalled,
+                "ros_clock_stagnant_duration_sec": (
+                    ros_clock_stagnant_duration_sec
+                    if math.isfinite(ros_clock_stagnant_duration_sec)
+                    else None
+                ),
+                "control_fault_latched": control_fault_latched,
+                "control_fault_clear_cycles": control_fault_clear_cycles,
+                "control_publish_gap_sec": (
+                    control_publish_gap_sec
+                    if math.isfinite(control_publish_gap_sec)
+                    else None
+                ),
             },
             separators=(",", ":"),
         )
@@ -552,7 +954,24 @@ class HybridControlMuxNode(Node):
 
     @staticmethod
     def _fresh(last_time_sec: Optional[float], now_sec: float, timeout_sec: float) -> bool:
-        return last_time_sec is not None and now_sec - last_time_sec <= timeout_sec
+        if last_time_sec is None:
+            return False
+        age_sec = now_sec - last_time_sec
+        return math.isfinite(age_sec) and 0.0 <= age_sec <= timeout_sec
+
+    @staticmethod
+    def _stamp_ns(stamp) -> int:
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    def _advance_receipt_time(
+        self,
+        previous_receipt_time_sec: Optional[float],
+        maximum_stamp_ns: Optional[int],
+        incoming_stamp_ns: int,
+    ) -> tuple[Optional[float], Optional[int], bool]:
+        if maximum_stamp_ns is None or incoming_stamp_ns > maximum_stamp_ns:
+            return self.now_sec(), incoming_stamp_ns, True
+        return previous_receipt_time_sec, maximum_stamp_ns, False
 
     @staticmethod
     def _stamp_sec(cmd: Optional[AckermannControlCommand]) -> Optional[int]:

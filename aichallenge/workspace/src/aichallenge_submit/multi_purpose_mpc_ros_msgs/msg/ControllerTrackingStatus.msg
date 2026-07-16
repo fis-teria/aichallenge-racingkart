@@ -1,0 +1,6 @@
+std_msgs/Header header
+uint32 plan_generation
+bool mpc_horizon_usable
+bool pp_command_fresh
+bool trajectory_tracking_usable
+float32 command_age_sec

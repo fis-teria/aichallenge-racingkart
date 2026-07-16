@@ -2,6 +2,7 @@
 
 #include "overtake_planner/candidate_builder.hpp"
 #include "overtake_planner/planner_output_builder.hpp"
+#include "overtake_planner/overtake_supervisor_v2.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -477,7 +478,8 @@ OvertakePlannerCore::OvertakePlannerCore(FrenetFrame frame,
                                          PlannerConfig config)
     : frame_(std::move(frame)), config_(config), blocked_risk_(frame_, config_),
       future_side_risk_(frame_, config_, blocked_risk_), safety_(frame_, config),
-      state_machine_(config) {}
+      state_machine_(config),
+      supervisor_v2_(config.supervisor_v2_abort_release_cycles) {}
 
 // 入力: 現在時刻、自車状態、相手車一覧、MPC health。
 // 出力: MPC overrideとdebug情報を含むPlannerOutput。
@@ -490,6 +492,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
                             const ReentryInputStatus &reentry_input) {
   // デフォルトはMPCの元参照をそのまま使う。安全に判断できる時だけoverrideを有効化する。
   PlannerOutput output;
+  SupervisorV2Decision supervisor_v2_decision;
   output.lateral_offsets.assign(config_.horizon_points, 0.0);
   output.speed_caps.assign(config_.horizon_points, config_.v_passthrough_mps);
 
@@ -1688,6 +1691,104 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
     }
   }
 
+  if (config_.supervisor_v2_shadow_enabled) {
+    // V2は旧state machineの選択前に、SafetyEvaluator済み候補だけを見る。
+    // 現行制御はこのdecisionを使わず、shadow topicへ記録するだけである。
+    std::vector<CandidateTrajectory> supervisor_candidates = candidates;
+    const bool target_present =
+        blocked.blocked || blocked.early_stationary_parallel_pass_target ||
+        blocked.stationary_front_obstacle || blocked.parallel_follow_candidate ||
+        blocked.side_by_side;
+    if (target_present) {
+      // 旧state/freezeが候補生成を抑えたことをV2へ持ち込まない。戦術選択は
+      // 独立候補集合で行い、安全評価器・壁/他車閾値だけを共通化する。
+      supervisor_candidates.erase(
+          std::remove_if(
+              supervisor_candidates.begin(), supervisor_candidates.end(),
+              [](const CandidateTrajectory &candidate) {
+                return candidate.type == CandidateType::FOLLOW ||
+                       candidate.type == CandidateType::PASS_LEFT ||
+                       candidate.type == CandidateType::PASS_RIGHT;
+              }),
+          supervisor_candidates.end());
+      BlockedInfo v2_blocked = blocked;
+      v2_blocked.pass_target_corridor_preflight_required =
+          supervisor_v2_.phase() != TacticalPhase::PASSING;
+      const CandidateBuilder v2_candidate_builder(frame_, config_);
+      for (const auto type : {CandidateType::FOLLOW,
+                              CandidateType::PASS_LEFT,
+                              CandidateType::PASS_RIGHT}) {
+        // V2候補へ旧stateのlocalized profile latchを持ち込まない。V2自身が
+        // target/directionを保持し、各周期の物理候補だけを共通Evaluatorへ渡す。
+        auto candidate = v2_candidate_builder.makeCandidate(
+            type, ego, v2_blocked, opponents, nullptr);
+        safety_.evaluate(candidate, predictions);
+        if (!candidate.longitudinal_profile_valid) {
+          candidate.feasible = false;
+          candidate.reject_reason = "invalid_longitudinal_brake_model";
+        }
+        const bool stationary_braking_shortfall =
+            type == CandidateType::FOLLOW &&
+            (blocked.stationary_front_obstacle ||
+             blocked.braking_follow_active) &&
+            candidate.required_brake_distance_m >
+                candidate.available_brake_distance_m;
+        if (stationary_braking_shortfall) {
+          candidate.feasible = false;
+          candidate.reject_reason = "insufficient_braking_distance";
+        }
+        candidate.score = candidateScore(candidate, v2_blocked);
+        supervisor_candidates.push_back(std::move(candidate));
+      }
+    }
+    BlockedInfo hold_blocked = blocked;
+    hold_blocked.reentry_hold_active = true;
+    CandidateTrajectory evaluated_hold =
+        makeCandidate(CandidateType::RECOVERY, ego, hold_blocked, opponents);
+    safety_.evaluate(evaluated_hold, predictions);
+    if (!evaluated_hold.longitudinal_profile_valid) {
+      evaluated_hold.feasible = false;
+      evaluated_hold.reject_reason = "invalid_longitudinal_brake_model";
+    }
+    evaluated_hold.score = candidateScore(evaluated_hold, hold_blocked);
+    supervisor_candidates.push_back(evaluated_hold);
+
+    const bool safety_inputs_complete =
+        exception_base_inputs_complete && prediction_complete;
+    const bool tracking_usable = reentry_input.mpc_health_fresh &&
+                                 !reentry_input.mpc_hard_failure;
+    const bool pass_start_allowed =
+        blocked.straight_overtake_start_allowed &&
+        (blocked.overtake_permission_allowed ||
+         blocked.permission_start_exception_active ||
+         blocked.gentle_curve_safe_pass_start_approved ||
+         blocked.stationary_no_pass_safe_pass_start_approved);
+    std::string target_id = blocked.nearest_id;
+    if (target_id.empty()) {
+      target_id = blocked.early_stationary_parallel_pass_id;
+    }
+    if (target_id.empty()) {
+      target_id = blocked.stationary_front_id;
+    }
+    if (target_id.empty()) {
+      target_id = blocked.parallel_follow_id;
+    }
+    if (target_id.empty()) {
+      target_id = blocked.side_id;
+    }
+    supervisor_v2_decision = supervisor_v2_.update(SupervisorV2Input{
+        target_present,
+        target_id,
+        safety_inputs_complete,
+        tracking_usable,
+        pass_start_allowed,
+        evaluated_hold.feasible,
+        false,
+        &supervisor_candidates,
+        &evaluated_hold,
+    });
+  }
+
   // 処理ブロック: 内部候補を選び、状態機械で運転modeを安定化する。
   // 設計意図:
   // score上の最良候補をそのままpublishせず、保持時間や連続安全回数を通してmodeを決める。
@@ -2312,6 +2413,7 @@ OvertakePlannerCore::update(double now_sec, const EgoState &ego,
         PlannerOutput::SolverHorizonIntent::MANDATORY_AVOIDANCE;
   }
   capNoPassNormalRecoverySpeed(config_, output_built);
+  output_built.supervisor_v2 = supervisor_v2_decision;
   rememberGenericRecoveryHold(output_built);
   rememberPublishedLateralTarget(now_sec, output_built);
   return output_built;

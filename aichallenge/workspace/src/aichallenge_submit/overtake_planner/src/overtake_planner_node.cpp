@@ -1,9 +1,13 @@
 #include "overtake_planner/overtake_planner_core.hpp"
 #include "overtake_planner/reference_override_contract.hpp"
+#include "overtake_planner/safety_constraint_authority.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/quaternion.hpp>
+#include <autoware_auto_planning_msgs/msg/trajectory_point.hpp>
+#include <multi_purpose_mpc_ros_msgs/msg/overtake_plan.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <multi_purpose_mpc_ros_msgs/msg/safety_constraint.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -37,6 +41,13 @@ double yawFromQuaternion(const geometry_msgs::msg::Quaternion &q) {
   const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
   const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
   return std::atan2(siny_cosp, cosy_cosp);
+}
+
+geometry_msgs::msg::Quaternion quaternionFromYaw(double yaw_rad) {
+  geometry_msgs::msg::Quaternion q;
+  q.z = std::sin(yaw_rad * 0.5);
+  q.w = std::cos(yaw_rad * 0.5);
+  return q;
 }
 
 // 入力: パッケージ名とCSVパス。
@@ -214,6 +225,11 @@ invalidLongitudinalSafetyConfig(const PlannerConfig &config) {
       config.longitudinal_response_delay_sec < 0.0) {
     return "longitudinal_response_delay_sec must be finite and >= 0";
   }
+  if (!std::isfinite(config.recovery_assumed_accel_mps2) ||
+      config.recovery_assumed_accel_mps2 <= 0.0 ||
+      config.recovery_assumed_accel_mps2 > 3.0) {
+    return "recovery_assumed_accel_mps2 must be finite and in (0, 3.0]";
+  }
   if (!std::isfinite(config.stationary_obstacle_speed_threshold_mps) ||
       config.stationary_obstacle_speed_threshold_mps < 0.0) {
     return "stationary_obstacle_speed_threshold_mps must be finite and >= 0";
@@ -347,6 +363,11 @@ public:
 
     PlannerConfig config;
     config.enabled = declare_parameter<bool>("enabled", true);
+    config.supervisor_v2_shadow_enabled =
+        declare_parameter<bool>("supervisor_v2_shadow_enabled", false);
+    config.supervisor_v2_abort_release_cycles =
+        declare_parameter<int>("supervisor_v2_abort_release_cycles", 3);
+    supervisor_v2_shadow_enabled_ = config.supervisor_v2_shadow_enabled;
     const int horizon_points_param =
         declare_parameter<int>("horizon_points", 20);
     config.horizon_points = horizon_points_param > 0
@@ -535,7 +556,7 @@ public:
     config.reentry_mpc_degraded_hold_v_max_mps =
         declare_parameter<double>("reentry_mpc_degraded_hold_v_max_mps", 3.0);
     config.post_abort_curve_hold_v_max_mps =
-        declare_parameter<double>("post_abort_curve_hold_v_max_mps", 4.0);
+        declare_parameter<double>("post_abort_curve_hold_v_max_mps", 3.0);
     config.reentry_mpc_latency_degraded_enter_samples = declare_parameter<int>(
         "reentry_mpc_latency_degraded_enter_samples", 1);
     config.reentry_mpc_unhealthy_enter_samples =
@@ -591,9 +612,11 @@ public:
     config.pass_target_lateral_margin_m = declare_parameter<double>(
         "pass_target_lateral_margin_m", 0.10);
     config.recovery_v_max_mps =
-        declare_parameter<double>("recovery_v_max_mps", 8.5);
+        declare_parameter<double>("recovery_v_max_mps", 3.0);
+    config.recovery_assumed_accel_mps2 =
+        declare_parameter<double>("recovery_assumed_accel_mps2", 3.0);
     config.wall_margin_recovery_v_max_mps =
-        declare_parameter<double>("wall_margin_recovery_v_max_mps", 8.5);
+        declare_parameter<double>("wall_margin_recovery_v_max_mps", 0.5);
     config.outside_corridor_recovery_centering_time_sec =
         declare_parameter<double>(
             "outside_corridor_recovery_centering_time_sec", 1.0);
@@ -633,7 +656,7 @@ public:
     config.speed_only_fallback_enabled =
         declare_parameter<bool>("speed_only_fallback_enabled", true);
     config.speed_only_fallback_v_max_mps =
-        declare_parameter<double>("speed_only_fallback_v_max_mps", 1.0);
+        declare_parameter<double>("speed_only_fallback_v_max_mps", 0.5);
     config.normal_recovery_speed_only_v_max_mps =
         declare_parameter<double>("normal_recovery_speed_only_v_max_mps", 10.0);
     config.opponent_collision_fallback_v_max_mps =
@@ -653,7 +676,7 @@ public:
     config.wall_soft_margin_m =
         declare_parameter<double>("wall_soft_margin_m", 0.25);
     config.wall_risk_v_max_mps =
-        declare_parameter<double>("wall_risk_v_max_mps", 5.0);
+        declare_parameter<double>("wall_risk_v_max_mps", 0.5);
     config.mpc_health_speed_guard_enabled =
         declare_parameter<bool>("mpc_health_speed_guard_enabled", true);
     config.mpc_health_infeasible_count_threshold =
@@ -661,13 +684,13 @@ public:
     config.mpc_health_solve_time_warn_ms =
         declare_parameter<double>("mpc_health_solve_time_warn_ms", 80.0);
     config.mpc_health_v_max_mps =
-        declare_parameter<double>("mpc_health_v_max_mps", 3.0);
+        declare_parameter<double>("mpc_health_v_max_mps", 0.5);
     config.mpc_health_stale_time_sec =
         declare_parameter<double>("mpc_health_stale_time_sec", 0.60);
     config.recovery_speed_guard_enabled =
         declare_parameter<bool>("recovery_speed_guard_enabled", true);
     config.recovery_speed_guard_v_max_mps =
-        declare_parameter<double>("recovery_speed_guard_v_max_mps", 3.0);
+        declare_parameter<double>("recovery_speed_guard_v_max_mps", 0.5);
     config.section_safety_profile_enabled =
         declare_parameter<bool>("section_safety_profile_enabled", true);
     config.safe_stop_enabled =
@@ -692,6 +715,16 @@ public:
     config.safe_stop_release_speed_mps =
         declare_parameter<double>("safe_stop_release_speed_mps", 0.50);
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 20.0);
+    safety_constraint_normal_speed_limit_mps_ = declare_parameter<double>(
+        "safety_constraint_normal_speed_limit_mps", 10.0);
+    const int safety_constraint_release_safe_cycles = declare_parameter<int>(
+        "safety_constraint_release_safe_cycles", 3);
+    safety_constraint_release_gate_ = SafetyConstraintReleaseGate(
+        safety_constraint_release_safe_cycles);
+    supervisor_v2_constraint_release_gate_ = SafetyConstraintReleaseGate(
+        safety_constraint_release_safe_cycles);
+    safety_constraint_maximum_brake_decel_mps2_ = config.max_brake_decel_mps2;
+    horizon_dt_sec_ = config.horizon_dt_sec;
 
     if (const auto invalid_reason = invalidLongitudinalSafetyConfig(config);
         invalid_reason.has_value()) {
@@ -746,6 +779,18 @@ public:
     // MPCへ渡すoverride配列と、evalwrapで拾うdebugトピックをpublishする。
     override_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>(
         "/overtake/reference_override", rclcpp::QoS(1));
+    safety_constraint_pub_ =
+        create_publisher<multi_purpose_mpc_ros_msgs::msg::SafetyConstraint>(
+            "/overtake/safety_constraint", rclcpp::QoS(1));
+    authoritative_plan_pub_ =
+        create_publisher<multi_purpose_mpc_ros_msgs::msg::OvertakePlan>(
+            "/overtake/plan", rclcpp::QoS(1));
+    supervisor_v2_plan_pub_ =
+        create_publisher<multi_purpose_mpc_ros_msgs::msg::OvertakePlan>(
+            "/overtake/v2/shadow/plan", rclcpp::QoS(1));
+    supervisor_v2_constraint_pub_ =
+        create_publisher<multi_purpose_mpc_ros_msgs::msg::SafetyConstraint>(
+            "/overtake/v2/shadow/safety_constraint", rclcpp::QoS(1));
     mode_pub_ = create_publisher<std_msgs::msg::String>("/debug/overtake/mode",
                                                         rclcpp::QoS(1));
     metrics_pub_ = create_publisher<std_msgs::msg::String>(
@@ -1214,6 +1259,243 @@ private:
     last_override_wire_payload_ = wire_payload;
     msg.data = wire_payload.data;
     override_pub_->publish(msg);
+  }
+
+  // 入力: 最終PlannerOutput、自車状態、入力鮮度。
+  // 出力: muxがsource選択後に強制する型付きSafetyConstraint。
+  // 処理概要: legacy overrideと同じplan generationへ紐付け、低速/停止の解除を
+  // 別generationの明示releaseとしてpublishする。
+  void publishSafetyConstraint(const SafetyConstraintCommand &command) {
+    if (!safetyConstraintSemanticallyEqual(command,
+                                           last_safety_constraint_command_) ||
+        last_safety_constraint_plan_generation_ != override_generation_) {
+      safety_constraint_generation_ =
+          safety_constraint_generation_ ==
+                  std::numeric_limits<std::uint32_t>::max()
+              ? 1U
+              : safety_constraint_generation_ + 1U;
+    }
+    last_safety_constraint_command_ = command;
+    last_safety_constraint_plan_generation_ = override_generation_;
+
+    multi_purpose_mpc_ros_msgs::msg::SafetyConstraint msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = "map";
+    msg.constraint_generation = safety_constraint_generation_;
+    msg.plan_generation = override_generation_;
+    msg.valid = command.valid;
+    msg.stop_requested = command.stop_requested;
+    msg.release_authorized = command.release_authorized;
+    msg.speed_limit_mps = static_cast<float>(command.speed_limit_mps);
+    msg.required_brake_decel_mps2 =
+        static_cast<float>(command.required_brake_decel_mps2);
+    msg.reason = command.reason;
+    safety_constraint_pub_->publish(msg);
+  }
+
+  void publishAuthoritativePlan(const PlannerOutput &output,
+                                const EgoState &ego,
+                                std::uint64_t attempt_id,
+                                const SafetyConstraintCommand &constraint) {
+    multi_purpose_mpc_ros_msgs::msg::OvertakePlan msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = "map";
+    msg.plan_generation = override_generation_;
+    msg.attempt_id = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        attempt_id, std::numeric_limits<std::uint32_t>::max()));
+
+    switch (output.mode) {
+    case BehaviorMode::FREE_RUN:
+      msg.phase = multi_purpose_mpc_ros_msgs::msg::OvertakePlan::FREE_RUN;
+      break;
+    case BehaviorMode::FOLLOW_BLOCKED:
+      msg.phase = multi_purpose_mpc_ros_msgs::msg::OvertakePlan::ATTACK_FOLLOW;
+      break;
+    case BehaviorMode::PREPARE_OVERTAKE_LEFT:
+    case BehaviorMode::PREPARE_OVERTAKE_RIGHT:
+    case BehaviorMode::OVERTAKE_LEFT:
+    case BehaviorMode::OVERTAKE_RIGHT:
+    case BehaviorMode::MERGE_BACK:
+      msg.phase = multi_purpose_mpc_ros_msgs::msg::OvertakePlan::PASSING;
+      break;
+    default:
+      msg.phase = multi_purpose_mpc_ros_msgs::msg::OvertakePlan::ABORT_HOLD;
+      break;
+    }
+
+    msg.target_vehicle_id = output.blocked_info.nearest_id;
+    for (const auto *candidate_id : {
+             &output.blocked_info.early_stationary_parallel_pass_id,
+             &output.blocked_info.stationary_front_id,
+             &output.blocked_info.parallel_follow_id,
+             &output.blocked_info.side_id}) {
+      if (msg.target_vehicle_id.empty() && !candidate_id->empty()) {
+        msg.target_vehicle_id = *candidate_id;
+      }
+    }
+    const bool left = output.mode == BehaviorMode::PREPARE_OVERTAKE_LEFT ||
+                      output.mode == BehaviorMode::OVERTAKE_LEFT ||
+                      output.selected == CandidateType::PASS_LEFT;
+    const bool right = output.mode == BehaviorMode::PREPARE_OVERTAKE_RIGHT ||
+                       output.mode == BehaviorMode::OVERTAKE_RIGHT ||
+                       output.selected == CandidateType::PASS_RIGHT;
+    msg.pass_direction = static_cast<std::int8_t>(left ? 1 : (right ? -1 : 0));
+    msg.lateral_maneuver_required = output.active_override &&
+                                    output.solver_horizon_intent !=
+                                        PlannerOutput::SolverHorizonIntent::NONE;
+    msg.trajectory.header = msg.header;
+
+    const std::size_t point_count =
+        std::min(output.lateral_offsets.size(), output.speed_caps.size());
+    const bool complete_trajectory = ego.valid && !frame_.empty() &&
+                                     point_count > 0U &&
+                                     point_count == output.lateral_offsets.size() &&
+                                     point_count == output.speed_caps.size();
+    msg.trajectory_authorized = output.active_override &&
+                                complete_trajectory && constraint.valid &&
+                                !constraint.stop_requested;
+    if (complete_trajectory) {
+      msg.trajectory.points.reserve(point_count);
+      double s_m = ego.frenet.s;
+      for (std::size_t i = 0; i < point_count; ++i) {
+        const double d_m = output.lateral_offsets[i];
+        const double speed_mps = output.speed_caps[i];
+        if (!std::isfinite(d_m) || !std::isfinite(speed_mps) ||
+            speed_mps < 0.0) {
+          msg.trajectory.points.clear();
+          msg.trajectory_authorized = false;
+          break;
+        }
+        if (i > 0U) {
+          s_m = frame_.wrapS(
+              s_m + std::max(0.0, output.speed_caps[i - 1]) *
+                        std::max(0.0, horizon_dt_sec_));
+        }
+        const auto point_on_track = frame_.frenetToCartesian(s_m, d_m);
+        autoware_auto_planning_msgs::msg::TrajectoryPoint point;
+        point.pose.position.x = point_on_track.x;
+        point.pose.position.y = point_on_track.y;
+        point.pose.orientation = quaternionFromYaw(point_on_track.yaw);
+        point.longitudinal_velocity_mps = static_cast<float>(speed_mps);
+        point.acceleration_mps2 = 0.0F;
+        msg.trajectory.points.push_back(point);
+      }
+    }
+    authoritative_plan_pub_->publish(msg);
+  }
+
+  void publishSupervisorV2Shadow(const PlannerOutput &output,
+                                 const EgoState &ego,
+                                 const ReentryInputStatus &inputs) {
+    if (!supervisor_v2_shadow_enabled_) {
+      return;
+    }
+    const auto &decision = output.supervisor_v2;
+    PlannerOutput shadow_output = output;
+    shadow_output.lateral_offsets = decision.trajectory.d;
+    shadow_output.speed_caps = decision.trajectory.v_ref;
+    shadow_output.active_override = decision.trajectory_authorized;
+    shadow_output.longitudinal_speed_cap_active =
+        !decision.trajectory.v_ref.empty();
+    shadow_output.applied_speed_cap_mps =
+        std::numeric_limits<double>::quiet_NaN();
+    for (const double cap_mps : decision.trajectory.v_ref) {
+      if (std::isfinite(cap_mps) && cap_mps > 0.0) {
+        shadow_output.applied_speed_cap_mps =
+            std::isfinite(shadow_output.applied_speed_cap_mps)
+                ? std::min(shadow_output.applied_speed_cap_mps, cap_mps)
+                : cap_mps;
+      }
+    }
+    if (decision.phase != TacticalPhase::FREE_RUN &&
+        !decision.trajectory_authorized) {
+      shadow_output.safe_stop_triggered = true;
+      shadow_output.safe_stop_reason = "v2_trajectory_not_authorized";
+    }
+    const auto constraint = supervisor_v2_constraint_release_gate_.filter(
+        makeSafetyConstraint(
+            shadow_output, ego, inputs,
+            safety_constraint_normal_speed_limit_mps_,
+            safety_constraint_maximum_brake_decel_mps2_));
+    if (!safetyConstraintSemanticallyEqual(
+            constraint, last_supervisor_v2_constraint_command_) ||
+        last_supervisor_v2_constraint_plan_generation_ !=
+            decision.plan_generation) {
+      supervisor_v2_constraint_generation_ =
+          supervisor_v2_constraint_generation_ ==
+                  std::numeric_limits<std::uint32_t>::max()
+              ? 1U
+              : supervisor_v2_constraint_generation_ + 1U;
+    }
+    last_supervisor_v2_constraint_command_ = constraint;
+    last_supervisor_v2_constraint_plan_generation_ =
+        decision.plan_generation;
+
+    const auto stamp = now();
+    multi_purpose_mpc_ros_msgs::msg::SafetyConstraint constraint_msg;
+    constraint_msg.header.stamp = stamp;
+    constraint_msg.header.frame_id = "map";
+    constraint_msg.constraint_generation =
+        supervisor_v2_constraint_generation_;
+    constraint_msg.plan_generation = decision.plan_generation;
+    constraint_msg.valid = constraint.valid;
+    constraint_msg.stop_requested = constraint.stop_requested;
+    constraint_msg.release_authorized = constraint.release_authorized;
+    constraint_msg.speed_limit_mps =
+        static_cast<float>(constraint.speed_limit_mps);
+    constraint_msg.required_brake_decel_mps2 =
+        static_cast<float>(constraint.required_brake_decel_mps2);
+    constraint_msg.reason = constraint.reason;
+    supervisor_v2_constraint_pub_->publish(constraint_msg);
+
+    multi_purpose_mpc_ros_msgs::msg::OvertakePlan plan_msg;
+    plan_msg.header.stamp = stamp;
+    plan_msg.header.frame_id = "map";
+    plan_msg.phase = static_cast<std::uint8_t>(decision.phase);
+    plan_msg.plan_generation = decision.plan_generation;
+    plan_msg.attempt_id = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        decision.attempt_id,
+        std::numeric_limits<std::uint32_t>::max()));
+    plan_msg.target_vehicle_id = decision.target_vehicle_id;
+    plan_msg.pass_direction = static_cast<std::int8_t>(decision.pass_direction);
+    plan_msg.trajectory_authorized =
+        decision.trajectory_authorized && constraint.valid &&
+        !constraint.stop_requested;
+    plan_msg.lateral_maneuver_required =
+        decision.lateral_maneuver_required;
+    plan_msg.trajectory.header = plan_msg.header;
+    const auto &trajectory = decision.trajectory;
+    const std::size_t point_count =
+        std::min({trajectory.x.size(), trajectory.y.size(),
+                  trajectory.yaw.size(), trajectory.v_ref.size()});
+    const bool complete_trajectory =
+        point_count > 0U && point_count == trajectory.x.size() &&
+        point_count == trajectory.y.size() && point_count == trajectory.yaw.size() &&
+        point_count == trajectory.v_ref.size();
+    if (complete_trajectory) {
+      plan_msg.trajectory.points.reserve(point_count);
+      for (std::size_t i = 0; i < point_count; ++i) {
+        if (!std::isfinite(trajectory.x[i]) ||
+            !std::isfinite(trajectory.y[i]) ||
+            !std::isfinite(trajectory.yaw[i]) ||
+            !std::isfinite(trajectory.v_ref[i]) || trajectory.v_ref[i] < 0.0) {
+          plan_msg.trajectory.points.clear();
+          plan_msg.trajectory_authorized = false;
+          break;
+        }
+        autoware_auto_planning_msgs::msg::TrajectoryPoint point;
+        point.pose.position.x = trajectory.x[i];
+        point.pose.position.y = trajectory.y[i];
+        point.pose.orientation = quaternionFromYaw(trajectory.yaw[i]);
+        point.longitudinal_velocity_mps =
+            static_cast<float>(trajectory.v_ref[i]);
+        point.acceleration_mps2 = 0.0F;
+        plan_msg.trajectory.points.push_back(point);
+      }
+    } else {
+      plan_msg.trajectory_authorized = false;
+    }
+    supervisor_v2_plan_pub_->publish(plan_msg);
   }
 
   // 入力: 今周期のBehaviorMode。
@@ -2071,6 +2353,14 @@ private:
         core_->update(now_sec, ego, opponents, mpc_health, reentry_input);
     const auto attempt_id = updateAttemptId(output.mode);
     publishOverride(output);
+    const auto constraint = safety_constraint_release_gate_.filter(
+        makeSafetyConstraint(
+            output, ego, reentry_input,
+            safety_constraint_normal_speed_limit_mps_,
+            safety_constraint_maximum_brake_decel_mps2_));
+    publishAuthoritativePlan(output, ego, attempt_id, constraint);
+    publishSafetyConstraint(constraint);
+    publishSupervisorV2Shadow(output, ego, reentry_input);
     publishDebug(output, ego, attempt_id);
     logDecisionEvent(output, ego, attempt_id);
   }
@@ -2089,6 +2379,12 @@ private:
   double mpc_health_stale_time_sec_{0.60};
   int mpc_health_infeasible_count_threshold_{1};
   double mpc_health_solve_time_warn_ms_{80.0};
+  double safety_constraint_normal_speed_limit_mps_{10.0};
+  double safety_constraint_maximum_brake_decel_mps2_{1.0};
+  double horizon_dt_sec_{0.025};
+  bool supervisor_v2_shadow_enabled_{false};
+  SafetyConstraintReleaseGate safety_constraint_release_gate_{3};
+  SafetyConstraintReleaseGate supervisor_v2_constraint_release_gate_{3};
   MpcHealthStatus mpc_health_{};
   std::uint64_t mpc_health_sample_sequence_{0U};
   std::optional<double> last_mpc_health_sec_;
@@ -2100,8 +2396,22 @@ private:
   std::uint64_t current_attempt_id_{0};
   ReferenceOverrideWirePayload last_override_wire_payload_;
   std::uint32_t override_generation_{0};
+  SafetyConstraintCommand last_safety_constraint_command_{};
+  std::uint32_t safety_constraint_generation_{0};
+  std::uint32_t last_safety_constraint_plan_generation_{0};
+  SafetyConstraintCommand last_supervisor_v2_constraint_command_{};
+  std::uint32_t supervisor_v2_constraint_generation_{0};
+  std::uint32_t last_supervisor_v2_constraint_plan_generation_{0};
 
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr override_pub_;
+  rclcpp::Publisher<multi_purpose_mpc_ros_msgs::msg::SafetyConstraint>::SharedPtr
+      safety_constraint_pub_;
+  rclcpp::Publisher<multi_purpose_mpc_ros_msgs::msg::OvertakePlan>::SharedPtr
+      authoritative_plan_pub_;
+  rclcpp::Publisher<multi_purpose_mpc_ros_msgs::msg::OvertakePlan>::SharedPtr
+      supervisor_v2_plan_pub_;
+  rclcpp::Publisher<multi_purpose_mpc_ros_msgs::msg::SafetyConstraint>::SharedPtr
+      supervisor_v2_constraint_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr metrics_pub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;

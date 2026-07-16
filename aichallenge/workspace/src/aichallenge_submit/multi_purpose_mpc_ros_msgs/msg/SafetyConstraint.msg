@@ -1,0 +1,10 @@
+std_msgs/Header header
+uint32 constraint_generation
+uint32 plan_generation
+
+bool valid
+bool stop_requested
+bool release_authorized
+float32 speed_limit_mps
+float32 required_brake_decel_mps2
+string reason

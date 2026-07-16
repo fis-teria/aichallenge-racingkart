@@ -101,11 +101,14 @@
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="param_file" value="$(find-pkg-share hybrid_control_mux)/config/pure_pursuit_mpc_horizon.param.yaml"/>
     <arg name="recovery_enabled" value="$(var wall_recovery_enabled)"/>
+    <arg name="require_safety_constraint" value="$(var use_overtake_planner)"/>
     <arg name="input_mpc_cmd" value="/pure_pursuit_mpc_horizon/mpc/control_cmd"/>
     <arg name="input_pure_pursuit_cmd" value="/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd"/>
     <arg name="input_recovery_cmd" value="/hybrid_control/recovery/control_cmd"/>
     <arg name="input_recovery_status" value="/wall_recovery/status"/>
     <arg name="input_recovery_permit" value="/wall_recovery/permit"/>
+    <arg name="input_safety_constraint" value="/overtake/safety_constraint"/>
+    <arg name="input_overtake_plan" value="/overtake/plan"/>
     <arg name="input_mpc_health" value="/mpc/speed_profile_debug"/>
     <arg name="output_control_cmd" value="/control/command/control_cmd"/>
   </include>

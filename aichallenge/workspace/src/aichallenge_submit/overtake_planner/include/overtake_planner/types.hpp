@@ -417,9 +417,32 @@ struct ActiveOvertakePermission {
   bool allow_overtake{true};
 };
 
+enum class TacticalPhase : std::uint8_t {
+  FREE_RUN = 0,
+  ATTACK_FOLLOW = 1,
+  PASSING = 2,
+  ABORT_HOLD = 3,
+};
+
+struct SupervisorV2Decision {
+  TacticalPhase phase{TacticalPhase::FREE_RUN};
+  std::uint32_t plan_generation{0};
+  std::uint64_t attempt_id{0};
+  std::string target_vehicle_id{};
+  int pass_direction{0};
+  bool trajectory_authorized{false};
+  bool lateral_maneuver_required{false};
+  bool candidate_set_limited_by_legacy{false};
+  CandidateType selected{CandidateType::FASTEST};
+  CandidateTrajectory trajectory{};
+  std::string reason{"shadow_disabled"};
+};
+
 struct PlannerConfig {
   // 追い越し候補生成、安全マージン、状態遷移をまとめて調整するパラメータ群。
   bool enabled{true};
+  bool supervisor_v2_shadow_enabled{false};
+  int supervisor_v2_abort_release_cycles{3};
   std::size_t horizon_points{20};
   double horizon_dt_sec{0.025};
   double pass_safe_required_cycles{5.0};
@@ -537,7 +560,7 @@ struct PlannerConfig {
   double reentry_mpc_degraded_hold_v_max_mps{3.0};
   // reentry許可・中心収束後の高速カーブで使う現d保持の上限。ABORTを
   // 継続させず、SafetyEvaluatorを通したSPEED_GUARDへ分離する。
-  double post_abort_curve_hold_v_max_mps{4.0};
+  double post_abort_curve_hold_v_max_mps{3.0};
   // 新規MPC sampleでslow solveがこの回数続いた時だけ現d holdへ入る。
   // 1は従来互換、2以上なら単発latencyはspeed capだけに留める。
   int reentry_mpc_latency_degraded_enter_samples{1};
@@ -577,8 +600,10 @@ struct PlannerConfig {
   // 前走車中心から必要楕円間隔よりさらに確保する横方向余裕。
   double pass_target_lateral_margin_m{0.10};
   double max_overtake_v_bonus_mps{0.30};
-  double recovery_v_max_mps{8.5};
-  double wall_margin_recovery_v_max_mps{8.5};
+  double recovery_v_max_mps{3.0};
+  // Recovery再加速をSafetyEvaluatorのs(t)へ反映する保守的な最大加速度。
+  double recovery_assumed_accel_mps2{3.0};
+  double wall_margin_recovery_v_max_mps{0.5};
   double outside_corridor_recovery_centering_time_sec{1.0};
   double v_passthrough_mps{50.0};
   double d_min_m{-1.35};
@@ -597,7 +622,7 @@ struct PlannerConfig {
   double high_speed_curve_lateral_hold_release_speed_mps{2.5};
   double high_speed_curve_lateral_hold_release_curvature_m_inv{0.025};
   bool speed_only_fallback_enabled{true};
-  double speed_only_fallback_v_max_mps{1.0};
+  double speed_only_fallback_v_max_mps{0.5};
   // 追越不可区間で安全に通常ラインへ戻れる時だけ使うレース用cap。
   // SAFE_STOP、衝突、wall/MPC healthなどのfail-safe capとは分離する。
   double normal_recovery_speed_only_v_max_mps{10.0};
@@ -609,14 +634,14 @@ struct PlannerConfig {
   double side_by_side_leader_priority_v_max_mps{3.0};
   bool wall_risk_speed_guard_enabled{true};
   double wall_soft_margin_m{0.25};
-  double wall_risk_v_max_mps{5.0};
+  double wall_risk_v_max_mps{0.5};
   bool mpc_health_speed_guard_enabled{true};
   int mpc_health_infeasible_count_threshold{1};
   double mpc_health_solve_time_warn_ms{80.0};
-  double mpc_health_v_max_mps{3.0};
+  double mpc_health_v_max_mps{0.5};
   double mpc_health_stale_time_sec{0.60};
   bool recovery_speed_guard_enabled{true};
-  double recovery_speed_guard_v_max_mps{3.0};
+  double recovery_speed_guard_v_max_mps{0.5};
   bool section_safety_profile_enabled{true};
   std::vector<SectionSafetyRule> section_safety_rules;
   std::vector<OvertakePermissionRule> overtake_permission_rules;
@@ -719,6 +744,7 @@ struct PlannerOutput {
   double wall_soft_margin_m{std::numeric_limits<double>::quiet_NaN()};
   ActiveSectionSafety active_section{};
   MpcHealthStatus mpc_health{};
+  SupervisorV2Decision supervisor_v2{};
 };
 
 const char *toString(BehaviorMode mode);

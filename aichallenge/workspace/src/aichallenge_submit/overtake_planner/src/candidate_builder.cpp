@@ -182,18 +182,21 @@ CandidateBuilder::LongitudinalProfile CandidateBuilder::makeLongitudinalProfile(
   LongitudinalProfile profile;
   profile.initial_speed_mps = std::max(0.0, ego.v);
   const bool acceleration_requested =
-      (type == CandidateType::FOLLOW || type == CandidateType::PASS_LEFT ||
-       type == CandidateType::PASS_RIGHT) &&
-      acceleration_allowed &&
+      ((type == CandidateType::RECOVERY) ||
+       ((type == CandidateType::FOLLOW || type == CandidateType::PASS_LEFT ||
+         type == CandidateType::PASS_RIGHT) &&
+        acceleration_allowed)) &&
       std::isfinite(speed_cap_mps) &&
       speed_cap_mps > profile.initial_speed_mps + 1.0e-6;
   if (acceleration_requested) {
     profile.target_speed_mps = std::max(0.0, speed_cap_mps);
     profile.acceleration_requested = true;
     const double assumed_accel_mps2 =
-        type == CandidateType::FOLLOW
-            ? config_.follow_gap_closing_assumed_accel_mps2
-            : config_.pass_assumed_accel_mps2;
+        type == CandidateType::RECOVERY
+            ? config_.recovery_assumed_accel_mps2
+            : (type == CandidateType::FOLLOW
+                   ? config_.follow_gap_closing_assumed_accel_mps2
+                   : config_.pass_assumed_accel_mps2);
     if (!std::isfinite(assumed_accel_mps2) || assumed_accel_mps2 <= 0.0 ||
         assumed_accel_mps2 > 3.0) {
       profile.valid = false;
@@ -571,7 +574,6 @@ CandidateTrajectory CandidateBuilder::makeCandidate(
           config_.large_lateral_error_threshold_m) {
     speed_cap = std::min(speed_cap, config_.large_lateral_error_v_max_mps);
   }
-
   const bool acceleration_allowed =
       type == CandidateType::FOLLOW
           ? blocked_info.follow_gap_closing_allowed

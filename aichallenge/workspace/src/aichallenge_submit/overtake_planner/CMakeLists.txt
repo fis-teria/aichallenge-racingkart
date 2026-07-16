@@ -20,8 +20,10 @@ ament_auto_add_library(${PROJECT_NAME}_core SHARED
   src/frenet_frame.cpp
   src/future_side_by_side_risk_analyzer.cpp
   src/overtake_planner_core.cpp
+  src/overtake_supervisor_v2.cpp
   src/planner_output_builder.cpp
   src/safety_evaluator.cpp
+  src/safety_constraint_authority.cpp
 )
 
 ament_auto_add_executable(overtake_planner_node
@@ -40,8 +42,16 @@ if(BUILD_TESTING)
   ament_add_gtest(test_state_machine test/test_state_machine.cpp)
   target_link_libraries(test_state_machine ${PROJECT_NAME}_core)
 
+  ament_add_gtest(test_safety_constraint_authority
+    test/test_safety_constraint_authority.cpp)
+  target_link_libraries(test_safety_constraint_authority ${PROJECT_NAME}_core)
+
   ament_add_gtest(test_overtake_planner_core test/test_overtake_planner_core.cpp)
   target_link_libraries(test_overtake_planner_core ${PROJECT_NAME}_core)
+
+  ament_add_gtest(test_overtake_supervisor_v2
+    test/test_overtake_supervisor_v2.cpp)
+  target_link_libraries(test_overtake_supervisor_v2 ${PROJECT_NAME}_core)
 endif()
 
 ament_auto_package(INSTALL_TO_SHARE

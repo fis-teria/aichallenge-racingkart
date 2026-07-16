@@ -32,6 +32,336 @@ class MuxDecision:
     solved_cycles: int
 
 
+@dataclass(frozen=True)
+class SafetyConstraintState:
+    constraint_generation: int
+    plan_generation: int
+    valid: bool
+    stop_requested: bool
+    release_authorized: bool
+    speed_limit_mps: float
+    required_brake_decel_mps2: float
+    header_stamp_ns: int = 0
+    frame_id: str = "map"
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class SafetyConstraintDecision:
+    stop_required: bool
+    speed_limit_mps: float
+    required_brake_decel_mps2: float
+    constraint_generation: int
+    plan_generation: int
+    reason: str
+
+
+class SafetyConstraintAuthority:
+    """Fail-closed, monotonic safety-constraint latch for the final mux."""
+
+    def __init__(
+        self,
+        *,
+        required: bool,
+        timeout_sec: float,
+        maximum_speed_limit_mps: float,
+        maximum_brake_decel_mps2: float,
+        fault_clear_safe_cycles: int = 3,
+    ) -> None:
+        self.required = required
+        self.timeout_sec = max(0.0, timeout_sec)
+        self.maximum_speed_limit_mps = max(0.0, maximum_speed_limit_mps)
+        self.maximum_brake_decel_mps2 = max(0.0, maximum_brake_decel_mps2)
+        self.fault_clear_safe_cycles = max(1, int(fault_clear_safe_cycles))
+        self._latched: SafetyConstraintState | None = None
+        self._last_payload: tuple[object, ...] | None = None
+        self._last_header_stamp_ns: int | None = None
+        self._fault_latched = False
+        self._fault_clear_cycles = 0
+        self._fault_last_release_stamp_ns: int | None = None
+        self._fault_reason = ""
+
+    def evaluate(
+        self,
+        constraint: SafetyConstraintState | None,
+        *,
+        received_time_sec: float | None,
+        now_sec: float,
+        active_plan_generation: int | None = None,
+    ) -> SafetyConstraintDecision:
+        if constraint is None or received_time_sec is None:
+            if self.required:
+                return self._stop("safety_constraint_missing")
+            return self._unconstrained("safety_constraint_optional_missing")
+
+        age_sec = now_sec - received_time_sec
+        if not math.isfinite(age_sec) or age_sec < 0.0 or age_sec > self.timeout_sec:
+            return self._stop("safety_constraint_stale")
+        if not self._valid(constraint):
+            return self._stop("safety_constraint_invalid")
+        if (
+            active_plan_generation is not None
+            and constraint.plan_generation != active_plan_generation
+        ):
+            return self._stop("safety_constraint_plan_generation_mismatch")
+
+        payload = self._payload(constraint)
+        previous = self._latched
+        if previous is not None:
+            if (
+                self._last_header_stamp_ns is not None
+                and constraint.header_stamp_ns < self._last_header_stamp_ns
+            ):
+                return self._stop("safety_constraint_timestamp_regression")
+            if constraint.constraint_generation < previous.constraint_generation:
+                return self._stop("safety_constraint_generation_regression")
+            if constraint.plan_generation < previous.plan_generation:
+                return self._stop("safety_constraint_plan_generation_regression")
+
+        if self._fault_latched:
+            if constraint.release_authorized:
+                if (
+                    self._fault_last_release_stamp_ns is None
+                    or constraint.header_stamp_ns
+                    > self._fault_last_release_stamp_ns
+                ):
+                    self._fault_clear_cycles += 1
+                    self._fault_last_release_stamp_ns = (
+                        constraint.header_stamp_ns
+                    )
+            else:
+                self._fault_clear_cycles = 0
+                self._fault_last_release_stamp_ns = None
+            if self._fault_clear_cycles < self.fault_clear_safe_cycles:
+                return self._stop(
+                    "safety_constraint_fault_latched", latch_fault=False
+                )
+            self._fault_latched = False
+            self._fault_clear_cycles = 0
+            self._fault_last_release_stamp_ns = None
+            self._fault_reason = ""
+
+        if previous is not None:
+            if constraint.constraint_generation == previous.constraint_generation:
+                if payload != self._last_payload:
+                    return self._stop("safety_constraint_same_generation_conflict")
+                self._last_header_stamp_ns = constraint.header_stamp_ns
+                return self._decision(previous, "safety_constraint_retransmit")
+
+            relaxes = (
+                constraint.speed_limit_mps > previous.speed_limit_mps
+                or constraint.required_brake_decel_mps2
+                < previous.required_brake_decel_mps2
+                or (previous.stop_requested and not constraint.stop_requested)
+            )
+            if relaxes and not constraint.release_authorized:
+                constraint = SafetyConstraintState(
+                    constraint_generation=constraint.constraint_generation,
+                    plan_generation=constraint.plan_generation,
+                    valid=True,
+                    stop_requested=previous.stop_requested or constraint.stop_requested,
+                    release_authorized=False,
+                    speed_limit_mps=min(
+                        previous.speed_limit_mps, constraint.speed_limit_mps
+                    ),
+                    required_brake_decel_mps2=max(
+                        previous.required_brake_decel_mps2,
+                        constraint.required_brake_decel_mps2,
+                    ),
+                    header_stamp_ns=constraint.header_stamp_ns,
+                    frame_id=constraint.frame_id,
+                    reason=constraint.reason,
+                )
+                self._latched = constraint
+                self._last_payload = payload
+                self._last_header_stamp_ns = constraint.header_stamp_ns
+                return self._decision(
+                    constraint, "safety_constraint_relaxation_not_authorized"
+                )
+
+        self._latched = constraint
+        self._last_payload = payload
+        self._last_header_stamp_ns = constraint.header_stamp_ns
+        return self._decision(constraint, "safety_constraint_applied")
+
+    def _valid(self, constraint: SafetyConstraintState) -> bool:
+        return (
+            constraint.valid
+            and constraint.constraint_generation >= 0
+            and constraint.plan_generation >= 0
+            and constraint.header_stamp_ns >= 0
+            and constraint.frame_id == "map"
+            and math.isfinite(constraint.speed_limit_mps)
+            and 0.0 < constraint.speed_limit_mps <= self.maximum_speed_limit_mps
+            and math.isfinite(constraint.required_brake_decel_mps2)
+            and 0.0
+            <= constraint.required_brake_decel_mps2
+            <= self.maximum_brake_decel_mps2
+        )
+
+    @staticmethod
+    def _payload(constraint: SafetyConstraintState) -> tuple[object, ...]:
+        return (
+            constraint.plan_generation,
+            constraint.valid,
+            constraint.stop_requested,
+            constraint.release_authorized,
+            constraint.speed_limit_mps,
+            constraint.required_brake_decel_mps2,
+        )
+
+    def _decision(
+        self, constraint: SafetyConstraintState, reason: str
+    ) -> SafetyConstraintDecision:
+        return SafetyConstraintDecision(
+            stop_required=constraint.stop_requested,
+            speed_limit_mps=constraint.speed_limit_mps,
+            required_brake_decel_mps2=constraint.required_brake_decel_mps2,
+            constraint_generation=constraint.constraint_generation,
+            plan_generation=constraint.plan_generation,
+            reason=reason,
+        )
+
+    def _stop(
+        self, reason: str, *, latch_fault: bool = True
+    ) -> SafetyConstraintDecision:
+        # Before the first accepted contract, required-input absence is a
+        # fail-closed startup stop, not a historical low-cap release.  Once a
+        # valid contract has been accepted, faults latch until explicit safe
+        # release so a stale/invalid interval cannot silently raise speed.
+        if latch_fault and self._latched is not None:
+            self._fault_latched = True
+            self._fault_clear_cycles = 0
+            self._fault_last_release_stamp_ns = None
+            self._fault_reason = reason
+        generation = self._latched.constraint_generation if self._latched else 0
+        plan_generation = self._latched.plan_generation if self._latched else 0
+        return SafetyConstraintDecision(
+            stop_required=True,
+            speed_limit_mps=0.0,
+            required_brake_decel_mps2=0.0,
+            constraint_generation=generation,
+            plan_generation=plan_generation,
+            reason=reason,
+        )
+
+    def _unconstrained(self, reason: str) -> SafetyConstraintDecision:
+        return SafetyConstraintDecision(
+            stop_required=False,
+            speed_limit_mps=self.maximum_speed_limit_mps,
+            required_brake_decel_mps2=0.0,
+            constraint_generation=0,
+            plan_generation=0,
+            reason=reason,
+        )
+
+
+@dataclass(frozen=True)
+class ControlLoopWatchdogResult:
+    deadline_missed: bool
+    publish_gap_sec: float
+
+
+class ControlLoopWatchdog:
+    def __init__(self, maximum_gap_sec: float) -> None:
+        self.maximum_gap_sec = max(0.0, maximum_gap_sec)
+        self._last_tick_sec: float | None = None
+
+    def update(self, now_sec: float) -> ControlLoopWatchdogResult:
+        if self._last_tick_sec is None:
+            self._last_tick_sec = now_sec
+            return ControlLoopWatchdogResult(False, 0.0)
+        gap_sec = now_sec - self._last_tick_sec
+        self._last_tick_sec = now_sec
+        missed = (
+            not math.isfinite(gap_sec)
+            or gap_sec < 0.0
+            or gap_sec > self.maximum_gap_sec
+        )
+        return ControlLoopWatchdogResult(missed, gap_sec)
+
+
+@dataclass(frozen=True)
+class RosClockProgressWatchdogResult:
+    stalled: bool
+    stagnant_duration_sec: float
+    reason: str
+
+
+class RosClockProgressWatchdog:
+    """Detect a ROS clock that stops or moves backwards using steady time."""
+
+    def __init__(self, maximum_stall_sec: float) -> None:
+        self.maximum_stall_sec = max(0.0, maximum_stall_sec)
+        self._maximum_ros_time_ns: int | None = None
+        self._last_progress_steady_sec: float | None = None
+
+    def update(
+        self, ros_time_ns: int, steady_time_sec: float
+    ) -> RosClockProgressWatchdogResult:
+        if (
+            not isinstance(ros_time_ns, int)
+            or ros_time_ns < 0
+            or not math.isfinite(steady_time_sec)
+        ):
+            return RosClockProgressWatchdogResult(
+                True, float("inf"), "ros_clock_invalid"
+            )
+
+        if self._maximum_ros_time_ns is None:
+            self._maximum_ros_time_ns = ros_time_ns
+            self._last_progress_steady_sec = steady_time_sec
+            return RosClockProgressWatchdogResult(False, 0.0, "ros_clock_initial")
+
+        if ros_time_ns > self._maximum_ros_time_ns:
+            self._maximum_ros_time_ns = ros_time_ns
+            self._last_progress_steady_sec = steady_time_sec
+            return RosClockProgressWatchdogResult(False, 0.0, "ros_clock_progressing")
+
+        if ros_time_ns < self._maximum_ros_time_ns:
+            return RosClockProgressWatchdogResult(
+                True, float("inf"), "ros_clock_regression"
+            )
+
+        if self._last_progress_steady_sec is None:
+            return RosClockProgressWatchdogResult(
+                True, float("inf"), "ros_clock_progress_missing"
+            )
+        stagnant_duration_sec = steady_time_sec - self._last_progress_steady_sec
+        stalled = (
+            not math.isfinite(stagnant_duration_sec)
+            or stagnant_duration_sec < 0.0
+            or stagnant_duration_sec > self.maximum_stall_sec
+        )
+        return RosClockProgressWatchdogResult(
+            stalled,
+            stagnant_duration_sec,
+            "ros_clock_stalled" if stalled else "ros_clock_within_stall_budget",
+        )
+
+
+def apply_safety_constraint(
+    speed_mps: float,
+    acceleration_mps2: float,
+    decision: SafetyConstraintDecision,
+) -> tuple[float, float]:
+    """Apply an already-validated constraint to one longitudinal command."""
+    if decision.stop_required:
+        stop_acceleration = acceleration_mps2
+        if decision.required_brake_decel_mps2 > 0.0:
+            stop_acceleration = min(
+                acceleration_mps2, -decision.required_brake_decel_mps2
+            )
+        return 0.0, stop_acceleration
+    limited_speed = min(max(0.0, speed_mps), decision.speed_limit_mps)
+    limited_acceleration = acceleration_mps2
+    if decision.required_brake_decel_mps2 > 0.0:
+        limited_acceleration = min(
+            acceleration_mps2, -decision.required_brake_decel_mps2
+        )
+    return limited_speed, limited_acceleration
+
+
 @dataclass
 class RecoveryMuxState:
     enabled: bool = False
