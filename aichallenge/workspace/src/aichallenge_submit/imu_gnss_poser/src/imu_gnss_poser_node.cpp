@@ -16,6 +16,7 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -25,9 +26,11 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -107,6 +110,43 @@ std::optional<double> compute_yaw(const std::vector<Point2D> & pts, size_t idx)
   return std::nullopt;
 }
 
+bool normalize_quaternion(
+  geometry_msgs::msg::Quaternion & quaternion)
+{
+  const double norm = std::sqrt(
+    quaternion.x * quaternion.x + quaternion.y * quaternion.y +
+    quaternion.z * quaternion.z + quaternion.w * quaternion.w);
+  if (!std::isfinite(norm) || norm < 1.0e-9) {
+    return false;
+  }
+  quaternion.x /= norm;
+  quaternion.y /= norm;
+  quaternion.z /= norm;
+  quaternion.w /= norm;
+  return true;
+}
+
+bool imu_to_base_link_orientation(
+  const geometry_msgs::msg::Quaternion & imu_orientation,
+  geometry_msgs::msg::Quaternion & base_link_orientation)
+{
+  auto imu = imu_orientation;
+  if (!normalize_quaternion(imu)) {
+    return false;
+  }
+
+  // AWSIM's IMU heading is +90 degrees counter-clockwise from base_link's
+  // forward (+X) axis. Apply the fixed IMU-to-base rotation on the right.
+  constexpr double kHalfSqrt2 = 0.70710678118654752440;
+  constexpr double offset_z = -kHalfSqrt2;
+  constexpr double offset_w = kHalfSqrt2;
+  base_link_orientation.x = imu.x * offset_w + imu.y * offset_z;
+  base_link_orientation.y = -imu.x * offset_z + imu.y * offset_w;
+  base_link_orientation.z = imu.w * offset_z + imu.z * offset_w;
+  base_link_orientation.w = imu.w * offset_w - imu.z * offset_z;
+  return normalize_quaternion(base_link_orientation);
+}
+
 }  // namespace
 
 class ImuGnssPoser : public rclcpp::Node
@@ -121,6 +161,8 @@ public:
     declare_parameter("marker_publish_rate", 0.1);
     declare_parameter("arrow_interval", 2);
     declare_parameter("arrow_length", 1.0);
+    declare_parameter("publish_gnss_tf", true);
+    declare_parameter("gnss_tf_child_frame", std::string("base_link"));
 
     // GNSS measurement covariance
     declare_parameter("gnss_covariance.good_threshold", 0.1);
@@ -172,6 +214,10 @@ public:
       "/localization/imu_gnss_poser/pose_with_covariance", rv_qos);
     pub_initial_pose_3d_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
       "/localization/initial_pose3d", rt_qos);
+    if (get_parameter("publish_gnss_tf").as_bool()) {
+      tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+      gnss_tf_child_frame_ = get_parameter("gnss_tf_child_frame").as_string();
+    }
 
     // Subscriptions
     sub_gnss_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
@@ -220,6 +266,7 @@ private:
   {
     adjust_covariance(*msg);
     apply_imu_orientation_fallback(*msg);
+    publish_gnss_aligned_tf(*msg);
 
     // Publish fused pose for EKF measurement input (GNSS/IMU yaw, not raceline)
     pub_pose_->publish(*msg);
@@ -256,6 +303,28 @@ private:
     msg.pose.covariance[7 * 5] = gnss_cov_yaw_;
   }
 
+  void publish_gnss_aligned_tf(
+    const geometry_msgs::msg::PoseWithCovarianceStamped & msg)
+  {
+    if (!tf_broadcaster_) {
+      return;
+    }
+    geometry_msgs::msg::Quaternion orientation = msg.pose.pose.orientation;
+    if (!normalize_quaternion(orientation) &&
+      !imu_to_base_link_orientation(imu_msg_.orientation, orientation))
+    {
+      orientation.w = 1.0;
+    }
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header = msg.header;
+    transform.child_frame_id = gnss_tf_child_frame_;
+    transform.transform.translation.x = msg.pose.pose.position.x;
+    transform.transform.translation.y = msg.pose.pose.position.y;
+    transform.transform.translation.z = msg.pose.pose.position.z;
+    transform.transform.rotation = orientation;
+    tf_broadcaster_->sendTransform(transform);
+  }
+
   bool try_apply_raceline_yaw(geometry_msgs::msg::PoseWithCovarianceStamped & msg) const
   {
     if (!has_raceline_) {
@@ -280,11 +349,16 @@ private:
 
   void apply_imu_orientation_fallback(geometry_msgs::msg::PoseWithCovarianceStamped & msg) const
   {
+    geometry_msgs::msg::Quaternion base_link_orientation;
+    if (imu_to_base_link_orientation(imu_msg_.orientation, base_link_orientation)) {
+      msg.pose.pose.orientation = base_link_orientation;
+      return;
+    }
     const auto & o = msg.pose.pose.orientation;
     if (std::isnan(o.x) || std::isnan(o.y) || std::isnan(o.z) || std::isnan(o.w) ||
       (o.x == 0 && o.y == 0 && o.z == 0 && o.w == 0))
     {
-      msg.pose.pose.orientation = imu_msg_.orientation;
+      msg.pose.pose.orientation.w = 1.0;
     }
   }
 
@@ -466,6 +540,8 @@ private:
   // ROS interfaces
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pub_pose_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pub_initial_pose_3d_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  std::string gnss_tf_child_frame_{"base_link"};
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr sub_gnss_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;

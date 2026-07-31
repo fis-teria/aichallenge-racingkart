@@ -283,11 +283,11 @@ docker_as_sudo_ok() {
 docker_run() {
     if docker_as_user_ok; then
         docker "$@"
-        return 0
+        return $?
     fi
     if cmd_exists sudo && cmd_exists docker; then
         sudo docker "$@"
-        return 0
+        return $?
     fi
     warn "${FAIL} docker not available"
     return 1
@@ -296,11 +296,11 @@ docker_run() {
 docker_run_no_prompt() {
     if docker_as_user_ok; then
         docker "$@"
-        return 0
+        return $?
     fi
     if docker_as_sudo_ok; then
         sudo -n docker "$@"
-        return 0
+        return $?
     fi
     return 1
 }
@@ -308,11 +308,11 @@ docker_run_no_prompt() {
 docker_compose_run() {
     if docker_as_user_ok; then
         docker compose "$@"
-        return 0
+        return $?
     fi
     if cmd_exists sudo && cmd_exists docker; then
         sudo docker compose "$@"
-        return 0
+        return $?
     fi
     warn "${FAIL} docker not available"
     return 1
@@ -321,11 +321,11 @@ docker_compose_run() {
 docker_compose_run_no_prompt() {
     if docker_as_user_ok; then
         docker compose "$@"
-        return 0
+        return $?
     fi
     if docker_as_sudo_ok; then
         sudo -n docker compose "$@"
-        return 0
+        return $?
     fi
     return 1
 }
@@ -930,7 +930,7 @@ ensure_env() {
     fi
     cp .env.example .env
 
-    if [ -e /dev/nvidia0 ]; then
+    if [ -e /dev/nvidia0 ] || [ -e /dev/dxg ]; then
         sed -i 's/^#\s*COMPOSE_FILE=/COMPOSE_FILE=/' .env
         log "${OK} .env created (GPU)"
     else
@@ -1035,9 +1035,13 @@ doctor() {
     echo ""
     echo "=== GPU (optional) ==="
     if cmd_exists nvidia-smi; then
-        echo "${INFO} nvidia-smi found (GPU may be available)"
-        echo "    To enable GPU containers later, install NVIDIA Container Toolkit:"
-        echo "    https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
+        _chk OK "nvidia-smi found"
+        if cmd_exists nvidia-container-cli; then
+            _chk OK "NVIDIA Container Toolkit available"
+        else
+            _chk WARN "NVIDIA Container Toolkit not found"
+            echo "    Install: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
+        fi
     else
         echo "${INFO} nvidia-smi not found (CPU-only is OK)"
     fi

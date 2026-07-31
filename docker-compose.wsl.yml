@@ -1,0 +1,25 @@
+# WSL exposes the NVIDIA GPU through /dev/dxg and NVIDIA Container Toolkit.
+# Remove native-Ubuntu device mappings that do not exist in WSL.
+services:
+  rosbag-cleaner:
+    devices: !reset []
+  ga-runner:
+    devices: !reset []
+  autoware:
+    devices: !reset []
+  autoware-build:
+    devices: !reset []
+  autoware-command:
+    devices: !reset []
+  autoware-simulator-evaluation:
+    devices: !reset []
+  simulator:
+    devices: !reset []
+  autoware-d1:
+    devices: !reset []
+  autoware-d2:
+    devices: !reset []
+  autoware-d3:
+    devices: !reset []
+  autoware-d4:
+    devices: !reset []

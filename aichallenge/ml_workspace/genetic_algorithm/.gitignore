@@ -1,0 +1,7 @@
+runs/*
+!runs/.gitkeep
+ipc/*
+!ipc/.gitkeep
+*.egg-info/
+__pycache__/
+.pytest_cache/

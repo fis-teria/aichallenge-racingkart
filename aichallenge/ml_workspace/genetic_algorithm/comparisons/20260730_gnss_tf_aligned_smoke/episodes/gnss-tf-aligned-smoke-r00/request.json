@@ -1,0 +1,23 @@
+{
+  "candidate_id": "gnss-tf-aligned-smoke",
+  "parameter_hash": "sha256:gnss-tf-aligned-smoke",
+  "parameters": {
+    "actual_lookahead_distance_blend": 0.0,
+    "corner_speed_retention": 1.0,
+    "curvature_lookahead_min_distance": 1.3934348328777129,
+    "curvature_lookahead_sensitivity": 3.049725184856392,
+    "curvature_lookahead_smoothing_alpha": 0.06289617792700511,
+    "curvature_speed_preview_distance": 21.432338681168247,
+    "dual_preview_blend": 0.15,
+    "dual_preview_near_ratio": 0.5,
+    "external_target_vel": 9.722222222222,
+    "lookahead_gain": 0.9506029522798438,
+    "lookahead_min_distance": 2.289301432808675,
+    "max_lateral_acceleration": 4.11238001571805,
+    "minimum_corner_speed": 8.361196726152222,
+    "speed_proportional_gain": 1.9160981490774214,
+    "steering_tire_angle_gain": 1.9967849795846457
+  },
+  "repeat": 0,
+  "result_path": "/aichallenge/ml_workspace/genetic_algorithm/comparisons/20260730_gnss_tf_aligned_smoke/episodes/gnss-tf-aligned-smoke-r00/metrics.json"
+}

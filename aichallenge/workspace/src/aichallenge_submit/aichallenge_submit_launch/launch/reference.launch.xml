@@ -17,7 +17,7 @@
   <log message="echo launch param use_sim_time: $(var use_sim_time) launch_vehicle_interface: $(var launch_vehicle_interface) sensor_model: $(var sensor_model)"/>
 
   <!-- Control method -->
-  <arg name="control_method" default="mpc"
+  <arg name="control_method" default="$(env CONTROL_METHOD mpc)"
        description="Select control: mpc, pure_pursuit, tiny_lidar_net, pilot_net, joycon"/>
 
   <!-- Global parameters -->
@@ -81,26 +81,31 @@
       <param name="heading_csv_path" value="$(find-pkg-share imu_gnss_poser)/data/heading_reference.csv"/>
     </node>
 
-    <include file="$(find-pkg-share ekf_localizer)/launch/ekf_localizer.launch.xml">
-      <arg name="enable_yaw_bias_estimation" value="false"/>
-      <arg name="tf_rate" value="30.0"/>
-      <arg name="twist_smoothing_steps" value="1"/>
-      <arg name="pose_smoothing_steps" value="1"/>
-      <arg name="input_initial_pose_name" value="/localization/initial_pose3d"/>
-      <arg name="input_pose_with_cov_name" value="/localization/imu_gnss_poser/pose_with_covariance"/>
-      <arg name="input_twist_with_cov_name" value="/localization/twist_estimator/twist_with_covariance"/>
-      <arg name="output_odom_name" value="kinematic_state"/>
-      <arg name="output_pose_name" value="pose"/>
-      <arg name="output_pose_with_covariance_name" value="/localization/pose_with_covariance"/>
-      <arg name="output_biased_pose_name" value="biased_pose"/>
-      <arg name="output_biased_pose_with_covariance_name" value="biased_pose_with_covariance"/>
-      <arg name="output_twist_name" value="twist"/>
-      <arg name="output_twist_with_covariance_name" value="twist_with_covariance"/>
-      <arg name="proc_stddev_vx_c" value="10.0"/>
-      <arg name="proc_stddev_wz_c" value="5.0"/>
-      <arg name="pose_additional_delay" value="$(var pose_additional_delay_var)"/>
-      <arg name="extend_state_step" value="100"/>
-    </include>
+    <!-- Keep EKF odometry for control, but do not let its predicted TF compete
+         with the GNSS pose used as the map-frame ground truth. -->
+    <group>
+      <set_remap from="/tf" to="/tf_ekf"/>
+      <include file="$(find-pkg-share ekf_localizer)/launch/ekf_localizer.launch.xml">
+        <arg name="enable_yaw_bias_estimation" value="false"/>
+        <arg name="tf_rate" value="30.0"/>
+        <arg name="twist_smoothing_steps" value="1"/>
+        <arg name="pose_smoothing_steps" value="1"/>
+        <arg name="input_initial_pose_name" value="/localization/initial_pose3d"/>
+        <arg name="input_pose_with_cov_name" value="/localization/imu_gnss_poser/pose_with_covariance"/>
+        <arg name="input_twist_with_cov_name" value="/localization/twist_estimator/twist_with_covariance"/>
+        <arg name="output_odom_name" value="kinematic_state"/>
+        <arg name="output_pose_name" value="pose"/>
+        <arg name="output_pose_with_covariance_name" value="/localization/pose_with_covariance"/>
+        <arg name="output_biased_pose_name" value="biased_pose"/>
+        <arg name="output_biased_pose_with_covariance_name" value="biased_pose_with_covariance"/>
+        <arg name="output_twist_name" value="twist"/>
+        <arg name="output_twist_with_covariance_name" value="twist_with_covariance"/>
+        <arg name="proc_stddev_vx_c" value="10.0"/>
+        <arg name="proc_stddev_wz_c" value="5.0"/>
+        <arg name="pose_additional_delay" value="$(var pose_additional_delay_var)"/>
+        <arg name="extend_state_step" value="100"/>
+      </include>
+    </group>
 
     <!-- twist2accel -->
     <group>

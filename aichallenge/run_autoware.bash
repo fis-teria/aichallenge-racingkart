@@ -25,6 +25,9 @@ case "${mode}" in
 esac
 
 export ROS_DOMAIN_ID=$id
+if [[ "${GA_EXPERIMENT_MODE:-false}" == "true" && -z "${CONTROL_METHOD:-}" ]]; then
+    export CONTROL_METHOD=pure_pursuit
+fi
 
 mkdir -p "${out_dir}"
 exec >"${out_dir}/autoware.log" 2>&1

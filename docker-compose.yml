@@ -13,6 +13,7 @@ x-autoware-base: &autoware-base
     - TZ=Asia/Tokyo
     - RUN_MODE=${RUN_MODE:-}
     - SIM_MODE=${SIM_MODE:-}
+    - AWSIM_HEADLESS=${AWSIM_HEADLESS:-false}
     - CMD=${CMD:-}
     - COLCON_TRACE=${COLCON_TRACE:-}
     - ROS_HOME=${ROS_HOME:-}
@@ -20,6 +21,8 @@ x-autoware-base: &autoware-base
     - HOST_UID=${HOST_UID:-}
     - HOST_GID=${HOST_GID:-}
     - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
+    - GA_EXPERIMENT_MODE=${GA_EXPERIMENT_MODE:-false}
+    - GA_CONFIG=${GA_CONFIG:-/aichallenge/ml_workspace/genetic_algorithm/config/experiment_ros2.yaml}
   volumes:
     - ./output:${OUTPUT_ROOT:-/output}
     - ./aichallenge:/aichallenge
@@ -76,6 +79,47 @@ x-racing_kart_interface-base: &racing_kart_interface-base
   working_dir: /workspace
 
 services:
+  rosbag-cleaner:
+    <<: *autoware-base
+    privileged: false
+    restart: unless-stopped
+    entrypoint: ["/aichallenge/utils/cleanup_rosbags.bash"]
+    command: []
+    environment:
+      - ROSBAG_RETENTION_MINUTES=${ROSBAG_RETENTION_MINUTES:-180}
+      - ROSBAG_ACTIVE_GRACE_MINUTES=${ROSBAG_ACTIVE_GRACE_MINUTES:-10}
+      - ROSBAG_CLEAN_INTERVAL_SECONDS=${ROSBAG_CLEAN_INTERVAL_SECONDS:-300}
+      - ROSBAG_MAX_TOTAL_GB=${ROSBAG_MAX_TOTAL_GB:-20}
+
+  ga-runner:
+    <<: *autoware-base
+    privileged: false
+    restart: "no"
+    environment:
+      - ROS_DOMAIN_ID=1
+      - GA_EXPERIMENT_MODE=true
+      - GA_CONFIG=${GA_CONFIG:-/aichallenge/ml_workspace/genetic_algorithm/config/experiment_ros2.yaml}
+      - GA_RESUME_RUN_DIR=${GA_RESUME_RUN_DIR:-}
+      - GA_PARALLEL_WORKERS=${GA_PARALLEL_WORKERS:-3}
+      - GA_WORKER_IDS=${GA_WORKER_IDS:-worker-1,worker-2,worker-3}
+    command:
+      - bash
+      - -lc
+      - >-
+        source /opt/ros/humble/setup.bash &&
+        source /aichallenge/workspace/install/setup.bash &&
+        export PYTHONPATH=/aichallenge/ml_workspace/genetic_algorithm/src:$${PYTHONPATH:-} &&
+        if [ -n "$${GA_RESUME_RUN_DIR}" ]; then
+          exec python3 -m ga_pure_pursuit.cli resume \
+          --run-dir "$${GA_RESUME_RUN_DIR}" \
+          --parallel-workers "$${GA_PARALLEL_WORKERS}" \
+          --worker-ids "$${GA_WORKER_IDS}";
+        else
+          exec python3 -m ga_pure_pursuit.cli search \
+          --config "$${GA_CONFIG}" \
+          --runs-dir /aichallenge/ml_workspace/genetic_algorithm/runs;
+        fi
+
   # Autoware service
   autoware:
     <<: *autoware-base

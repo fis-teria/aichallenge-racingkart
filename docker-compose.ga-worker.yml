@@ -1,0 +1,112 @@
+x-ga-worker-base: &ga-worker-base
+  image: aichallenge-2025-dev
+  pull_policy: never
+  privileged: true
+  stop_grace_period: 10s
+  environment:
+    - ROS_DISTRO=humble
+    - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    - CYCLONEDDS_URI=file:///opt/autoware/cyclonedds.xml
+    - TZ=Asia/Tokyo
+    - HOST_UID=${HOST_UID:-0}
+    - HOST_GID=${HOST_GID:-0}
+  volumes:
+    - ./aichallenge:/aichallenge
+    - ./output:/output
+    - ./vehicle/cyclonedds.ga-worker.xml:/opt/autoware/cyclonedds.xml:ro
+
+services:
+  simulator:
+    <<: *ga-worker-base
+    environment:
+      - ROS_DISTRO=humble
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///opt/autoware/cyclonedds.xml
+      - ROS_DOMAIN_ID=0
+      - SIM_MODE=dev
+      - AWSIM_HEADLESS=true
+      - GA_EXPERIMENT_MODE=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    working_dir: ${GA_WORKER_LOG_DIR:-/output/ga-workers/unknown}
+    command:
+      - bash
+      - -lc
+      - >-
+        exec /aichallenge/run_simulator.bash dev
+        >"${GA_WORKER_LOG_DIR:-/output/ga-workers/unknown}/awsim.log" 2>&1
+
+  autoware:
+    <<: *ga-worker-base
+    environment:
+      - ROS_DISTRO=humble
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///opt/autoware/cyclonedds.xml
+      - ROS_DOMAIN_ID=1
+      - GA_EXPERIMENT_MODE=true
+      - CONTROL_METHOD=pure_pursuit
+      - HOST_UID=${HOST_UID:-0}
+      - HOST_GID=${HOST_GID:-0}
+    working_dir: ${GA_WORKER_LOG_DIR:-/output/ga-workers/unknown}
+    command:
+      - bash
+      - -lc
+      - >-
+        exec /aichallenge/run_autoware.bash awsim-no-viz 1
+        "${GA_WORKER_LOG_DIR:-/output/ga-workers/unknown}"
+
+  ga-worker:
+    <<: *ga-worker-base
+    environment:
+      - ROS_DISTRO=humble
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///opt/autoware/cyclonedds.xml
+      - ROS_DOMAIN_ID=1
+      - GA_WORKER_ID=${GA_WORKER_ID:?GA_WORKER_ID is required}
+      - GA_CONFIG=${GA_CONFIG:-/aichallenge/ml_workspace/genetic_algorithm/config/experiment_parallel_ros2.yaml}
+    command:
+      - bash
+      - -lc
+      - >-
+        source /opt/ros/humble/setup.bash &&
+        source /aichallenge/workspace/install/setup.bash &&
+        export PYTHONPATH=/aichallenge/ml_workspace/genetic_algorithm/src:$${PYTHONPATH:-} &&
+        exec python3 -m ga_pure_pursuit.worker
+        --worker-id "${GA_WORKER_ID}"
+        --config "$${GA_CONFIG}"
+        --ipc-root /aichallenge/ml_workspace/genetic_algorithm/ipc
+
+  rviz:
+    <<: *ga-worker-base
+    profiles: ["visualization"]
+    privileged: false
+    environment:
+      - DISPLAY=${DISPLAY}
+      - XAUTHORITY=${XAUTHORITY}
+      - QT_X11_NO_MITSHM=1
+      - ROS_DISTRO=humble
+      - ROS_DOMAIN_ID=1
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///opt/autoware/cyclonedds.xml
+    volumes:
+      - ./aichallenge:/aichallenge
+      - ./vehicle/cyclonedds.ga-worker.xml:/opt/autoware/cyclonedds.xml:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY}:${XAUTHORITY}:rw
+    command:
+      - bash
+      - -lc
+      - >-
+        source /opt/ros/humble/setup.bash &&
+        source /aichallenge/workspace/install/setup.bash &&
+        exec rviz2
+        -d /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/config/autoware.rviz
+        -s /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/rviz/image/autoware.png
+        --ros-args -p use_sim_time:=true

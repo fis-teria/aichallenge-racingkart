@@ -1,0 +1,20 @@
+{
+  "candidate_id": "dense-0p5m-w1",
+  "parameter_hash": "sha256:dense-0p5m-w1",
+  "parameters": {
+    "actual_lookahead_distance_blend": 0.0,
+    "corner_speed_retention": 0.0,
+    "curvature_lookahead_min_distance": 1.631218979205241,
+    "curvature_lookahead_sensitivity": 2.79848735063703,
+    "curvature_lookahead_smoothing_alpha": 0.05,
+    "curvature_speed_preview_distance": 20.690991893639385,
+    "lookahead_gain": 0.9143060187572796,
+    "lookahead_min_distance": 2.135883595245306,
+    "max_lateral_acceleration": 4.02736907835725,
+    "minimum_corner_speed": 8.370579777939309,
+    "speed_proportional_gain": 1.9791937924616951,
+    "steering_tire_angle_gain": 2.0153345117211163
+  },
+  "repeat": 0,
+  "result_path": "/aichallenge/ml_workspace/genetic_algorithm/comparisons/20260730_dense_path_0p5m/episodes/dense-0p5m-w1-r00/metrics.json"
+}

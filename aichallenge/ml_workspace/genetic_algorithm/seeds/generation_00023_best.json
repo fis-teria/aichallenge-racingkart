@@ -1,0 +1,18 @@
+{
+  "candidate_id": "g0023-i0010",
+  "fitness": 64.82896157639412,
+  "generation": 23,
+  "parameters": {
+    "curvature_lookahead_min_distance": 1.3934348328777129,
+    "curvature_lookahead_sensitivity": 3.049725184856392,
+    "curvature_lookahead_smoothing_alpha": 0.06289617792700511,
+    "curvature_speed_preview_distance": 21.432338681168247,
+    "lookahead_gain": 0.9506029522798438,
+    "lookahead_min_distance": 2.289301432808675,
+    "max_lateral_acceleration": 4.11238001571805,
+    "minimum_corner_speed": 8.361196726152222,
+    "speed_proportional_gain": 1.9160981490774214,
+    "steering_tire_angle_gain": 1.9967849795846457
+  },
+  "source_run": "20260730T043011Z"
+}

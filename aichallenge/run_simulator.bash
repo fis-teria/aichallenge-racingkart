@@ -7,7 +7,7 @@ case "${mode}" in
 "dev")
     start_mode="off"
     vehicles=1
-    laps=600
+    laps=unlimited
     timeout=60000000
     ;;
 "test")
@@ -30,11 +30,14 @@ case "${mode}" in
 esac
 
 awsim_extra_args="${AWSIM_EXTRA_ARGS-}"
-if [[ -z ${awsim_extra_args} && ! -e /dev/nvidia0 && ${mode} =~ ^(dev|test|[1-4]p)$ ]]; then
+headless="${AWSIM_HEADLESS:-${GA_EXPERIMENT_MODE:-false}}"
+if [[ "$headless" == "true" || "$headless" == "1" ]]; then
+    awsim_extra_args="-batchmode -nographics --camera false --lidar false ${awsim_extra_args}"
+elif [[ -z ${awsim_extra_args} && ! -e /dev/nvidia0 && ${mode} =~ ^(dev|test|[1-4]p)$ ]]; then
     awsim_extra_args="--camera false --lidar false"
 fi
 
-echo "[INFO] Starting AWSIM in '${mode}' mode"
+echo "[INFO] Starting AWSIM in '${mode}' mode (headless=${headless})"
 
 declare -a opts=("--start-mode" "${start_mode}" "--vehicles" "${vehicles}" "--laps" "${laps}" "--timeout" "${timeout}")
 declare -a extra_args
