@@ -175,9 +175,11 @@ Render the latest run's overview with:
 make ga-dashboard
 ```
 
-The generated `runs/RUN_ID/dashboard.html` shows generation fitness and lap
+GA search and resume automatically create and refresh
+`runs/RUN_ID/dashboard.html`, which shows generation fitness and lap
 time, best-candidate speed tracking, baseline versus optimized path, and
-normalized gene convergence. While the search is running, keep it updated with:
+normalized gene convergence. To refresh an existing run while no GA runner is
+active, use:
 
 ```bash
 PYTHONPATH=aichallenge/ml_workspace/genetic_algorithm/src python3 \

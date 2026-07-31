@@ -2,11 +2,50 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 from pathlib import Path
 
 from .config import load_config, validate_config
 from .export_best import export_best
 from .optimizer import Optimizer
+from .progress_dashboard import write_dashboard
+
+
+DASHBOARD_REFRESH_SECONDS = 15
+
+
+def run_with_dashboard(optimizer: Optimizer) -> dict:
+    """Run an optimizer while keeping its file-based dashboard current."""
+    stop = threading.Event()
+
+    def render() -> None:
+        try:
+            write_dashboard(
+                optimizer.run_dir,
+                optimizer.run_dir / "dashboard.html",
+                DASHBOARD_REFRESH_SECONDS,
+            )
+        except Exception as error:  # Dashboard failure must not stop an experiment.
+            print(f"dashboard refresh failed: {error}", flush=True)
+
+    def watch() -> None:
+        render()
+        while not stop.wait(DASHBOARD_REFRESH_SECONDS):
+            render()
+
+    watcher = threading.Thread(
+        target=watch,
+        name="ga-progress-dashboard",
+        daemon=True,
+    )
+    watcher.start()
+    print(f"dashboard: {optimizer.run_dir / 'dashboard.html'}", flush=True)
+    try:
+        return optimizer.run()
+    finally:
+        stop.set()
+        watcher.join(timeout=2.0)
+        render()
 
 
 def parser() -> argparse.ArgumentParser:
@@ -41,9 +80,10 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = parser().parse_args()
     if args.command == "search":
-        best = Optimizer(
+        optimizer = Optimizer(
             load_config(args.config), args.runs_dir, run_id=args.run_id
-        ).run()
+        )
+        best = run_with_dashboard(optimizer)
         print(json.dumps(best, indent=2, sort_keys=True))
     elif args.command == "resume":
         config = load_config(args.run_dir / "experiment_resolved.json")
@@ -72,12 +112,13 @@ def main() -> None:
         ):
             raise SystemExit("parallel worker count exceeds the configured worker IDs")
         validate_config(config)
-        best = Optimizer(
+        optimizer = Optimizer(
             config,
             args.run_dir.parent,
             run_id=args.run_dir.name,
             resume=True,
-        ).run()
+        )
+        best = run_with_dashboard(optimizer)
         print(json.dumps(best, indent=2, sort_keys=True))
     else:
         print(json.dumps(export_best(args.run_dir, args.output), indent=2, sort_keys=True))
