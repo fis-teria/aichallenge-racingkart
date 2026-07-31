@@ -42,14 +42,13 @@ from the overlapped D1 pose and produced distinct poses and velocities without
 collision displacement. This proves the AWSIM and ROS-domain part of the
 architecture.
 
-## GA integration boundary
+## GA integration
 
-The fitness calculation and `episode_monitor` can remain unchanged and run
-once per domain. The orchestration cannot reuse four asynchronous
-`Ros2Evaluator` instances unchanged because `/admin/awsim/reset` resets all
-four vehicles together.
+The fitness calculation and `episode_monitor` remain unchanged and run once
+per domain. `SharedAwsimBatchEvaluator` collects four optimizer calls and
+coordinates the global `/admin/awsim/reset` and `/admin/awsim/start` commands.
 
-The production implementation therefore needs a batch coordinator:
+The batch coordinator performs:
 
 1. Assign four candidates to domains 1 through 4.
 2. Disable all four controllers and apply all parameters and candidate paths.
@@ -62,3 +61,14 @@ The production implementation therefore needs a batch coordinator:
 Infrastructure failure policy should be batch-wide: if AWSIM itself fails or a
 global reset fails, retry the whole batch. A candidate-only failure remains an
 individual result.
+
+Start the production shared-AWSIM GA with:
+
+```bash
+make ga-shared
+```
+
+The production configuration is
+`config/experiment_shared_ghost4_ros2.yaml`. It uses four optimizer threads,
+32 individuals per generation, and preserves the existing episode metrics and
+fitness weights.

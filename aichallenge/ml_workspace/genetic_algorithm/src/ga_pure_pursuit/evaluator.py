@@ -5,9 +5,12 @@ import math
 import os
 import random
 import queue
+import copy
 import subprocess
+import threading
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -84,6 +87,7 @@ class CommandEvaluator:
         timeout_sec: float,
         run_dir: Path,
         episode_options: dict[str, Any] | None = None,
+        extra_env: dict[str, str] | None = None,
     ):
         if not command:
             raise ValueError("evaluator.episode_command is required in command mode")
@@ -91,6 +95,7 @@ class CommandEvaluator:
         self.timeout_sec = timeout_sec
         self.run_dir = run_dir
         self.episode_options = episode_options or {}
+        self.extra_env = extra_env or {}
 
     def evaluate(self, candidate_id, parameter_hash, parameters, repeat):
         episode_dir = self.run_dir / "episodes" / f"{candidate_id}-r{repeat:02d}"
@@ -113,6 +118,7 @@ class CommandEvaluator:
             encoding="utf-8",
         )
         env = os.environ.copy()
+        env.update(self.extra_env)
         env["GA_EPISODE_REQUEST"] = str(request_path)
         env["GA_EPISODE_RESULT"] = str(result_path)
         try:
@@ -139,15 +145,48 @@ class CommandEvaluator:
             raise InfrastructureError("episode adapter produced no metrics JSON") from error
 
 
+class Ros2BatchSync:
+    """Two-phase barrier for one shared-AWSIM candidate batch."""
+
+    def __init__(self, parties: int, reset_action, start_action, timeout_sec: float):
+        self.timeout_sec = timeout_sec
+        self.reset_barrier = threading.Barrier(parties, action=reset_action)
+        self.start_barrier = threading.Barrier(parties, action=start_action)
+
+    def _wait(self, barrier: threading.Barrier, phase: str) -> None:
+        try:
+            barrier.wait(timeout=self.timeout_sec)
+        except threading.BrokenBarrierError as error:
+            raise InfrastructureError(f"shared AWSIM {phase} barrier failed") from error
+
+    def wait_reset(self) -> None:
+        self._wait(self.reset_barrier, "reset")
+
+    def wait_start(self) -> None:
+        self._wait(self.start_barrier, "start")
+
+    def abort(self) -> None:
+        self.reset_barrier.abort()
+        self.start_barrier.abort()
+
+
 class Ros2Evaluator(CommandEvaluator):
     """Applies a candidate atomically, resets AWSIM, then invokes an episode adapter."""
 
-    def __init__(self, config: dict[str, Any], timeout_sec: float, run_dir: Path):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        timeout_sec: float,
+        run_dir: Path,
+        batch_sync: Ros2BatchSync | None = None,
+    ):
+        vehicle_domain = int(config["ros"].get("vehicle_domain_id", 1))
         super().__init__(
             config["episode_command"],
             timeout_sec,
             run_dir,
             config.get("episode_options"),
+            {"ROS_DOMAIN_ID": str(vehicle_domain)},
         )
         self.ros = config["ros"]
         self.fixed_controller_parameters = {
@@ -156,6 +195,7 @@ class Ros2Evaluator(CommandEvaluator):
         }
         self.path_optimization = config.get("path_optimization")
         self.run_id = run_dir.name
+        self.batch_sync = batch_sync
 
     @staticmethod
     def _parameter_entry(name: str, value: Any) -> dict[str, Any]:
@@ -244,7 +284,10 @@ class Ros2Evaluator(CommandEvaluator):
             )
         reset_command = list(self.ros.get("reset_command", []))
         if reset_command:
-            self._run_ros(reset_command, int(self.ros.get("admin_domain_id", 0)), 30.0)
+            if self.batch_sync is not None:
+                self.batch_sync.wait_reset()
+            else:
+                self._run_ros(reset_command, int(self.ros.get("admin_domain_id", 0)), 30.0)
         for command in self.ros.get("vehicle_prepare_commands", []):
             self._run_ros(list(command), vehicle_domain, 30.0)
         ready_command = list(self.ros.get("ready_command", []))
@@ -255,7 +298,9 @@ class Ros2Evaluator(CommandEvaluator):
             vehicle_domain,
         )
         start_command = list(self.ros.get("start_command", []))
-        if start_command:
+        if self.batch_sync is not None:
+            self.batch_sync.wait_start()
+        elif start_command:
             self._run_ros(start_command, int(self.ros.get("admin_domain_id", 0)), 30.0)
         self._run_ros(
             ["ros2", "service", "call", f"{node}/ga/set_enabled", "std_srvs/srv/SetBool", "{data: true}"],
@@ -288,6 +333,93 @@ class Ros2Evaluator(CommandEvaluator):
                     ],
                     vehicle_domain,
                 )
+
+
+class SharedAwsimBatchEvaluator:
+    """Collects up to four calls and evaluates them in one synchronized AWSIM run."""
+
+    def __init__(self, config: dict[str, Any], timeout_sec: float, run_dir: Path):
+        self.config = config
+        self.timeout_sec = timeout_sec
+        self.run_dir = run_dir
+        self.domains = [int(value) for value in config.get("vehicle_domain_ids", [1, 2, 3, 4])]
+        if not self.domains:
+            raise ValueError("evaluator.vehicle_domain_ids must not be empty")
+        self.collect_timeout_sec = float(config.get("batch_collect_timeout_sec", 0.5))
+        self.barrier_timeout_sec = float(config.get("batch_barrier_timeout_sec", 90.0))
+        self.requests: queue.Queue[tuple[tuple[Any, ...], Future]] = queue.Queue()
+        self.worker = threading.Thread(target=self._batch_loop, daemon=True)
+        self.worker.start()
+
+    def evaluate(self, candidate_id, parameter_hash, parameters, repeat):
+        future: Future = Future()
+        self.requests.put(((candidate_id, parameter_hash, parameters, repeat), future))
+        try:
+            return future.result(timeout=self.timeout_sec + self.barrier_timeout_sec + 30.0)
+        except FutureTimeoutError as error:
+            raise InfrastructureError(
+                f"shared AWSIM batch timed out for {candidate_id}"
+            ) from error
+
+    def _batch_loop(self) -> None:
+        while True:
+            first = self.requests.get()
+            batch = [first]
+            deadline = time.monotonic() + self.collect_timeout_sec
+            while len(batch) < len(self.domains):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                try:
+                    batch.append(self.requests.get(timeout=remaining))
+                except queue.Empty:
+                    break
+            try:
+                metrics = self._execute_batch([request for request, _ in batch])
+                if len(metrics) != len(batch):
+                    raise InfrastructureError("shared AWSIM batch returned wrong result count")
+                for (_, future), result in zip(batch, metrics):
+                    future.set_result(result)
+            except BaseException as error:  # Never strand optimizer threads.
+                failure = error if isinstance(error, InfrastructureError) else InfrastructureError(str(error))
+                for _, future in batch:
+                    future.set_exception(failure)
+
+    def _execute_batch(self, requests: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+        evaluators: list[Ros2Evaluator] = []
+        ros = self.config["ros"]
+        reset_command = list(ros.get("reset_command", []))
+        start_command = list(ros.get("start_command", []))
+
+        def run_admin(command: list[str]) -> None:
+            if command:
+                evaluators[0]._run_ros(
+                    command, int(ros.get("admin_domain_id", 0)), 30.0
+                )
+
+        sync = Ros2BatchSync(
+            len(requests),
+            lambda: run_admin(reset_command),
+            lambda: run_admin(start_command),
+            self.barrier_timeout_sec,
+        )
+        for domain in self.domains[: len(requests)]:
+            child_config = copy.deepcopy(self.config)
+            child_config["ros"]["vehicle_domain_id"] = domain
+            evaluators.append(
+                Ros2Evaluator(child_config, self.timeout_sec, self.run_dir, sync)
+            )
+
+        def run_one(item):
+            evaluator, request = item
+            try:
+                return evaluator.evaluate(*request)
+            except BaseException:
+                sync.abort()
+                raise
+
+        with ThreadPoolExecutor(max_workers=len(requests)) as executor:
+            return list(executor.map(run_one, zip(evaluators, requests)))
 
 
 class WorkerPoolEvaluator:
@@ -378,4 +510,8 @@ def make_evaluator(config: dict[str, Any], run_dir: Path) -> Evaluator:
         return Ros2Evaluator(evaluator, float(evaluator["timeout_sec"]), run_dir)
     if mode == "worker_pool":
         return WorkerPoolEvaluator(evaluator, float(evaluator["timeout_sec"]), run_dir)
+    if mode == "shared_awsim_batch":
+        return SharedAwsimBatchEvaluator(
+            evaluator, float(evaluator["episode_timeout_sec"]), run_dir
+        )
     raise ValueError(f"unknown evaluator mode: {mode}")

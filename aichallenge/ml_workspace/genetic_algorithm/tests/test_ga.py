@@ -5,8 +5,9 @@ import json
 import threading
 import time
 import csv
+from concurrent.futures import ThreadPoolExecutor
 
-from ga_pure_pursuit.evaluator import WorkerPoolEvaluator
+from ga_pure_pursuit.evaluator import SharedAwsimBatchEvaluator, WorkerPoolEvaluator
 from ga_pure_pursuit.diagnostics import render_html
 from ga_pure_pursuit.episode_monitor import finite_mean, percentile
 from ga_pure_pursuit.fitness import score, unintended_speed_loss_mps
@@ -170,6 +171,40 @@ def test_worker_pool_round_trip(tmp_path):
     assert metrics["completed"] is True
 
 
+def test_shared_awsim_evaluator_collects_four_calls(tmp_path):
+    evaluator = SharedAwsimBatchEvaluator(
+        {
+            "vehicle_domain_ids": [1, 2, 3, 4],
+            "batch_collect_timeout_sec": 0.05,
+            "batch_barrier_timeout_sec": 1.0,
+        },
+        timeout_sec=2.0,
+        run_dir=tmp_path,
+    )
+    observed = []
+
+    def fake_batch(requests):
+        observed.append([request[0] for request in requests])
+        return [
+            {"completed": True, "candidate_id": request[0]}
+            for request in requests
+        ]
+
+    evaluator._execute_batch = fake_batch
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(
+                lambda index: evaluator.evaluate(
+                    f"candidate-{index}", f"hash-{index}", {"a": index}, 0
+                ),
+                range(4),
+            )
+        )
+    assert len(observed) == 1
+    assert set(observed[0]) == {f"candidate-{index}" for index in range(4)}
+    assert {result["candidate_id"] for result in results} == set(observed[0])
+
+
 def test_speed_diagnostic_helpers_and_html():
     assert finite_mean([]) == 0.0
     assert finite_mean([1.0, 3.0]) == 2.0
@@ -229,6 +264,32 @@ def test_zero_generations_is_accepted_as_unlimited():
         "fitness": {},
     }
     validate_config(config)
+
+
+def test_shared_awsim_config_requires_one_worker_per_domain():
+    config = {
+        "run": {
+            "population_size": 4,
+            "generations": 1,
+            "elite_count": 1,
+            "parallel_workers": 4,
+        },
+        "evaluator": {
+            "mode": "shared_awsim_batch",
+            "vehicle_domain_ids": [1, 2, 3, 4],
+        },
+        "baseline": {"a": 0.5},
+        "search_space": {"a": {"min": 0.0, "max": 1.0}},
+        "fitness": {},
+    }
+    validate_config(config)
+    config["run"]["parallel_workers"] = 3
+    try:
+        validate_config(config)
+    except ValueError as error:
+        assert "domain count" in str(error)
+    else:
+        raise AssertionError("mismatched shared-AWSIM concurrency was accepted")
 
 
 def test_dashboard_rejects_reset_lap_timer_and_uses_repeat_median():

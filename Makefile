@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh \
-	simulator rosbag-cleaner clean-rosbags dev ga ga-search ga-status ga-logs ga-stop ga-dashboard ga-parallel ga-joint ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
+	simulator rosbag-cleaner clean-rosbags dev ga ga-search ga-status ga-logs ga-stop ga-dashboard ga-parallel ga-joint ga-shared ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
 	dev2 dev3 dev4 ga-ghost4-poc ga-ghost4-poc-stop driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
@@ -139,6 +139,30 @@ ga-joint:
 		docker compose up -d --force-recreate ga-runner
 	$(MAKE) ga-parallel-rviz
 	@echo "Joint Dual Preview + path GA started. Follow it with: make ga-parallel-status"
+
+ga-shared:
+	$(MAKE) down
+	$(MAKE) rosbag-cleaner
+	$(MAKE) ga-ghost4-poc
+	@ready=false; \
+	for attempt in $$(seq 1 180); do \
+		ready=true; \
+		for domain in 1 2 3 4; do \
+			docker exec ghost-d$$domain-autoware-1 bash -lc \
+				"source /opt/ros/humble/setup.bash && ROS_DOMAIN_ID=$$domain ros2 service list" \
+				2>/dev/null | grep -q '/simple_pure_pursuit_node/ga/set_enabled' || ready=false; \
+		done; \
+		$$ready && break; \
+		sleep 1; \
+	done; \
+	$$ready || { echo "Shared AWSIM Autoware domains did not become ready"; exit 1; }
+	GA_CONFIG=/aichallenge/ml_workspace/genetic_algorithm/config/experiment_shared_ghost4_ros2.yaml \
+		docker compose up -d --force-recreate ga-runner
+	@echo "Shared-AWSIM four-candidate GA started. Follow it with: make ga-logs"
+
+ga-shared-stop:
+	-docker compose stop ga-runner
+	$(MAKE) ga-ghost4-poc-stop
 
 ga-parallel-resume:
 	@test -n "$(RUN_ID)" || { echo "Usage: make ga-parallel-resume RUN_ID=YYYYMMDDTHHMMSSZ"; exit 2; }

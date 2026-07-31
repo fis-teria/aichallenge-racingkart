@@ -33,6 +33,17 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("run.generations must be zero (unlimited) or positive")
     if int(run["elite_count"]) >= int(run["population_size"]):
         raise ValueError("elite_count must be smaller than population_size")
+    evaluator = config["evaluator"]
+    if evaluator.get("mode") == "shared_awsim_batch":
+        domains = [int(value) for value in evaluator.get("vehicle_domain_ids", [])]
+        if not domains or len(domains) != len(set(domains)):
+            raise ValueError(
+                "shared_awsim_batch requires unique evaluator.vehicle_domain_ids"
+            )
+        if int(run.get("parallel_workers", 1)) != len(domains):
+            raise ValueError(
+                "run.parallel_workers must equal the shared AWSIM domain count"
+            )
     surrogate = config.get("surrogate", {})
     if surrogate:
         if int(surrogate.get("candidate_pool_multiplier", 1)) < 1:
