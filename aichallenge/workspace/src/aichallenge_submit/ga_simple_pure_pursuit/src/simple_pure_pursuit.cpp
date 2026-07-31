@@ -74,6 +74,8 @@ SimplePurePursuit::SimplePurePursuit()
     declare_parameter<double>("minimum_corner_speed", 5.0);
   tuning_.corner_speed_retention =
     declare_parameter<double>("corner_speed_retention", 0.0);
+  tuning_.lateral_error_speed_gate_enabled =
+    declare_parameter<bool>("lateral_error_speed_gate_enabled", true);
   tuning_.corner_speed_retention_lateral_error_soft =
     declare_parameter<double>("corner_speed_retention_lateral_error_soft", 0.5);
   tuning_.corner_speed_retention_lateral_error_hard =
@@ -163,6 +165,8 @@ rcl_interfaces::msg::SetParametersResult SimplePurePursuit::onSetParameters(
         candidate.minimum_corner_speed = parameter.as_double();
       } else if (name == "corner_speed_retention") {
         candidate.corner_speed_retention = parameter.as_double();
+      } else if (name == "lateral_error_speed_gate_enabled") {
+        candidate.lateral_error_speed_gate_enabled = parameter.as_bool();
       } else if (name == "corner_speed_retention_lateral_error_soft") {
         candidate.corner_speed_retention_lateral_error_soft = parameter.as_double();
       } else if (name == "corner_speed_retention_lateral_error_hard") {
@@ -347,11 +351,11 @@ void SimplePurePursuit::onTimer()
   const double lateral_error = tier4_autoware_utils::calcLateralDeviation(
     nearest.pose, odometry_->pose.pose.position);
   const double absolute_lateral_error = std::abs(lateral_error);
-  const double retention_gate = std::clamp(
+  const double retention_gate = tuning_.lateral_error_speed_gate_enabled ? std::clamp(
     (tuning_.corner_speed_retention_lateral_error_hard - absolute_lateral_error) /
     (tuning_.corner_speed_retention_lateral_error_hard -
     tuning_.corner_speed_retention_lateral_error_soft),
-    0.0, 1.0);
+    0.0, 1.0) : 1.0;
   const double effective_corner_speed_retention =
     tuning_.corner_speed_retention * retention_gate;
   const double target_velocity =
@@ -441,6 +445,8 @@ void SimplePurePursuit::onTimer()
        << ",\"curvature_speed_limit_mps\":" << curvature_speed_limit
        << ",\"curvature_target_velocity_mps\":" << curvature_target_velocity
        << ",\"corner_speed_retention\":" << tuning_.corner_speed_retention
+       << ",\"lateral_error_speed_gate_enabled\":" <<
+    (tuning_.lateral_error_speed_gate_enabled ? "true" : "false")
        << ",\"effective_corner_speed_retention\":" << effective_corner_speed_retention
        << ",\"corner_speed_retention_gate\":" << retention_gate
        << ",\"commanded_acceleration_mps2\":" << command.longitudinal.acceleration

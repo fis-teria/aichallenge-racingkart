@@ -19,7 +19,9 @@
     <param name="max_lateral_acceleration" value="6.0"/>
     <param name="minimum_corner_speed" value="5.0"/>
     <!-- 0.0 keeps curvature speed reduction; 1.0 commands the maximum speed in corners. -->
-    <param name="corner_speed_retention" value="0.0"/>
+    <param name="corner_speed_retention" value="1.0"/>
+    <!-- Keep the configured corner-speed retention even when lateral error grows. -->
+    <param name="lateral_error_speed_gate_enabled" value="false"/>
     <param name="curvature_speed_preview_distance" value="12.0"/>
 
     <remap from="input/kinematics" to="/localization/kinematic_state"/>

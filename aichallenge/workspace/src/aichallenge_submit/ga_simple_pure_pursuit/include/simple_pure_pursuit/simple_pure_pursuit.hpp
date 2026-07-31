@@ -44,6 +44,7 @@ private:
     double max_lateral_acceleration{6.0};
     double minimum_corner_speed{5.0};
     double corner_speed_retention{0.0};
+    bool lateral_error_speed_gate_enabled{true};
     double corner_speed_retention_lateral_error_soft{0.5};
     double corner_speed_retention_lateral_error_hard{1.0};
     double curvature_speed_preview_distance{12.0};

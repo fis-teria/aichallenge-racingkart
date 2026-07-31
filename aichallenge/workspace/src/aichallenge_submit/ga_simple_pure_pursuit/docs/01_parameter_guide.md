@@ -48,6 +48,7 @@ hybrid launch では `simple_pure_pursuit` の入力 odom がすでに `/delay_a
 | `corner_speed_retention` | 曲率速度制限後の速度を最高速度側へ戻す割合。`0.0` は従来どおり、`1.0` は曲率による減速なし。 | A/B比較では `0.0` と `1.0` を使います。中間値ならコーナー減速だけを連続的に弱められます。 |
 | `corner_speed_retention_lateral_error_soft` | 速度保持を弱め始める横偏差[m]。 | デフォルトは `0.5`。 |
 | `corner_speed_retention_lateral_error_hard` | 速度保持を完全に解除し、従来の曲率速度へ戻す横偏差[m]。 | デフォルトは `1.0`。soft より大きく設定します。 |
+| `lateral_error_speed_gate_enabled` | 横偏差に応じて速度保持を弱めるか。 | `false` では横偏差によらず `corner_speed_retention` をそのまま使います。 |
 
 MPC horizon を使う場合、horizon 上の速度が `external_target_vel` より低ければ、PP の速度は horizon 側で cap されます。`neutral_reference` / `fixed_neutral_reference` では、現在poseを表す先頭アンカー点の速度だけでcapすると停止付近で加速できなくなるため、速度capは最近傍点から少し先の点を参照します。`solver_prediction` ではMPCが出した即時減速を尊重するため、最近傍点速度をそのまま使います。さらに overtake override の speed cap が有効なら、その cap も適用されます。
 
