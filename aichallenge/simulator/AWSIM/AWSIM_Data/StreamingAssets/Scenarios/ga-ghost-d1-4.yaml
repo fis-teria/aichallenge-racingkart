@@ -1,0 +1,17 @@
+schemaVersion: 2
+name: ga ghost vehicles at d1 start
+# Vehicle-to-vehicle collision is disabled by ga-ghost-4.yaml, so these four
+# rigid bodies can occupy the same D1 pose without influencing one another.
+vehicles:
+  "1":
+    at: [374.6187, -3.261055]
+    yaw: -123.41
+  "2":
+    at: [374.6187, -3.261055]
+    yaw: -123.41
+  "3":
+    at: [374.6187, -3.261055]
+    yaw: -123.41
+  "4":
+    at: [374.6187, -3.261055]
+    yaw: -123.41

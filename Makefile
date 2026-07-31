@@ -3,7 +3,7 @@ SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh \
 	simulator rosbag-cleaner clean-rosbags dev ga ga-search ga-status ga-logs ga-stop ga-dashboard ga-parallel ga-joint ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
-	dev2 dev3 dev4 driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
+	dev2 dev3 dev4 ga-ghost4-poc ga-ghost4-poc-stop driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
 HOST_UID ?= $(shell id -u)
@@ -185,6 +185,22 @@ dev2 dev3 dev4: rosbag-cleaner simulator
 	$(MAKE) awsim-request-start; \
 	echo "To Stop: make down"
 
+ga-ghost4-poc:
+	@echo "Start one AWSIM with four collision-free vehicles at the D1 pose"
+	@mkdir -p output/ga-ghost4-poc/$(TIMESTAMP)
+	GA_EXPERIMENT_MODE=true AWSIM_HEADLESS=true SIM_MODE=ghost4 \
+		LOG_DIR=/output/ga-ghost4-poc/$(TIMESTAMP) ROS_DOMAIN_ID=0 docker compose up -d simulator
+	@for p in $$(seq 1 4); do \
+		LOG_DIR=/output/ga-ghost4-poc/$(TIMESTAMP) RUN_MODE=awsim-no-viz \
+		GA_EXPERIMENT_MODE=true ROS_DOMAIN_ID=$$p docker compose -p ghost-d$$p up -d autoware; \
+	done
+	@echo "Four domains are starting. Trigger the common synchronized start with: make awsim-request-start"
+	@echo "To stop: make ga-ghost4-poc-stop"
+
+ga-ghost4-poc-stop:
+	@for p in $$(seq 1 4); do docker compose -p ghost-d$$p down --remove-orphans; done
+	@docker compose stop simulator
+
 # Kept for backward compatibility; `make down` already cleans all projects.
 down2 down3 down4: down
 
@@ -209,6 +225,7 @@ down:
 	@GA_WORKER_ID=worker-2 docker compose -f docker-compose.ga-worker.yml -p ga-w2 down --remove-orphans 2>/dev/null || true
 	@GA_WORKER_ID=worker-3 docker compose -f docker-compose.ga-worker.yml -p ga-w3 down --remove-orphans 2>/dev/null || true
 	@for p in 1 2 3 4; do docker compose -p $$p down --remove-orphans; done
+	@for p in 1 2 3 4; do docker compose -p ghost-d$$p down --remove-orphans; done
 	@docker compose down --remove-orphans
 
 down_all:

@@ -22,9 +22,16 @@ case "${mode}" in
     laps=6
     timeout=600
     ;;
+"ghost4")
+    # Four independent ROS domains in one AWSIM process. The race config
+    # disables vehicle-to-vehicle contacts and the scenario deliberately
+    # overlaps every vehicle at the D1 start pose.
+    race_config="ga-ghost-4"
+    scenario="${AWSIM_DIRECTORY}/AWSIM_Data/StreamingAssets/Scenarios/ga-ghost-d1-4.yaml"
+    ;;
 *)
     echo "invalid mode: ${mode}"
-    echo "supported: dev, test, eval, 1p, 2p, 3p, 4p"
+    echo "supported: dev, test, eval, 1p, 2p, 3p, 4p, ghost4"
     exit 1
     ;;
 esac
@@ -39,7 +46,11 @@ fi
 
 echo "[INFO] Starting AWSIM in '${mode}' mode (headless=${headless})"
 
-declare -a opts=("--start-mode" "${start_mode}" "--vehicles" "${vehicles}" "--laps" "${laps}" "--timeout" "${timeout}")
+if [[ ${mode} == "ghost4" ]]; then
+    declare -a opts=("--race-config" "${race_config}" "--scenario" "${scenario}")
+else
+    declare -a opts=("--start-mode" "${start_mode}" "--vehicles" "${vehicles}" "--laps" "${laps}" "--timeout" "${timeout}")
+fi
 declare -a extra_args
 read -r -a extra_args <<<"${awsim_extra_args}"
 opts+=("${extra_args[@]}")
