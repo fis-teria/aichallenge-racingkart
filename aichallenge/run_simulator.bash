@@ -41,9 +41,13 @@ case "${mode}" in
     race_config="ga-ghost-${vehicle_count}"
     scenario="${AWSIM_DIRECTORY}/AWSIM_Data/StreamingAssets/Scenarios/ga-ghost-separated-${vehicle_count}.yaml"
     ;;
+"ghost1-nohandicap")
+    race_config="ga-ghost-1-nohandicap"
+    scenario="${AWSIM_DIRECTORY}/AWSIM_Data/StreamingAssets/Scenarios/ga-ghost-separated-1.yaml"
+    ;;
 *)
     echo "invalid mode: ${mode}"
-    echo "supported: dev, test, eval, 1p, 2p, 3p, 4p, ghost4, ghost1-separated..ghost4-separated"
+    echo "supported: dev, test, eval, 1p, 2p, 3p, 4p, ghost4, ghost1-separated..ghost4-separated, ghost1-nohandicap"
     exit 1
     ;;
 esac
@@ -58,7 +62,7 @@ fi
 
 echo "[INFO] Starting AWSIM in '${mode}' mode (headless=${headless})"
 
-if [[ ${mode} == "ghost4" || ${mode} =~ ^ghost[1-4]-separated$ ]]; then
+if [[ ${mode} == "ghost4" || ${mode} =~ ^ghost[1-4]-separated$ || ${mode} == "ghost1-nohandicap" ]]; then
     declare -a opts=("--race-config" "${race_config}" "--scenario" "${scenario}")
 else
     declare -a opts=("--start-mode" "${start_mode}" "--vehicles" "${vehicles}" "--laps" "${laps}" "--timeout" "${timeout}")
