@@ -1,17 +1,19 @@
 schemaVersion: 2
-name: ga ghost vehicles at d1 start
-# Vehicle-to-vehicle collision is disabled by ga-ghost-4.yaml, so these four
-# rigid bodies can occupy the same D1 pose without influencing one another.
+name: ga ghost vehicles at legacy GA start
+# Match the actual spawn used by the historical single-vehicle GA. The
+# scenario1 D1 coordinates are about 3.76 m away from that route-aligned pose.
+# Vehicle-to-vehicle collision is disabled by ga-ghost-4.yaml, so all four
+# rigid bodies can occupy this pose without influencing one another.
 vehicles:
   "1":
-    at: [374.6187, -3.261055]
+    at: [375.18933, -6.77567]
     yaw: -123.41
   "2":
-    at: [374.6187, -3.261055]
+    at: [375.18933, -6.77567]
     yaw: -123.41
   "3":
-    at: [374.6187, -3.261055]
+    at: [375.18933, -6.77567]
     yaw: -123.41
   "4":
-    at: [374.6187, -3.261055]
+    at: [375.18933, -6.77567]
     yaw: -123.41

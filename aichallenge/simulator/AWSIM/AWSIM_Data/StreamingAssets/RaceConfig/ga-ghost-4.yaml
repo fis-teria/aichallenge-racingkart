@@ -9,6 +9,6 @@ timeout: 600
 camera: false
 lidar: "off"
 collisions: "off"
-handicap: "off"
+handicap: "on"
 steer-source: ackermann
 ros2-base-domain: 1
