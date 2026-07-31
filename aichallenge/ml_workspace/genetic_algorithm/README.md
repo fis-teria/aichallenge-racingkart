@@ -167,6 +167,37 @@ Omit `--candidate-id` to select the run's lowest-fitness completed candidate.
 Runs created before this diagnostic trace was added must be evaluated again
 before they can be plotted.
 
+## `make ga-*` command memo
+
+Run `make ga-help` from the repository root to print the command list.
+The current four-candidate shared-AWSIM workflow is:
+
+```bash
+# Start one AWSIM, four independent ghost vehicles, and the GA runner.
+make ga-shared
+
+# Monitor the runner and locate the latest run.
+make ga-logs
+make ga-status
+
+# The dashboard is refreshed automatically; this forces a one-time redraw.
+make ga-dashboard
+
+# Stop the runner, AWSIM, and all four Autoware domains.
+make ga-shared-stop
+
+# Resume a stopped run after starting shared infrastructure. Stop the newly
+# created runner only; keep AWSIM and the four Autoware domains running.
+make ga-shared
+make ga-stop
+make ga-shared-resume RUN_ID=YYYYMMDDTHHMMSSZ
+```
+
+The older independent three-worker workflow remains available through
+`make ga-parallel`, `make ga-parallel-status`, `make ga-parallel-logs`,
+`make ga-parallel-rviz`, `make ga-parallel-resume RUN_ID=...`, and
+`make ga-parallel-stop`.
+
 ## Live GA progress dashboard
 
 Render the latest run's overview with:

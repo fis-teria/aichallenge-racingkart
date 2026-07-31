@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh \
-	simulator rosbag-cleaner clean-rosbags dev ga ga-search ga-status ga-logs ga-stop ga-dashboard ga-parallel ga-joint ga-shared ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
+	simulator rosbag-cleaner clean-rosbags dev ga ga-help ga-search ga-status ga-logs ga-stop ga-dashboard ga-parallel ga-joint ga-shared ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
 	dev2 dev3 dev4 ga-ghost4-poc ga-ghost4-poc-stop driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
@@ -77,6 +77,26 @@ dev: rosbag-cleaner simulator autoware-simulator
 ga:
 	GA_EXPERIMENT_MODE=true $(MAKE) dev
 	$(MAKE) ga-search
+
+ga-help:
+	@echo "Current shared-AWSIM workflow (recommended):"
+	@echo "  make ga-shared                         Start one AWSIM + four ghost vehicles + GA"
+	@echo "  make ga-logs                           Follow GA runner logs"
+	@echo "  make ga-status                         Show runner and latest run directory"
+	@echo "  make ga-dashboard                      Regenerate the latest dashboard once"
+	@echo "  make ga-shared-resume RUN_ID=<run-id>  Resume an existing shared-AWSIM run"
+	@echo "  make ga-shared-stop                    Stop shared GA and all four vehicles"
+	@echo "Legacy/separate-worker workflow:"
+	@echo "  make ga-parallel                       Start three independent AWSIM workers"
+	@echo "  make ga-parallel-status                Show runner and worker status"
+	@echo "  make ga-parallel-logs                  Follow runner logs"
+	@echo "  make ga-parallel-rviz                  Start RViz for worker 1"
+	@echo "  make ga-parallel-resume RUN_ID=<id>    Resume a three-worker run"
+	@echo "  make ga-parallel-stop                  Stop runner and workers"
+	@echo "Basic single-environment workflow:"
+	@echo "  make ga                                Start AWSIM, Autoware, and GA"
+	@echo "  make ga-search                         Start only the runner after GA-mode Autoware"
+	@echo "  make ga-stop                           Stop only the runner"
 
 ga-search:
 	@ready=false; \
