@@ -387,8 +387,8 @@ void SimplePurePursuit::onTimer()
 
   AckermannControlCommand command = zeroCommand(get_clock()->now());
   command.longitudinal.speed = target_velocity;
-  command.longitudinal.acceleration =
-    tuning_.speed_proportional_gain * (target_velocity - current_velocity);
+  command.longitudinal.acceleration = std::clamp(
+    tuning_.speed_proportional_gain * (target_velocity - current_velocity), 0.0, 1.0);
   const double heading_error =
     std::atan2(lookahead->pose.position.y - rear_y, lookahead->pose.position.x - rear_x) - yaw;
   const double actual_lookahead_distance = std::hypot(
