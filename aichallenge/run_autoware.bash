@@ -24,6 +24,15 @@ case "${mode}" in
     ;;
 esac
 
+# Re-establish the complete underlay/overlay chain even after a partial colcon
+# build has regenerated workspace setup files in a reduced shell environment.
+# shellcheck disable=SC1091
+source /opt/ros/humble/setup.bash
+# shellcheck disable=SC1091
+source /autoware/install/setup.bash
+# shellcheck disable=SC1091
+source /aichallenge/workspace/install/setup.bash
+
 export ROS_DOMAIN_ID=$id
 if [[ "${GA_EXPERIMENT_MODE:-false}" == "true" && -z "${CONTROL_METHOD:-}" ]]; then
     export CONTROL_METHOD=pure_pursuit
