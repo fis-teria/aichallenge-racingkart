@@ -100,6 +100,7 @@ services:
       - GA_EXPERIMENT_MODE=true
       - GA_CONFIG=${GA_CONFIG:-/aichallenge/ml_workspace/genetic_algorithm/config/experiment_ros2.yaml}
       - GA_RESUME_RUN_DIR=${GA_RESUME_RUN_DIR:-}
+      - GA_EVALUATOR_CONFIG=${GA_EVALUATOR_CONFIG:-}
       - GA_PARALLEL_WORKERS=${GA_PARALLEL_WORKERS:-3}
       - GA_WORKER_IDS=${GA_WORKER_IDS:-worker-1,worker-2,worker-3}
     command:
@@ -110,10 +111,14 @@ services:
         source /aichallenge/workspace/install/setup.bash &&
         export PYTHONPATH=/aichallenge/ml_workspace/genetic_algorithm/src:$${PYTHONPATH:-} &&
         if [ -n "$${GA_RESUME_RUN_DIR}" ]; then
+          evaluator_args=();
+          if [ -n "$${GA_EVALUATOR_CONFIG}" ]; then
+            evaluator_args+=(--evaluator-config "$${GA_EVALUATOR_CONFIG}");
+          fi;
           exec python3 -m ga_pure_pursuit.cli resume \
           --run-dir "$${GA_RESUME_RUN_DIR}" \
           --parallel-workers "$${GA_PARALLEL_WORKERS}" \
-          --worker-ids "$${GA_WORKER_IDS}";
+          "$${evaluator_args[@]}";
         else
           exec python3 -m ga_pure_pursuit.cli search \
           --config "$${GA_CONFIG}" \

@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .config import load_config
+from .config import load_config, validate_config
 from .export_best import export_best
 from .optimizer import Optimizer
 
@@ -27,6 +27,11 @@ def parser() -> argparse.ArgumentParser:
         "--worker-ids",
         help="comma-separated worker pool override used with --parallel-workers",
     )
+    resume.add_argument(
+        "--evaluator-config",
+        type=Path,
+        help="take only the evaluator and concurrency from another compatible config",
+    )
     export = commands.add_parser("export", help="export the best candidate as ROS YAML")
     export.add_argument("--run-dir", required=True, type=Path)
     export.add_argument("--output", required=True, type=Path)
@@ -42,6 +47,15 @@ def main() -> None:
         print(json.dumps(best, indent=2, sort_keys=True))
     elif args.command == "resume":
         config = load_config(args.run_dir / "experiment_resolved.json")
+        if args.evaluator_config is not None:
+            override = load_config(args.evaluator_config)
+            for section in ("baseline", "search_space", "fitness"):
+                if config[section] != override[section]:
+                    raise SystemExit(
+                        f"--evaluator-config changes the saved {section}; resume refused"
+                    )
+            config["evaluator"] = override["evaluator"]
+            config["run"]["parallel_workers"] = override["run"]["parallel_workers"]
         if args.parallel_workers is not None:
             if args.parallel_workers < 1:
                 raise SystemExit("--parallel-workers must be at least 1")
@@ -57,6 +71,7 @@ def main() -> None:
             > len(config["evaluator"].get("worker_ids", []))
         ):
             raise SystemExit("parallel worker count exceeds the configured worker IDs")
+        validate_config(config)
         best = Optimizer(
             config,
             args.run_dir.parent,

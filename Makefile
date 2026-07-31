@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh \
-	simulator rosbag-cleaner clean-rosbags dev ga ga-search ga-status ga-logs ga-stop ga-dashboard ga-parallel ga-joint ga-shared ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
+	simulator rosbag-cleaner clean-rosbags dev ga ga-search ga-status ga-logs ga-stop ga-dashboard ga-parallel ga-joint ga-shared ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
 	dev2 dev3 dev4 ga-ghost4-poc ga-ghost4-poc-stop driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
@@ -163,6 +163,19 @@ ga-shared:
 ga-shared-stop:
 	-docker compose stop ga-runner
 	$(MAKE) ga-ghost4-poc-stop
+
+ga-shared-resume:
+	@test -n "$(RUN_ID)" || { echo "Usage: make ga-shared-resume RUN_ID=YYYYMMDDTHHMMSSZ"; exit 2; }
+	@test -d "aichallenge/ml_workspace/genetic_algorithm/runs/$(RUN_ID)" || { echo "Run not found: $(RUN_ID)"; exit 2; }
+	@docker compose stop ga-runner
+	@for domain in 1 2 3 4; do \
+		docker inspect -f '{{.State.Running}}' ghost-d$$domain-autoware-1 2>/dev/null | grep -q true || \
+		{ echo "Shared AWSIM infrastructure is not running; run make ga-shared first"; exit 1; }; \
+	done
+	GA_RESUME_RUN_DIR=/aichallenge/ml_workspace/genetic_algorithm/runs/$(RUN_ID) \
+	GA_EVALUATOR_CONFIG=/aichallenge/ml_workspace/genetic_algorithm/config/experiment_shared_ghost4_ros2.yaml \
+	GA_PARALLEL_WORKERS=4 docker compose up -d --force-recreate ga-runner
+	@echo "Resumed $(RUN_ID) with the shared-AWSIM batch evaluator."
 
 ga-parallel-resume:
 	@test -n "$(RUN_ID)" || { echo "Usage: make ga-parallel-resume RUN_ID=YYYYMMDDTHHMMSSZ"; exit 2; }
