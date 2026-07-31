@@ -1,0 +1,12 @@
+schemaVersion: 2
+name: three separated GA vehicles
+vehicles:
+  "1":
+    at: [375.18933, -6.77567]
+    yaw: -123.41
+  "2":
+    at: [375.33403, -10.722203]
+    yaw: -121.12
+  "3":
+    at: [368.43343, -11.010922]
+    yaw: -121.12

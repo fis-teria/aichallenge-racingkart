@@ -1,0 +1,9 @@
+schemaVersion: 2
+name: two separated GA vehicles
+vehicles:
+  "1":
+    at: [375.18933, -6.77567]
+    yaw: -123.41
+  "2":
+    at: [375.33403, -10.722203]
+    yaw: -121.12
