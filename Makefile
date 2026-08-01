@@ -218,7 +218,14 @@ ga-parallel:
 		$$ready && break; sleep 1; \
 	done; \
 	$$ready || { echo "Shared AWSIM pool did not become ready"; exit 1; }
-	GA_CONFIG=$(GA_POOL_CONFIG_CONTAINER) docker compose up -d --force-recreate ga-runner
+	@if [ -n "$(RUN_ID)" ]; then \
+		test -d "aichallenge/ml_workspace/genetic_algorithm/runs/$(RUN_ID)" || { echo "Run not found: $(RUN_ID)"; exit 2; }; \
+		GA_RESUME_RUN_DIR=/aichallenge/ml_workspace/genetic_algorithm/runs/$(RUN_ID) \
+			GA_EVALUATOR_CONFIG=$(GA_POOL_CONFIG_CONTAINER) GA_PARALLEL_WORKERS=$$(( $(ENV_COUNT) * 4 )) \
+			docker compose up -d --force-recreate ga-runner; \
+	else \
+		GA_CONFIG=$(GA_POOL_CONFIG_CONTAINER) docker compose up -d --force-recreate ga-runner; \
+	fi
 	$(MAKE) ga-shared-rviz
 	@echo "GA pool started: $(ENV_COUNT) environment(s), $$(( $(ENV_COUNT) * 4 )) concurrent candidates"
 
@@ -291,15 +298,8 @@ ga-shared-resume:
 
 ga-parallel-resume:
 	@test -n "$(RUN_ID)" || { echo "Usage: make ga-parallel-resume RUN_ID=YYYYMMDDTHHMMSSZ"; exit 2; }
-	@test -d "aichallenge/ml_workspace/genetic_algorithm/runs/$(RUN_ID)" || { echo "Run not found: $(RUN_ID)"; exit 2; }
-	$(MAKE) ga-parallel-stop
-	$(MAKE) ga-ipc-clean
-	$(MAKE) ga-workers-start GA_CONFIG=/aichallenge/ml_workspace/genetic_algorithm/runs/$(RUN_ID)/experiment_resolved.json
-	GA_RESUME_RUN_DIR=/aichallenge/ml_workspace/genetic_algorithm/runs/$(RUN_ID) \
-		GA_PARALLEL_WORKERS=3 GA_WORKER_IDS=worker-1,worker-2,worker-3 \
-		docker compose up -d --force-recreate ga-runner
-	$(MAKE) ga-parallel-rviz
-	@echo "Resumed $(RUN_ID) with three workers."
+	$(MAKE) ga-parallel ENV_COUNT=$(ENV_COUNT) RUN_ID=$(RUN_ID)
+	@echo "Resumed $(RUN_ID) with $(ENV_COUNT) shared AWSIM environment(s)."
 
 ga-parallel-rviz:
 	@GA_WORKER_ID=worker-1 docker compose --profile visualization \
