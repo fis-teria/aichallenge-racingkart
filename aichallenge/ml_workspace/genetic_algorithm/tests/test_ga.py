@@ -11,6 +11,7 @@ from ga_pure_pursuit.evaluator import SharedAwsimBatchEvaluator, WorkerPoolEvalu
 from ga_pure_pursuit.diagnostics import render_html
 from ga_pure_pursuit.episode_monitor import finite_mean, percentile
 from ga_pure_pursuit.fitness import (
+    high_steering_speed_loss_mps,
     score,
     speed_recovery_deficit_m,
     unintended_speed_loss_mps,
@@ -117,6 +118,23 @@ def test_speed_recovery_deficit_integrates_lap_local_peak_gap():
     }
     # Deficits beyond the 0.5 m/s deadband: 1.5*0.5 + 0.0*0.5.
     assert abs(speed_recovery_deficit_m(metrics) - 0.75) < 1.0e-9
+
+
+def test_high_steering_speed_loss_only_counts_large_steering_deceleration():
+    metrics = {
+        "diagnostic_trace": [
+            {"lap": 2, "lap_time_seconds": 1.0, "actual_speed_mps": 9.0,
+             "commanded_acceleration_mps2": 0.8, "steering_angle_rad": 0.20},
+            {"lap": 2, "lap_time_seconds": 1.2, "actual_speed_mps": 8.6,
+             "commanded_acceleration_mps2": 0.8, "steering_angle_rad": 0.22},
+            {"lap": 2, "lap_time_seconds": 1.4, "actual_speed_mps": 8.2,
+             "commanded_acceleration_mps2": 0.8, "steering_angle_rad": 0.05},
+            {"lap": 2, "lap_time_seconds": 1.6, "actual_speed_mps": 7.8,
+             "commanded_acceleration_mps2": 0.8, "steering_angle_rad": 0.05},
+        ]
+    }
+    # The first two deceleration intervals touch a large steering sample.
+    assert abs(high_steering_speed_loss_mps(metrics) - 0.74) < 1.0e-9
 
 
 def test_cpu_surrogate_prefers_predicted_fast_candidates_and_keeps_exploration():

@@ -21,14 +21,14 @@
     "checkpoint_every": 1,
     "parallel_workers": 4,
     "initial_seed_files": [
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_01_g0006-i0023.json",
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_02_g0006-i0028.json",
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_03_g0007-i0018.json",
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_04_g0006-i0026.json",
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_05_g0006-i0021.json",
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_06_g0006-i0017.json",
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_07_g0007-i0014.json",
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_08_g0007-i0029.json"
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T123648Z_corner_top8/top_01_g0000-i0016.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T123648Z_corner_top8/top_02_g0000-i0005.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T123648Z_corner_top8/top_03_g0003-i0015.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T123648Z_corner_top8/top_04_g0004-i0005.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T123648Z_corner_top8/top_05_g0001-i0028.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T123648Z_corner_top8/top_06_g0000-i0008.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T123648Z_corner_top8/top_07_g0002-i0007.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T123648Z_corner_top8/top_08_g0001-i0026.json"
     ]
   },
   "evaluator": {
@@ -168,6 +168,11 @@
     "speed_recovery_deadband_mps": 0.5,
     "speed_recovery_command_min_mps2": 0.1,
     "speed_recovery_minimum_lap": 2,
+    "high_steering_speed_loss": 0.8,
+    "high_steering_speed_loss_threshold_rad": 0.18,
+    "high_steering_speed_loss_acceleration_threshold_mps2": 0.15,
+    "high_steering_speed_loss_command_min_mps2": 0.1,
+    "high_steering_speed_loss_minimum_lap": 2,
     "progress_credit": 100.0
   }
 }

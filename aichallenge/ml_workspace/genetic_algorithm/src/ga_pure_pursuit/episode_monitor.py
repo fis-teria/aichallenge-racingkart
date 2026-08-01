@@ -319,6 +319,7 @@ def run() -> int:
                         "commanded_acceleration_mps2":
                             self.latest_commanded_acceleration_mps2,
                         "actual_acceleration_mps2": self.latest_actual_acceleration_mps2,
+                        "steering_angle_rad": self.previous_steering,
                         "accel_cmd": self.latest_accel_cmd,
                         "brake_cmd": self.latest_brake_cmd,
                         "speed_limited": self.latest_speed_limited,

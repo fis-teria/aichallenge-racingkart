@@ -85,6 +85,50 @@ def speed_recovery_deficit_m(
     return float(total)
 
 
+def high_steering_speed_loss_mps(
+    metrics: dict[str, Any],
+    steering_threshold_rad: float = 0.18,
+    acceleration_threshold_mps2: float = 0.15,
+    commanded_acceleration_min_mps2: float = 0.1,
+    minimum_lap: int = 2,
+) -> float:
+    """Integrate deceleration that occurs while a large steering angle is held."""
+    total = 0.0
+    previous: dict[str, Any] | None = None
+    for item in metrics.get("diagnostic_trace", []):
+        required = (
+            item.get("lap"), item.get("lap_time_seconds"),
+            item.get("actual_speed_mps"), item.get("commanded_acceleration_mps2"),
+            item.get("steering_angle_rad"),
+        )
+        if any(value is None for value in required):
+            previous = None
+            continue
+        if previous is not None and int(item["lap"]) >= minimum_lap:
+            same_lap = int(previous["lap"]) == int(item["lap"])
+            delta_time = float(item["lap_time_seconds"]) - float(
+                previous["lap_time_seconds"]
+            )
+            acceleration = (
+                float(item["actual_speed_mps"]) - float(previous["actual_speed_mps"])
+            ) / delta_time if delta_time > 0.0 else 0.0
+            large_steering = max(
+                abs(float(item["steering_angle_rad"])),
+                abs(float(previous["steering_angle_rad"])),
+            ) >= steering_threshold_rad
+            if (
+                same_lap
+                and 1.0e-4 < delta_time <= 1.0
+                and large_steering
+                and float(item["commanded_acceleration_mps2"])
+                >= commanded_acceleration_min_mps2
+                and acceleration < -acceleration_threshold_mps2
+            ):
+                total += (-acceleration - acceleration_threshold_mps2) * delta_time
+        previous = item
+    return float(total)
+
+
 def score(metrics: dict[str, Any], weights: dict[str, float]) -> float:
     invalid = bool(metrics.get("invalid", False))
     completed = bool(metrics.get("completed", False))
@@ -142,6 +186,20 @@ def score(metrics: dict[str, Any], weights: dict[str, float]) -> float:
         minimum_lap=int(weights.get("speed_recovery_minimum_lap", 2)),
     )
     value += float(weights.get("speed_recovery_deficit", 0.0)) * recovery_deficit
+    high_steering_loss = high_steering_speed_loss_mps(
+        metrics,
+        steering_threshold_rad=float(
+            weights.get("high_steering_speed_loss_threshold_rad", 0.18)
+        ),
+        acceleration_threshold_mps2=float(
+            weights.get("high_steering_speed_loss_acceleration_threshold_mps2", 0.15)
+        ),
+        commanded_acceleration_min_mps2=float(
+            weights.get("high_steering_speed_loss_command_min_mps2", 0.1)
+        ),
+        minimum_lap=int(weights.get("high_steering_speed_loss_minimum_lap", 2)),
+    )
+    value += float(weights.get("high_steering_speed_loss", 0.0)) * high_steering_loss
     if not completed:
         value -= weights["progress_credit"] * float(metrics.get("progress", 0.0))
     return float(value)
