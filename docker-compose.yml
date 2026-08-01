@@ -95,6 +95,7 @@ services:
     <<: *autoware-base
     privileged: false
     restart: "no"
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     environment:
       - ROS_DOMAIN_ID=1
       - GA_EXPERIMENT_MODE=true
