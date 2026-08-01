@@ -84,6 +84,8 @@ SimplePurePursuit::SimplePurePursuit()
     declare_parameter<double>("curvature_speed_preview_distance", 12.0);
   tuning_.speed_proportional_gain =
     declare_parameter<double>("speed_proportional_gain", 1.0);
+  tuning_.longitudinal_acceleration_limit =
+    declare_parameter<double>("longitudinal_acceleration_limit", 1.0);
   tuning_.external_target_vel =
     declare_parameter<double>("external_target_vel", 9.722222222222);
   ga_run_id_ = declare_parameter<std::string>("ga_run_id", "");
@@ -175,6 +177,8 @@ rcl_interfaces::msg::SetParametersResult SimplePurePursuit::onSetParameters(
         candidate.curvature_speed_preview_distance = parameter.as_double();
       } else if (name == "speed_proportional_gain") {
         candidate.speed_proportional_gain = parameter.as_double();
+      } else if (name == "longitudinal_acceleration_limit") {
+        candidate.longitudinal_acceleration_limit = parameter.as_double();
       } else if (name == "external_target_vel") {
         candidate.external_target_vel = parameter.as_double();
       } else if (name == "ga_run_id") {
@@ -211,6 +215,7 @@ rcl_interfaces::msg::SetParametersResult SimplePurePursuit::onSetParameters(
     candidate.corner_speed_retention_lateral_error_soft ||
     !finiteInRange(candidate.curvature_speed_preview_distance, 1.0, 50.0) ||
     !finiteInRange(candidate.speed_proportional_gain, 0.0, 10.0) ||
+    !finiteInRange(candidate.longitudinal_acceleration_limit, 0.0, 1.0) ||
     !finiteInRange(candidate.external_target_vel, 0.0, 30.0))
   {
     result.reason = "candidate contains a non-finite or out-of-range value";
@@ -388,7 +393,8 @@ void SimplePurePursuit::onTimer()
   AckermannControlCommand command = zeroCommand(get_clock()->now());
   command.longitudinal.speed = target_velocity;
   command.longitudinal.acceleration = std::clamp(
-    tuning_.speed_proportional_gain * (target_velocity - current_velocity), 0.0, 1.0);
+    tuning_.speed_proportional_gain * (target_velocity - current_velocity), 0.0,
+    tuning_.longitudinal_acceleration_limit);
   const double heading_error =
     std::atan2(lookahead->pose.position.y - rear_y, lookahead->pose.position.x - rear_x) - yaw;
   const double actual_lookahead_distance = std::hypot(

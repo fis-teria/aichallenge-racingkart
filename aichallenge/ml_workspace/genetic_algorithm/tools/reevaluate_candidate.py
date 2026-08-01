@@ -8,6 +8,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ga_pure_pursuit.config import load_config
@@ -20,6 +21,8 @@ def main() -> None:
     parser.add_argument("--candidate-id", required=True)
     parser.add_argument("--output-run", required=True, type=Path)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--vehicle-count", type=int, default=1)
+    parser.add_argument("--acceleration-limit", type=float)
     parser.add_argument("--timing-probe")
     args = parser.parse_args()
 
@@ -36,8 +39,16 @@ def main() -> None:
 
     config = load_config(args.source_run / "experiment_resolved.json")
     evaluator_config = config["evaluator"]
-    evaluator_config["mode"] = "ros2"
-    evaluator_config["timeout_sec"] = evaluator_config.get("episode_timeout_sec", 210.0)
+    if args.vehicle_count == 1:
+        evaluator_config["mode"] = "ros2"
+        evaluator_config["timeout_sec"] = evaluator_config.get("episode_timeout_sec", 210.0)
+    else:
+        evaluator_config["mode"] = "shared_awsim_batch"
+        evaluator_config["vehicle_domain_ids"] = list(range(1, args.vehicle_count + 1))
+    if args.acceleration_limit is not None:
+        evaluator_config.setdefault("fixed_controller_parameters", {})[
+            "longitudinal_acceleration_limit"
+        ] = args.acceleration_limit
     evaluator = make_evaluator(config, args.output_run)
 
     probe = None
@@ -53,10 +64,19 @@ def main() -> None:
         )
 
     try:
-        results = [
-            evaluator.evaluate(args.candidate_id, parameter_hash, genome, repeat)
-            for repeat in range(args.repeats)
-        ]
+        results = []
+        for repeat in range(args.repeats):
+            if args.vehicle_count == 1:
+                batch = [evaluator.evaluate(args.candidate_id, parameter_hash, genome, repeat)]
+            else:
+                def evaluate_vehicle(index: int):
+                    return evaluator.evaluate(
+                        f"{args.candidate_id}-d{index + 1}", parameter_hash, genome, repeat
+                    )
+
+                with ThreadPoolExecutor(max_workers=args.vehicle_count) as executor:
+                    batch = list(executor.map(evaluate_vehicle, range(args.vehicle_count)))
+            results.extend(batch)
     finally:
         if probe is not None:
             probe.send_signal(signal.SIGINT)
@@ -67,6 +87,8 @@ def main() -> None:
         "candidate_id": args.candidate_id,
         "parameter_hash": parameter_hash,
         "source_fitness": source_fitness,
+        "vehicle_count": args.vehicle_count,
+        "acceleration_limit": args.acceleration_limit,
         "repeats": results,
     }
     (args.output_run / "summary.json").write_text(

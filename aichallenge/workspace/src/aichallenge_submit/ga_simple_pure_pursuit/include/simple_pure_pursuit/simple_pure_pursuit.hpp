@@ -49,6 +49,7 @@ private:
     double corner_speed_retention_lateral_error_hard{1.0};
     double curvature_speed_preview_distance{12.0};
     double speed_proportional_gain{1.0};
+    double longitudinal_acceleration_limit{1.0};
     double external_target_vel{9.722222222222};
   };
 

@@ -1,0 +1,13 @@
+schemaVersion: 1
+name: ga-ghost-4-nohandicap
+start-mode: sync
+vehicles: 4
+npcs: 0
+laps: 6
+timeout: 600
+camera: false
+lidar: "off"
+collisions: "off"
+handicap: "off"
+steer-source: ackermann
+ros2-base-domain: 1

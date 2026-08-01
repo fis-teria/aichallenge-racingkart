@@ -29,6 +29,10 @@ case "${mode}" in
     race_config="ga-ghost-4"
     scenario="${AWSIM_DIRECTORY}/AWSIM_Data/StreamingAssets/Scenarios/ga-ghost-d1-4.yaml"
     ;;
+"ghost4-nohandicap")
+    race_config="ga-ghost-4-nohandicap"
+    scenario="${AWSIM_DIRECTORY}/AWSIM_Data/StreamingAssets/Scenarios/ga-ghost-d1-4.yaml"
+    ;;
 "ghost4-separated")
     # Diagnostic variant: keep vehicle 1 at the legacy GA start while placing
     # the other three at the corresponding D2-D4 grid offsets.
@@ -47,7 +51,7 @@ case "${mode}" in
     ;;
 *)
     echo "invalid mode: ${mode}"
-    echo "supported: dev, test, eval, 1p, 2p, 3p, 4p, ghost4, ghost1-separated..ghost4-separated, ghost1-nohandicap"
+    echo "supported: dev, test, eval, 1p, 2p, 3p, 4p, ghost4, ghost4-nohandicap, ghost1-separated..ghost4-separated, ghost1-nohandicap"
     exit 1
     ;;
 esac
@@ -62,7 +66,7 @@ fi
 
 echo "[INFO] Starting AWSIM in '${mode}' mode (headless=${headless})"
 
-if [[ ${mode} == "ghost4" || ${mode} =~ ^ghost[1-4]-separated$ || ${mode} == "ghost1-nohandicap" ]]; then
+if [[ ${mode} == "ghost4" || ${mode} == "ghost4-nohandicap" || ${mode} =~ ^ghost[1-4]-separated$ || ${mode} == "ghost1-nohandicap" ]]; then
     declare -a opts=("--race-config" "${race_config}" "--scenario" "${scenario}")
 else
     declare -a opts=("--start-mode" "${start_mode}" "--vehicles" "${vehicles}" "--laps" "${laps}" "--timeout" "${timeout}")
