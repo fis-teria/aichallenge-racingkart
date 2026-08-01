@@ -275,9 +275,9 @@ dev2 dev3 dev4: rosbag-cleaner simulator
 	echo "To Stop: make down"
 
 ga-ghost4-poc:
-	@echo "Start one AWSIM with four collision-free vehicles at the D1 pose"
+	@echo "Start one AWSIM with four collision-free, no-handicap vehicles at the D1 pose"
 	@mkdir -p output/ga-ghost4-poc/$(TIMESTAMP)
-	GA_EXPERIMENT_MODE=true AWSIM_HEADLESS=true SIM_MODE=ghost4 \
+	GA_EXPERIMENT_MODE=true AWSIM_HEADLESS=true SIM_MODE=ghost4-nohandicap \
 		LOG_DIR=/output/ga-ghost4-poc/$(TIMESTAMP) ROS_DOMAIN_ID=0 docker compose up -d simulator
 	@for p in $$(seq 1 4); do \
 		LOG_DIR=/output/ga-ghost4-poc/$(TIMESTAMP) RUN_MODE=awsim-no-viz \

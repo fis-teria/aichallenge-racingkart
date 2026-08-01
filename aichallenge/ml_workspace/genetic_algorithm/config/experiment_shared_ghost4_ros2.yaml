@@ -42,6 +42,7 @@
     "fixed_controller_parameters": {
       "actual_lookahead_distance_blend": 0.0,
       "corner_speed_retention": 1.0,
+      "longitudinal_acceleration_limit": 0.8,
       "external_target_vel": 9.722222222222
     },
     "path_optimization": {
