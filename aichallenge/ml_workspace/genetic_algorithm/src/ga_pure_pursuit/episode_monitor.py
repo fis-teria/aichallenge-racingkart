@@ -63,6 +63,7 @@ def run() -> int:
             self.steering_deltas: list[float] = []
             self.rate_limit_samples: list[float] = []
             self.previous_steering = None
+            self.steering_angles: list[float] = []
             self.previous_position = None
             self.distance_traveled_m = 0.0
             self.initial_speed_mps = None
@@ -222,6 +223,7 @@ def run() -> int:
             if self.previous_steering is not None:
                 self.steering_deltas.append(steering - self.previous_steering)
             self.previous_steering = steering
+            self.steering_angles.append(steering)
 
         def on_actuation(self, message):
             accel = float(message.actuation.accel_cmd)
@@ -344,6 +346,11 @@ def run() -> int:
                 if self.steering_deltas
                 else 0.0
             )
+            steering_angle_rms = (
+                math.sqrt(statistics.fmean(value * value for value in self.steering_angles))
+                if self.steering_angles
+                else 0.0
+            )
             progress = 0.0
             if self.initial_lap is not None and self.lap is not None:
                 progress = min(
@@ -424,6 +431,7 @@ def run() -> int:
                 "lateral_error_p95_m": percentile(self.lateral_errors, 0.95),
                 "lateral_error_max_m": max(self.lateral_errors, default=0.0),
                 "steering_delta_rms": rms,
+                "steering_angle_rms": steering_angle_rms,
                 "steering_rate_limit_ratio": (
                     statistics.fmean(self.rate_limit_samples) if self.rate_limit_samples else 0.0
                 ),

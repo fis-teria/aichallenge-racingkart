@@ -100,10 +100,20 @@ def generate_candidate_path(
         differences[(index + 1) % anchor_count] - differences[index]
         for index in range(anchor_count)
     ]
+    source_loop_length = sum(
+        math.hypot(current[0] - previous[0], current[1] - previous[1])
+        for previous, current in zip(points[loop_start_index:], points[loop_start_index + 1:])
+    )
+    shifted_loop_length = sum(
+        math.hypot(current[0] - previous[0], current[1] - previous[1])
+        for previous, current in zip(shifted[loop_start_index:], shifted[loop_start_index + 1:])
+    )
     return {
         "path_offset_rms_m": math.sqrt(sum(value * value for value in offsets) / anchor_count),
         "path_offset_max_m": max(abs(value) for value in offsets),
         "path_offset_smoothness_m": math.sqrt(
             sum(value * value for value in second_differences) / anchor_count
         ),
+        "path_length_m": shifted_loop_length,
+        "path_length_excess_m": max(0.0, shifted_loop_length - source_loop_length),
     }

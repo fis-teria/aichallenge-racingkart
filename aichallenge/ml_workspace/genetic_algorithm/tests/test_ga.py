@@ -10,7 +10,11 @@ from concurrent.futures import ThreadPoolExecutor
 from ga_pure_pursuit.evaluator import SharedAwsimBatchEvaluator, WorkerPoolEvaluator
 from ga_pure_pursuit.diagnostics import render_html
 from ga_pure_pursuit.episode_monitor import finite_mean, percentile
-from ga_pure_pursuit.fitness import score, unintended_speed_loss_mps
+from ga_pure_pursuit.fitness import (
+    score,
+    speed_recovery_deficit_m,
+    unintended_speed_loss_mps,
+)
 from ga_pure_pursuit.genome import Bounds, initialize_population, parameter_hash, repair
 from ga_pure_pursuit.operators import blend_crossover, mutate
 from ga_pure_pursuit.optimizer import (
@@ -96,6 +100,23 @@ def test_unintended_speed_loss_uses_lap_clock_and_acceleration_intent():
     # First interval is -1 m/s^2 while acceleration is requested:
     # (-a - threshold) * dt = (1 - 0.3) * 0.2.
     assert abs(unintended_speed_loss_mps(metrics) - 0.14) < 1.0e-9
+
+
+def test_speed_recovery_deficit_integrates_lap_local_peak_gap():
+    metrics = {
+        "diagnostic_trace": [
+            {"lap": 2, "lap_time_seconds": 1.0, "actual_speed_mps": 9.0,
+             "commanded_acceleration_mps2": 0.8},
+            {"lap": 2, "lap_time_seconds": 1.5, "actual_speed_mps": 7.0,
+             "commanded_acceleration_mps2": 0.8},
+            {"lap": 2, "lap_time_seconds": 2.0, "actual_speed_mps": 8.5,
+             "commanded_acceleration_mps2": 0.8},
+            {"lap": 3, "lap_time_seconds": 0.2, "actual_speed_mps": 6.0,
+             "commanded_acceleration_mps2": 0.8},
+        ]
+    }
+    # Deficits beyond the 0.5 m/s deadband: 1.5*0.5 + 0.0*0.5.
+    assert abs(speed_recovery_deficit_m(metrics) - 0.75) < 1.0e-9
 
 
 def test_cpu_surrogate_prefers_predicted_fast_candidates_and_keeps_exploration():
@@ -507,3 +528,5 @@ def test_path_genes_are_split_and_generate_closed_offset_path(tmp_path):
     assert generated[1]["x"] == generated[-1]["x"]
     assert generated[1]["y"] == generated[-1]["y"]
     assert metrics["path_offset_max_m"] == 0.2
+    assert metrics["path_length_m"] > 0.0
+    assert metrics["path_length_excess_m"] >= 0.0

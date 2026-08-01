@@ -149,13 +149,19 @@
     "lateral_error_hard_limit_m": null,
     "lateral_error_hard_penalty": 0.0,
     "steering_delta_rms": 0.15,
+    "steering_angle_rms": 1.0,
     "steering_rate_limit_ratio": 1.0,
     "path_offset_rms": 0.0,
     "path_offset_smoothness": 0.15,
+    "path_length_excess": 0.02,
     "unintended_speed_loss": 0.4,
     "unintended_speed_loss_threshold_mps2": 0.15,
     "unintended_speed_loss_command_min_mps2": 0.1,
     "unintended_speed_loss_minimum_lap": 2,
+    "speed_recovery_deficit": 0.05,
+    "speed_recovery_deadband_mps": 0.5,
+    "speed_recovery_command_min_mps2": 0.1,
+    "speed_recovery_minimum_lap": 2,
     "progress_credit": 100.0
   }
 }

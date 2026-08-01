@@ -50,6 +50,41 @@ def unintended_speed_loss_mps(
     return float(total)
 
 
+def speed_recovery_deficit_m(
+    metrics: dict[str, Any],
+    deadband_mps: float = 0.5,
+    commanded_acceleration_min_mps2: float = 0.1,
+    minimum_lap: int = 2,
+) -> float:
+    """Integrate speed missing from the lap-local peak while acceleration is requested."""
+    total = 0.0
+    peak_speed = 0.0
+    previous: dict[str, Any] | None = None
+    previous_lap: int | None = None
+    for item in metrics.get("diagnostic_trace", []):
+        lap = item.get("lap")
+        lap_time = item.get("lap_time_seconds")
+        speed = item.get("actual_speed_mps")
+        commanded = item.get("commanded_acceleration_mps2")
+        if lap is None or lap_time is None or speed is None or commanded is None:
+            previous = None
+            continue
+        lap = int(lap)
+        speed = float(speed)
+        if previous_lap != lap:
+            peak_speed = speed
+            previous = None
+            previous_lap = lap
+        peak_speed = max(peak_speed, speed)
+        if previous is not None and lap >= minimum_lap:
+            delta_time = float(lap_time) - float(previous["lap_time_seconds"])
+            if 1.0e-4 < delta_time <= 1.0 and float(commanded) >= commanded_acceleration_min_mps2:
+                deficit = max(0.0, peak_speed - speed - deadband_mps)
+                total += deficit * delta_time
+        previous = item
+    return float(total)
+
+
 def score(metrics: dict[str, Any], weights: dict[str, float]) -> float:
     invalid = bool(metrics.get("invalid", False))
     completed = bool(metrics.get("completed", False))
@@ -81,6 +116,12 @@ def score(metrics: dict[str, Any], weights: dict[str, float]) -> float:
     value += float(weights.get("path_offset_smoothness", 0.0)) * float(
         metrics.get("path_offset_smoothness_m", 0.0)
     )
+    value += float(weights.get("path_length_excess", 0.0)) * float(
+        metrics.get("path_length_excess_m", 0.0)
+    )
+    value += float(weights.get("steering_angle_rms", 0.0)) * float(
+        metrics.get("steering_angle_rms", 0.0)
+    )
     speed_loss = unintended_speed_loss_mps(
         metrics,
         acceleration_threshold_mps2=float(
@@ -92,6 +133,15 @@ def score(metrics: dict[str, Any], weights: dict[str, float]) -> float:
         minimum_lap=int(weights.get("unintended_speed_loss_minimum_lap", 2)),
     )
     value += float(weights.get("unintended_speed_loss", 0.0)) * speed_loss
+    recovery_deficit = speed_recovery_deficit_m(
+        metrics,
+        deadband_mps=float(weights.get("speed_recovery_deadband_mps", 0.5)),
+        commanded_acceleration_min_mps2=float(
+            weights.get("speed_recovery_command_min_mps2", 0.1)
+        ),
+        minimum_lap=int(weights.get("speed_recovery_minimum_lap", 2)),
+    )
+    value += float(weights.get("speed_recovery_deficit", 0.0)) * recovery_deficit
     if not completed:
         value -= weights["progress_credit"] * float(metrics.get("progress", 0.0))
     return float(value)
