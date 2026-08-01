@@ -349,17 +349,26 @@ private:
 
   void apply_imu_orientation_fallback(geometry_msgs::msg::PoseWithCovarianceStamped & msg) const
   {
+    // AWSIM already publishes the vehicle orientation in the GNSS pose.  Keep
+    // that orientation when it is valid so the map -> base_link TF stays
+    // aligned with the reported GNSS pose.  IMU orientation is only a fallback
+    // for GNSS sources that do not provide a usable quaternion.
+    auto gnss_orientation = msg.pose.pose.orientation;
+    if (normalize_quaternion(gnss_orientation)) {
+      msg.pose.pose.orientation = gnss_orientation;
+      return;
+    }
+
     geometry_msgs::msg::Quaternion base_link_orientation;
     if (imu_to_base_link_orientation(imu_msg_.orientation, base_link_orientation)) {
       msg.pose.pose.orientation = base_link_orientation;
       return;
     }
-    const auto & o = msg.pose.pose.orientation;
-    if (std::isnan(o.x) || std::isnan(o.y) || std::isnan(o.z) || std::isnan(o.w) ||
-      (o.x == 0 && o.y == 0 && o.z == 0 && o.w == 0))
-    {
-      msg.pose.pose.orientation.w = 1.0;
-    }
+
+    msg.pose.pose.orientation.x = 0.0;
+    msg.pose.pose.orientation.y = 0.0;
+    msg.pose.pose.orientation.z = 0.0;
+    msg.pose.pose.orientation.w = 1.0;
   }
 
   // ── IMU callback ───────────────────────────────────────────
