@@ -21,8 +21,14 @@
     "checkpoint_every": 1,
     "parallel_workers": 4,
     "initial_seed_files": [
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/generation_00023_best.json",
-      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260730_fitness_best.json"
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_01_g0006-i0023.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_02_g0006-i0028.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_03_g0007-i0018.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_04_g0006-i0026.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_05_g0006-i0021.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_06_g0006-i0017.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_07_g0007-i0014.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260801T072839Z_top8/top_08_g0007-i0029.json"
     ]
   },
   "evaluator": {
