@@ -30,7 +30,7 @@ case "${mode}" in
     scenario="${AWSIM_DIRECTORY}/AWSIM_Data/StreamingAssets/Scenarios/ga-ghost-d1-4.yaml"
     ;;
 "ghost4-nohandicap")
-    race_config="ga-ghost-4-nohandicap"
+    race_config="${GA_RACE_CONFIG:-ga-ghost-4-nohandicap}"
     scenario="${AWSIM_DIRECTORY}/AWSIM_Data/StreamingAssets/Scenarios/ga-ghost-d1-4.yaml"
     ;;
 "ghost4-separated")
@@ -75,5 +75,5 @@ declare -a extra_args
 read -r -a extra_args <<<"${awsim_extra_args}"
 opts+=("${extra_args[@]}")
 
-export ROS_DOMAIN_ID=0
+export ROS_DOMAIN_ID="${AWSIM_ADMIN_DOMAIN_ID:-0}"
 $AWSIM_DIRECTORY/AWSIM.x86_64 "${opts[@]}"

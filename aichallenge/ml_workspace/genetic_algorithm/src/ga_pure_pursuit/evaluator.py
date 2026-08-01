@@ -336,15 +336,48 @@ class Ros2Evaluator(CommandEvaluator):
 
 
 class SharedAwsimBatchEvaluator:
-    """Collects up to four calls and evaluates them in one synchronized AWSIM run."""
+    """Evaluate synchronized batches across one or more shared AWSIM instances."""
 
     def __init__(self, config: dict[str, Any], timeout_sec: float, run_dir: Path):
         self.config = config
         self.timeout_sec = timeout_sec
         self.run_dir = run_dir
-        self.domains = [int(value) for value in config.get("vehicle_domain_ids", [1, 2, 3, 4])]
-        if not self.domains:
-            raise ValueError("evaluator.vehicle_domain_ids must not be empty")
+        configured_environments = config.get("environments")
+        if configured_environments:
+            self.environments = []
+            for index, item in enumerate(configured_environments, start=1):
+                domains = [int(value) for value in item.get("vehicle_domain_ids", [])]
+                if not domains:
+                    raise ValueError(
+                        f"evaluator.environments[{index - 1}].vehicle_domain_ids "
+                        "must not be empty"
+                    )
+                self.environments.append(
+                    {
+                        "name": str(item.get("name", f"env{index}")),
+                        "admin_domain_id": int(item.get("admin_domain_id", 0)),
+                        "vehicle_domain_ids": domains,
+                    }
+                )
+        else:
+            domains = [
+                int(value)
+                for value in config.get("vehicle_domain_ids", [1, 2, 3, 4])
+            ]
+            if not domains:
+                raise ValueError("evaluator.vehicle_domain_ids must not be empty")
+            self.environments = [
+                {
+                    "name": "env1",
+                    "admin_domain_id": int(
+                        config.get("ros", {}).get("admin_domain_id", 0)
+                    ),
+                    "vehicle_domain_ids": domains,
+                }
+            ]
+        self.capacity = sum(
+            len(item["vehicle_domain_ids"]) for item in self.environments
+        )
         self.collect_timeout_sec = float(config.get("batch_collect_timeout_sec", 0.5))
         self.barrier_timeout_sec = float(config.get("batch_barrier_timeout_sec", 90.0))
         self.requests: queue.Queue[tuple[tuple[Any, ...], Future]] = queue.Queue()
@@ -366,7 +399,7 @@ class SharedAwsimBatchEvaluator:
             first = self.requests.get()
             batch = [first]
             deadline = time.monotonic() + self.collect_timeout_sec
-            while len(batch) < len(self.domains):
+            while len(batch) < self.capacity:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
                     break
@@ -385,9 +418,12 @@ class SharedAwsimBatchEvaluator:
                 for _, future in batch:
                     future.set_exception(failure)
 
-    def _execute_batch(self, requests: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+    def _execute_environment(
+        self, requests: list[tuple[Any, ...]], environment: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         evaluators: list[Ros2Evaluator] = []
-        ros = self.config["ros"]
+        ros = copy.deepcopy(self.config["ros"])
+        ros["admin_domain_id"] = int(environment["admin_domain_id"])
         reset_command = list(ros.get("reset_command", []))
         start_command = list(ros.get("start_command", []))
 
@@ -403,9 +439,10 @@ class SharedAwsimBatchEvaluator:
             lambda: run_admin(start_command),
             self.barrier_timeout_sec,
         )
-        for domain in self.domains[: len(requests)]:
+        for domain in environment["vehicle_domain_ids"][: len(requests)]:
             child_config = copy.deepcopy(self.config)
-            child_config["ros"]["vehicle_domain_id"] = domain
+            child_config["ros"] = copy.deepcopy(ros)
+            child_config["ros"]["vehicle_domain_id"] = int(domain)
             evaluators.append(
                 Ros2Evaluator(child_config, self.timeout_sec, self.run_dir, sync)
             )
@@ -420,6 +457,31 @@ class SharedAwsimBatchEvaluator:
 
         with ThreadPoolExecutor(max_workers=len(requests)) as executor:
             return list(executor.map(run_one, zip(evaluators, requests)))
+
+    def _execute_batch(self, requests: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+        assignments: list[tuple[list[tuple[Any, ...]], dict[str, Any]]] = []
+        offset = 0
+        for environment in self.environments:
+            size = min(
+                len(environment["vehicle_domain_ids"]), len(requests) - offset
+            )
+            if size <= 0:
+                break
+            assignments.append((requests[offset: offset + size], environment))
+            offset += size
+        if offset != len(requests):
+            raise InfrastructureError(
+                f"shared AWSIM pool capacity {self.capacity} is smaller than "
+                f"batch size {len(requests)}"
+            )
+        with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
+            grouped = list(
+                executor.map(
+                    lambda item: self._execute_environment(item[0], item[1]),
+                    assignments,
+                )
+            )
+        return [result for group in grouped for result in group]
 
 
 class WorkerPoolEvaluator:

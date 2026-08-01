@@ -249,6 +249,22 @@ display and Mutter authority automatically, so RViz opens on the GA host's
 logged-in desktop. Use `make ga-shared-rviz` to restart RViz without restarting
 the GA.
 
+To run a pool of shared four-vehicle AWSIM environments, set the environment
+count explicitly. Each environment adds four concurrent candidate slots:
+
+```bash
+make ga-parallel ENV_COUNT=2
+# shorthand
+make ga-parallel 2
+```
+
+Environment 1 uses admin domain 0 and vehicle domains 1-4. Environment 2 uses
+admin domain 10 and vehicle domains 11-14; later environments follow the same
+10-domain stride. `make ga-parallel-status` reports every pool container and
+`make ga-parallel-stop` stops the recorded environment count. The GA runner
+collects up to `ENV_COUNT * 4` requests, partitions them into four-candidate
+batches, and resets/starts each AWSIM independently.
+
 The shared RViz view also aggregates `/localization/kinematic_state` from ROS
 domains 1 through 4 into `/ga/ghost4/markers` on domain 1. The comparison layer
 shows each collision-free vehicle, its current candidate ID and speed, and a

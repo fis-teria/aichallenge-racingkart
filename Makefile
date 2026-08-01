@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh \
-	simulator rosbag-cleaner clean-rosbags dev ga ga-help ga-search ga-status ga-logs ga-stop ga-dashboard ga-dashboard-serve ga-parallel ga-joint ga-shared ga-shared-rviz ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
+	simulator rosbag-cleaner clean-rosbags dev ga ga-help ga-search ga-status ga-logs ga-stop ga-dashboard ga-dashboard-serve ga-parallel ga-parallel-legacy ga-joint ga-shared ga-shared-rviz ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
 	dev2 dev3 dev4 ga-ghost4-poc ga-ghost4-poc-stop driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
@@ -12,6 +12,13 @@ export HOST_UID HOST_GID
 GA_CONFIG ?= /aichallenge/ml_workspace/genetic_algorithm/config/experiment_parallel_ros2.yaml
 GA_DASHBOARD_BIND ?= 0.0.0.0
 GA_DASHBOARD_PORT ?= 18080
+ENV_COUNT ?= 1
+GA_POOL_CONFIG_HOST := output/ga-pool/experiment.json
+GA_POOL_CONFIG_CONTAINER := /output/ga-pool/experiment.json
+GA_POOL_NUMERIC_GOAL := $(firstword $(filter 1 2 3 4,$(MAKECMDGOALS)))
+ifneq ($(GA_POOL_NUMERIC_GOAL),)
+ENV_COUNT := $(GA_POOL_NUMERIC_GOAL)
+endif
 # Stop host shell's ROS_DOMAIN_ID from overriding .env via compose interpolation,
 # but still honor an explicit `make foo ROS_DOMAIN_ID=N` command-line override.
 unexport ROS_DOMAIN_ID
@@ -82,6 +89,8 @@ ga:
 
 ga-help:
 	@echo "Current shared-AWSIM workflow (recommended):"
+	@echo "  make ga-parallel ENV_COUNT=2           Start N AWSIM environments, four vehicles each"
+	@echo "  make ga-parallel 2                     Shorthand for ENV_COUNT=2"
 	@echo "  make ga-shared                         Start one AWSIM + four ghost vehicles + GA"
 	@echo "  make ga-shared-rviz                    Start RViz for shared vehicle/domain 1"
 	@echo "  make ga-logs                           Follow GA runner logs"
@@ -91,7 +100,7 @@ ga-help:
 	@echo "  make ga-shared-resume RUN_ID=<run-id>  Resume an existing shared-AWSIM run"
 	@echo "  make ga-shared-stop                    Stop shared GA and all four vehicles"
 	@echo "Legacy/separate-worker workflow:"
-	@echo "  make ga-parallel                       Start three independent AWSIM workers"
+	@echo "  make ga-parallel-legacy                Start three independent AWSIM workers"
 	@echo "  make ga-parallel-status                Show runner and worker status"
 	@echo "  make ga-parallel-logs                  Follow runner logs"
 	@echo "  make ga-parallel-rviz                  Start RViz for worker 1"
@@ -153,7 +162,7 @@ ga-workers-start:
 	GA_WORKER_ID=worker-3 GA_WORKER_LOG_DIR=/output/ga-workers/worker-3/$(TIMESTAMP) GA_CONFIG=$(GA_CONFIG) \
 		docker compose -f docker-compose.ga-worker.yml -p ga-w3 up -d
 
-ga-parallel:
+ga-parallel-legacy:
 	$(MAKE) down
 	$(MAKE) ga-ipc-clean
 	$(MAKE) rosbag-cleaner
@@ -161,6 +170,57 @@ ga-parallel:
 	GA_CONFIG=/aichallenge/ml_workspace/genetic_algorithm/config/experiment_parallel_ros2.yaml \
 		docker compose up -d --force-recreate ga-runner
 	@echo "Three-worker GA started. Follow it with: make ga-parallel-status"
+
+1 2 3 4:
+	@:
+
+ga-parallel:
+	@test "$(ENV_COUNT)" -ge 1 -a "$(ENV_COUNT)" -le 4 || { echo "ENV_COUNT must be 1..4"; exit 2; }
+	$(MAKE) ga-parallel-stop ENV_COUNT=$(ENV_COUNT)
+	$(MAKE) down
+	$(MAKE) rosbag-cleaner
+	@mkdir -p output/ga-pool
+	@python3 aichallenge/ml_workspace/genetic_algorithm/tools/configure_shared_pool.py \
+		--env-count $(ENV_COUNT) \
+		--config-source aichallenge/ml_workspace/genetic_algorithm/config/experiment_shared_ghost4_ros2.yaml \
+		--config-output $(GA_POOL_CONFIG_HOST) \
+		--race-template aichallenge/simulator/AWSIM/AWSIM_Data/StreamingAssets/RaceConfig/ga-ghost-4-nohandicap.yaml \
+		--race-config-dir aichallenge/simulator/AWSIM/AWSIM_Data/StreamingAssets/RaceConfig
+	@echo "$(ENV_COUNT)" > output/ga-pool/env-count
+	@for environment in $$(seq 1 $(ENV_COUNT)); do \
+		admin_domain=$$(( (environment - 1) * 10 )); \
+		base_domain=$$(( admin_domain + 1 )); \
+		log_dir=/output/ga-pool/$(TIMESTAMP)/env$$environment; \
+		mkdir -p "output/ga-pool/$(TIMESTAMP)/env$$environment"; \
+		echo "Start env$$environment: admin=$$admin_domain vehicles=$$base_domain-$$((base_domain + 3))"; \
+		GA_EXPERIMENT_MODE=true AWSIM_HEADLESS=true SIM_MODE=ghost4-nohandicap \
+			AWSIM_ADMIN_DOMAIN_ID=$$admin_domain GA_RACE_CONFIG=ga-pool-env$$environment \
+			LOG_DIR=$$log_dir ROS_DOMAIN_ID=$$admin_domain \
+			docker compose -p ga-env$$environment up -d simulator; \
+		for vehicle in $$(seq 1 4); do \
+			domain=$$((base_domain + vehicle - 1)); \
+			LOG_DIR=$$log_dir RUN_MODE=awsim-no-viz GA_EXPERIMENT_MODE=true \
+				ROS_DOMAIN_ID=$$domain docker compose -p ga-env$$environment-d$$vehicle up -d autoware; \
+		done; \
+	done
+	@ready=false; \
+	for attempt in $$(seq 1 180); do \
+		ready=true; \
+		for environment in $$(seq 1 $(ENV_COUNT)); do \
+			base_domain=$$(( (environment - 1) * 10 + 1 )); \
+			for vehicle in $$(seq 1 4); do \
+				domain=$$((base_domain + vehicle - 1)); \
+				docker exec ga-env$$environment-d$$vehicle-autoware-1 bash -lc \
+					"source /opt/ros/humble/setup.bash && ROS_DOMAIN_ID=$$domain ros2 service list" \
+					2>/dev/null | grep -q '/simple_pure_pursuit_node/ga/set_enabled' || ready=false; \
+			done; \
+		done; \
+		$$ready && break; sleep 1; \
+	done; \
+	$$ready || { echo "Shared AWSIM pool did not become ready"; exit 1; }
+	GA_CONFIG=$(GA_POOL_CONFIG_CONTAINER) docker compose up -d --force-recreate ga-runner
+	$(MAKE) ga-shared-rviz
+	@echo "GA pool started: $(ENV_COUNT) environment(s), $$(( $(ENV_COUNT) * 4 )) concurrent candidates"
 
 ga-joint:
 	$(MAKE) down
@@ -249,9 +309,11 @@ ga-parallel-rviz:
 
 ga-parallel-status:
 	@docker compose ps ga-runner rosbag-cleaner
-	@GA_WORKER_ID=worker-1 docker compose -f docker-compose.ga-worker.yml -p ga-w1 ps
-	@GA_WORKER_ID=worker-2 docker compose -f docker-compose.ga-worker.yml -p ga-w2 ps
-	@GA_WORKER_ID=worker-3 docker compose -f docker-compose.ga-worker.yml -p ga-w3 ps
+	@count=$$(cat output/ga-pool/env-count 2>/dev/null || echo $(ENV_COUNT)); \
+	for environment in $$(seq 1 $$count); do \
+		docker compose -p ga-env$$environment ps; \
+		for vehicle in $$(seq 1 4); do docker compose -p ga-env$$environment-d$$vehicle ps; done; \
+	done
 	@latest=$$(find aichallenge/ml_workspace/genetic_algorithm/runs -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-); \
 	if [ -n "$$latest" ]; then echo "latest_run=$$latest"; fi
 
@@ -260,9 +322,12 @@ ga-parallel-logs:
 
 ga-parallel-stop:
 	-docker compose stop ga-runner
-	-GA_WORKER_ID=worker-1 docker compose -f docker-compose.ga-worker.yml -p ga-w1 down --remove-orphans
-	-GA_WORKER_ID=worker-2 docker compose -f docker-compose.ga-worker.yml -p ga-w2 down --remove-orphans
-	-GA_WORKER_ID=worker-3 docker compose -f docker-compose.ga-worker.yml -p ga-w3 down --remove-orphans
+	-docker compose stop rviz2
+	@count=$$(cat output/ga-pool/env-count 2>/dev/null || echo $(ENV_COUNT)); \
+	for environment in $$(seq 1 $$count); do \
+		for vehicle in $$(seq 1 4); do docker compose -p ga-env$$environment-d$$vehicle down --remove-orphans; done; \
+		docker compose -p ga-env$$environment down --remove-orphans; \
+	done
 
 dev2: SIM_MODE := 2p
 dev3: SIM_MODE := 3p

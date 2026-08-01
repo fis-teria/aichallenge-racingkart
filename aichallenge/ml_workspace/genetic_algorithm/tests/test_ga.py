@@ -205,6 +205,61 @@ def test_shared_awsim_evaluator_collects_four_calls(tmp_path):
     assert {result["candidate_id"] for result in results} == set(observed[0])
 
 
+def test_shared_awsim_pool_splits_eight_calls_between_environments(tmp_path):
+    evaluator = SharedAwsimBatchEvaluator(
+        {
+            "environments": [
+                {
+                    "name": "env1",
+                    "admin_domain_id": 0,
+                    "vehicle_domain_ids": [1, 2, 3, 4],
+                },
+                {
+                    "name": "env2",
+                    "admin_domain_id": 10,
+                    "vehicle_domain_ids": [11, 12, 13, 14],
+                },
+            ],
+            "batch_collect_timeout_sec": 0.05,
+            "batch_barrier_timeout_sec": 1.0,
+        },
+        timeout_sec=2.0,
+        run_dir=tmp_path,
+    )
+    observed = []
+
+    def fake_environment(requests, environment):
+        observed.append(
+            (
+                environment["name"],
+                environment["admin_domain_id"],
+                [request[0] for request in requests],
+            )
+        )
+        return [
+            {"completed": True, "candidate_id": request[0]}
+            for request in requests
+        ]
+
+    evaluator._execute_environment = fake_environment
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(
+            executor.map(
+                lambda index: evaluator.evaluate(
+                    f"candidate-{index}", f"hash-{index}", {"a": index}, 0
+                ),
+                range(8),
+            )
+        )
+    assert {(name, admin) for name, admin, _ in observed} == {
+        ("env1", 0), ("env2", 10)
+    }
+    assert all(len(candidates) == 4 for _, _, candidates in observed)
+    assert {result["candidate_id"] for result in results} == {
+        f"candidate-{index}" for index in range(8)
+    }
+
+
 def test_speed_diagnostic_helpers_and_html():
     assert finite_mean([]) == 0.0
     assert finite_mean([1.0, 3.0]) == 2.0
@@ -290,6 +345,35 @@ def test_shared_awsim_config_requires_one_worker_per_domain():
         assert "domain count" in str(error)
     else:
         raise AssertionError("mismatched shared-AWSIM concurrency was accepted")
+
+
+def test_shared_awsim_pool_config_requires_unique_domains():
+    config = {
+        "run": {
+            "population_size": 16,
+            "generations": 1,
+            "elite_count": 1,
+            "parallel_workers": 8,
+        },
+        "evaluator": {
+            "mode": "shared_awsim_batch",
+            "environments": [
+                {"admin_domain_id": 0, "vehicle_domain_ids": [1, 2, 3, 4]},
+                {"admin_domain_id": 10, "vehicle_domain_ids": [11, 12, 13, 14]},
+            ],
+        },
+        "baseline": {"a": 0.5},
+        "search_space": {"a": {"min": 0.0, "max": 1.0}},
+        "fitness": {},
+    }
+    validate_config(config)
+    config["evaluator"]["environments"][1]["vehicle_domain_ids"][0] = 1
+    try:
+        validate_config(config)
+    except ValueError as error:
+        assert "unique vehicle domains" in str(error)
+    else:
+        raise AssertionError("duplicate pool vehicle domains were accepted")
 
 
 def test_dashboard_rejects_reset_lap_timer_and_uses_repeat_median():

@@ -14,6 +14,8 @@ x-autoware-base: &autoware-base
     - RUN_MODE=${RUN_MODE:-}
     - SIM_MODE=${SIM_MODE:-}
     - AWSIM_HEADLESS=${AWSIM_HEADLESS:-false}
+    - AWSIM_ADMIN_DOMAIN_ID=${AWSIM_ADMIN_DOMAIN_ID:-0}
+    - GA_RACE_CONFIG=${GA_RACE_CONFIG:-}
     - CMD=${CMD:-}
     - COLCON_TRACE=${COLCON_TRACE:-}
     - ROS_HOME=${ROS_HOME:-}

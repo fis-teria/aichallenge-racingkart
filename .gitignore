@@ -22,3 +22,5 @@ doc/tmp/*
 /Plan.md
 /PR.md
 /CLAUDE.md
+output/ga-pool/
+aichallenge/simulator/AWSIM/AWSIM_Data/StreamingAssets/RaceConfig/ga-pool-env*.yaml

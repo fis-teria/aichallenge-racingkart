@@ -35,10 +35,26 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("elite_count must be smaller than population_size")
     evaluator = config["evaluator"]
     if evaluator.get("mode") == "shared_awsim_batch":
-        domains = [int(value) for value in evaluator.get("vehicle_domain_ids", [])]
+        environments = evaluator.get("environments", [])
+        if environments:
+            domains = [
+                int(domain)
+                for environment in environments
+                for domain in environment.get("vehicle_domain_ids", [])
+            ]
+            admin_domains = [
+                int(environment.get("admin_domain_id", 0))
+                for environment in environments
+            ]
+            if len(admin_domains) != len(set(admin_domains)):
+                raise ValueError(
+                    "shared_awsim_batch requires unique environment admin domains"
+                )
+        else:
+            domains = [int(value) for value in evaluator.get("vehicle_domain_ids", [])]
         if not domains or len(domains) != len(set(domains)):
             raise ValueError(
-                "shared_awsim_batch requires unique evaluator.vehicle_domain_ids"
+                "shared_awsim_batch requires unique vehicle domains"
             )
         if int(run.get("parallel_workers", 1)) != len(domains):
             raise ValueError(
