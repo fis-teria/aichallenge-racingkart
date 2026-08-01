@@ -189,4 +189,12 @@ services:
 #### remote visualization services ####
   rviz2:
     <<: *autoware-base 
-    command: ["bash", "-lc", "exec /aichallenge/utils/run_rviz.bash remote"]
+    command:
+      - bash
+      - -lc
+      - >-
+        source /opt/ros/humble/setup.bash &&
+        source /aichallenge/workspace/install/setup.bash &&
+        python3 /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/script/ga_ghost4_visualizer.py
+        >/tmp/ga_ghost4_visualizer.log 2>&1 &
+        exec /aichallenge/utils/run_rviz.bash remote

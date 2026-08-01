@@ -249,6 +249,13 @@ display and Mutter authority automatically, so RViz opens on the GA host's
 logged-in desktop. Use `make ga-shared-rviz` to restart RViz without restarting
 the GA.
 
+The shared RViz view also aggregates `/localization/kinematic_state` from ROS
+domains 1 through 4 into `/ga/ghost4/markers` on domain 1. The comparison layer
+shows each collision-free vehicle, its current candidate ID and speed, and a
+color-coded recent trail. Red, blue, green, and yellow identify domains 1, 2,
+3, and 4 respectively. This visualization is read-only and does not relay or
+modify control topics.
+
 Set `run.generations` to `0` to continue creating generations until the GA
 runner is stopped manually. A positive value keeps the original finite
 generation limit. Completed generations are checkpointed normally, so an

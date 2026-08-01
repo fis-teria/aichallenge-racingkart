@@ -115,6 +115,20 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /map/vector_map_marker
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: GA Ghost4 Comparison
+      Namespaces:
+        ga_ghost4_label: true
+        ga_ghost4_trail: true
+        ga_ghost4_vehicle: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ga/ghost4/markers
+      Value: true
     - Alpha: 0.9990000128746033
       Axes Length: 0.0010000000474974513
       Axes Radius: 0.30000001192092896
