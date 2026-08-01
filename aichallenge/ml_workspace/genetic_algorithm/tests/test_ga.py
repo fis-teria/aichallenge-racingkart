@@ -260,6 +260,50 @@ def test_shared_awsim_pool_splits_eight_calls_between_environments(tmp_path):
     }
 
 
+def test_shared_awsim_partial_batch_marks_unassigned_domains_idle(tmp_path):
+    evaluator = SharedAwsimBatchEvaluator(
+        {
+            "environments": [
+                {
+                    "name": "env1",
+                    "admin_domain_id": 0,
+                    "vehicle_domain_ids": [1, 2, 3, 4],
+                },
+                {
+                    "name": "env2",
+                    "admin_domain_id": 10,
+                    "vehicle_domain_ids": [11, 12, 13, 14],
+                },
+            ],
+            "batch_collect_timeout_sec": 0.05,
+            "batch_barrier_timeout_sec": 1.0,
+        },
+        timeout_sec=2.0,
+        run_dir=tmp_path,
+    )
+    idle_domains = []
+    observed = []
+    evaluator._set_domain_idle = idle_domains.append
+
+    def fake_environment(requests, environment):
+        observed.append((environment["name"], [item[0] for item in requests]))
+        return [{"candidate_id": item[0]} for item in requests]
+
+    evaluator._execute_environment = fake_environment
+    results = evaluator._execute_batch(
+        [
+            ("candidate-a", "hash-a", {"a": 1.0}, 0),
+            ("candidate-b", "hash-b", {"a": 2.0}, 0),
+        ]
+    )
+
+    assert observed == [("env1", ["candidate-a", "candidate-b"])]
+    assert set(idle_domains) == {3, 4, 11, 12, 13, 14}
+    assert [result["candidate_id"] for result in results] == [
+        "candidate-a", "candidate-b"
+    ]
+
+
 def test_speed_diagnostic_helpers_and_html():
     assert finite_mean([]) == 0.0
     assert finite_mean([1.0, 3.0]) == 2.0

@@ -458,6 +458,40 @@ class SharedAwsimBatchEvaluator:
         with ThreadPoolExecutor(max_workers=len(requests)) as executor:
             return list(executor.map(run_one, zip(evaluators, requests)))
 
+    def _set_domain_idle(self, domain_id: int) -> None:
+        """Disable an unassigned vehicle and expose its idle state to RViz."""
+        node = self.config["ros"]["node_name"].rstrip("/")
+        env = os.environ.copy()
+        env["ROS_DOMAIN_ID"] = str(domain_id)
+        commands = (
+            [
+                "ros2", "service", "call", f"{node}/ga/set_enabled",
+                "std_srvs/srv/SetBool", "{data: false}",
+            ],
+            ["ros2", "param", "set", node, "ga_candidate_id", "IDLE"],
+        )
+        for command in commands:
+            completed = subprocess.run(
+                command,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=20.0,
+                check=False,
+            )
+            compact_output = completed.stdout.replace(" ", "").lower()
+            if completed.returncode != 0 or any(
+                marker in compact_output
+                for marker in (
+                    "successful:false", "success:false",
+                    "successful=false", "success=false",
+                )
+            ):
+                raise InfrastructureError(
+                    f"failed to mark ROS domain {domain_id} idle: "
+                    f"{' '.join(command)}\n{completed.stdout}\n{completed.stderr}"
+                )
+
     def _execute_batch(self, requests: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
         assignments: list[tuple[list[tuple[Any, ...]], dict[str, Any]]] = []
         offset = 0
@@ -474,6 +508,20 @@ class SharedAwsimBatchEvaluator:
                 f"shared AWSIM pool capacity {self.capacity} is smaller than "
                 f"batch size {len(requests)}"
             )
+        assigned_domains = {
+            int(domain)
+            for assigned_requests, environment in assignments
+            for domain in environment["vehicle_domain_ids"][:len(assigned_requests)]
+        }
+        idle_domains = [
+            int(domain)
+            for environment in self.environments
+            for domain in environment["vehicle_domain_ids"]
+            if int(domain) not in assigned_domains
+        ]
+        if idle_domains:
+            with ThreadPoolExecutor(max_workers=len(idle_domains)) as executor:
+                list(executor.map(self._set_domain_idle, idle_domains))
         with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
             grouped = list(
                 executor.map(
