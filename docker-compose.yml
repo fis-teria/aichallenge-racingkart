@@ -25,6 +25,7 @@ x-autoware-base: &autoware-base
     - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
     - GA_EXPERIMENT_MODE=${GA_EXPERIMENT_MODE:-false}
     - GA_CONFIG=${GA_CONFIG:-/aichallenge/ml_workspace/genetic_algorithm/config/experiment_ros2.yaml}
+    - GA_POOL_CONFIG=${GA_POOL_CONFIG:-/output/ga-pool/experiment.json}
   volumes:
     - ./output:${OUTPUT_ROOT:-/output}
     - ./aichallenge:/aichallenge

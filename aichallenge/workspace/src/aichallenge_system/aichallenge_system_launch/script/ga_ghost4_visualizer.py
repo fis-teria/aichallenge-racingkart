@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate four isolated GA vehicle domains into one RViz MarkerArray."""
+"""Aggregate every shared-AWSIM GA vehicle domain into one RViz MarkerArray."""
 
 from __future__ import annotations
 
@@ -10,18 +10,62 @@ import queue
 import signal
 import time
 from collections import deque
+import json
+from pathlib import Path
 
 
 ODOMETRY_TOPIC = "/localization/kinematic_state"
 MARKER_TOPIC = "/ga/ghost4/markers"
 CONTROLLER_NODE = "/simple_pure_pursuit_node"
-DOMAINS = (1, 2, 3, 4)
-COLORS = {
-    1: (0.95, 0.20, 0.20),
-    2: (0.20, 0.55, 1.00),
-    3: (0.20, 0.90, 0.35),
-    4: (1.00, 0.75, 0.10),
-}
+DEFAULT_POOL_CONFIG = "/output/ga-pool/experiment.json"
+SLOT_COLORS = (
+    (0.95, 0.20, 0.20),
+    (0.20, 0.55, 1.00),
+    (0.20, 0.90, 0.35),
+    (1.00, 0.75, 0.10),
+)
+
+
+def _load_vehicle_specs(config_path: str) -> list[dict[str, object]]:
+    """Return environment-aware vehicle specs, with legacy domains as fallback."""
+    try:
+        data = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        environments = data["evaluator"]["environments"]
+        if not environments:
+            raise ValueError("evaluator.environments is empty")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        print(
+            f"[ga-rviz] cannot read pool config {config_path}: {error}; "
+            "falling back to ROS domains 1-4",
+            flush=True,
+        )
+        environments = [{"name": "env1", "vehicle_domain_ids": [1, 2, 3, 4]}]
+
+    specs = []
+    seen_domains = set()
+    for environment_index, environment in enumerate(environments, start=1):
+        environment_name = str(environment.get("name") or f"env{environment_index}")
+        domains = environment.get("vehicle_domain_ids", [])
+        for slot_index, value in enumerate(domains):
+            domain_id = int(value)
+            if domain_id in seen_domains:
+                raise ValueError(f"duplicate vehicle ROS domain {domain_id}")
+            seen_domains.add(domain_id)
+            brightness = max(0.55, 1.0 - 0.22 * (environment_index - 1))
+            base_color = SLOT_COLORS[slot_index % len(SLOT_COLORS)]
+            specs.append(
+                {
+                    "domain_id": domain_id,
+                    "environment_index": environment_index,
+                    "environment_name": environment_name,
+                    "slot_index": slot_index + 1,
+                    "color": tuple(component * brightness for component in base_color),
+                    "z_offset": 0.12 * (environment_index - 1),
+                }
+            )
+    if not specs:
+        raise ValueError("pool config contains no vehicle domains")
+    return specs
 
 
 def _replace_latest(output: mp.Queue, value: tuple) -> None:
@@ -111,26 +155,35 @@ def _make_color(color, alpha):
 
 def main() -> None:
     mp.set_start_method("spawn")
+    config_path = os.environ.get("GA_POOL_CONFIG", DEFAULT_POOL_CONFIG)
+    vehicle_specs = _load_vehicle_specs(config_path)
+    domains = tuple(int(spec["domain_id"]) for spec in vehicle_specs)
+    specs_by_domain = {int(spec["domain_id"]): spec for spec in vehicle_specs}
+    publisher_domain = domains[0]
+    print(
+        f"[ga-rviz] visualizing {len(domains)} vehicles from {config_path}: {domains}",
+        flush=True,
+    )
     stop = mp.Event()
-    outputs = {domain: mp.Queue(maxsize=1) for domain in DOMAINS}
+    outputs = {domain: mp.Queue(maxsize=1) for domain in domains}
     collectors = [
         mp.Process(target=_collect_domain, args=(domain, outputs[domain], stop), daemon=True)
-        for domain in DOMAINS
+        for domain in domains
     ]
     for collector in collectors:
         collector.start()
 
-    os.environ["ROS_DOMAIN_ID"] = "1"
+    os.environ["ROS_DOMAIN_ID"] = str(publisher_domain)
     import rclpy
     from geometry_msgs.msg import Point
     from visualization_msgs.msg import Marker, MarkerArray
 
-    rclpy.init(domain_id=1)
-    node = rclpy.create_node("ga_ghost4_visualizer")
+    rclpy.init(domain_id=publisher_domain)
+    node = rclpy.create_node("ga_pool_visualizer")
     publisher = node.create_publisher(MarkerArray, MARKER_TOPIC, 1)
     latest = {}
-    histories = {domain: deque(maxlen=300) for domain in DOMAINS}
-    last_history_stamp = {domain: None for domain in DOMAINS}
+    histories = {domain: deque(maxlen=300) for domain in domains}
+    last_history_stamp = {domain: None for domain in domains}
 
     def publish_markers() -> None:
         for domain, output in outputs.items():
@@ -143,10 +196,12 @@ def main() -> None:
         markers = MarkerArray()
         now_ros = node.get_clock().now().to_msg()
         now_wall = time.monotonic()
-        for domain in DOMAINS:
+        for global_index, domain in enumerate(domains, start=1):
             state = latest.get(domain)
             if state is None:
                 continue
+            spec = specs_by_domain[domain]
+            z_offset = float(spec["z_offset"])
             (
                 _, stamp_sec, stamp_nanosec, x, y, z, qx, qy, qz, qw,
                 speed, candidate_id, received_at,
@@ -156,26 +211,29 @@ def main() -> None:
             if last_history_stamp[domain] != stamp_key:
                 if history and math.hypot(x - history[-1].x, y - history[-1].y) > 15.0:
                     history.clear()
-                point = Point(x=x, y=y, z=z + 0.15)
+                point = Point(x=x, y=y, z=z + 0.15 + z_offset)
                 if not history or math.hypot(x - history[-1].x, y - history[-1].y) >= 0.15:
                     history.append(point)
                 last_history_stamp[domain] = stamp_key
 
-            color = COLORS[domain]
+            color = spec["color"]
+            environment_index = int(spec["environment_index"])
+            environment_name = str(spec["environment_name"])
             stale = now_wall - received_at > 1.0
             alpha = 0.25 if stale else 0.88
-            base_id = domain * 10
+            base_id = global_index * 10
+            namespace = f"ga_pool_{environment_name}"
 
             vehicle = Marker()
             vehicle.header.frame_id = "map"
             vehicle.header.stamp = now_ros
-            vehicle.ns = "ga_ghost4_vehicle"
+            vehicle.ns = namespace
             vehicle.id = base_id
             vehicle.type = Marker.CUBE
             vehicle.action = Marker.ADD
             vehicle.pose.position.x = x
             vehicle.pose.position.y = y
-            vehicle.pose.position.z = z + 0.32
+            vehicle.pose.position.z = z + 0.32 + z_offset
             vehicle.pose.orientation.x = qx
             vehicle.pose.orientation.y = qy
             vehicle.pose.orientation.z = qz
@@ -188,7 +246,7 @@ def main() -> None:
 
             trail = Marker()
             trail.header = vehicle.header
-            trail.ns = "ga_ghost4_trail"
+            trail.ns = namespace
             trail.id = base_id + 1
             trail.type = Marker.LINE_STRIP
             trail.action = Marker.ADD
@@ -199,18 +257,21 @@ def main() -> None:
 
             label = Marker()
             label.header = vehicle.header
-            label.ns = "ga_ghost4_label"
+            label.ns = namespace
             label.id = base_id + 2
             label.type = Marker.TEXT_VIEW_FACING
             label.action = Marker.ADD
             label.pose.position.x = x
             label.pose.position.y = y
-            label.pose.position.z = z + 1.6
+            label.pose.position.z = z + 1.6 + z_offset
             label.pose.orientation.w = 1.0
             label.scale.z = 0.65
             label.color = _make_color(color, 1.0 if not stale else 0.4)
             suffix = " [STALE]" if stale else ""
-            label.text = f"D{domain}  {candidate_id}  {speed * 3.6:.1f} km/h{suffix}"
+            label.text = (
+                f"E{environment_index}-D{domain}  {candidate_id}  "
+                f"{speed * 3.6:.1f} km/h{suffix}"
+            )
             markers.markers.append(label)
 
         publisher.publish(markers)

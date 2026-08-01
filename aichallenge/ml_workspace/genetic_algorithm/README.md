@@ -265,12 +265,17 @@ admin domain 10 and vehicle domains 11-14; later environments follow the same
 collects up to `ENV_COUNT * 4` requests, partitions them into four-candidate
 batches, and resets/starts each AWSIM independently.
 
-The shared RViz view also aggregates `/localization/kinematic_state` from ROS
-domains 1 through 4 into `/ga/ghost4/markers` on domain 1. The comparison layer
-shows each collision-free vehicle, its current candidate ID and speed, and a
-color-coded recent trail. Red, blue, green, and yellow identify domains 1, 2,
-3, and 4 respectively. This visualization is read-only and does not relay or
-modify control topics.
+The shared RViz view reads the same generated pool configuration and aggregates
+`/localization/kinematic_state` from every configured vehicle domain into
+`/ga/ghost4/markers` on the first vehicle domain. The comparison layer shows
+each collision-free vehicle, its current candidate ID and speed, and a
+color-coded recent trail. Labels include both the environment and ROS domain,
+for example `E2-D11`. Each environment has its own RViz marker namespace, so
+all of its vehicles, labels, and trails can be toggled together. The four
+colors identify the vehicle slot inside an environment; later environments use
+darker variants and a small vertical offset. This visualization is read-only
+and does not relay or modify control topics. If the generated pool
+configuration is not available, it falls back to the legacy domains 1-4 view.
 
 Set `run.generations` to `0` to continue creating generations until the GA
 runner is stopped manually. A positive value keeps the original finite
