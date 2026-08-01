@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh \
-	simulator rosbag-cleaner clean-rosbags dev ga ga-help ga-search ga-status ga-logs ga-stop ga-dashboard ga-parallel ga-joint ga-shared ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
+	simulator rosbag-cleaner clean-rosbags dev ga ga-help ga-search ga-status ga-logs ga-stop ga-dashboard ga-dashboard-serve ga-parallel ga-joint ga-shared ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
 	dev2 dev3 dev4 ga-ghost4-poc ga-ghost4-poc-stop driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
@@ -10,6 +10,8 @@ HOST_UID ?= $(shell id -u)
 HOST_GID ?= $(shell id -g)
 export HOST_UID HOST_GID
 GA_CONFIG ?= /aichallenge/ml_workspace/genetic_algorithm/config/experiment_parallel_ros2.yaml
+GA_DASHBOARD_BIND ?= 0.0.0.0
+GA_DASHBOARD_PORT ?= 18080
 # Stop host shell's ROS_DOMAIN_ID from overriding .env via compose interpolation,
 # but still honor an explicit `make foo ROS_DOMAIN_ID=N` command-line override.
 unexport ROS_DOMAIN_ID
@@ -84,6 +86,7 @@ ga-help:
 	@echo "  make ga-logs                           Follow GA runner logs"
 	@echo "  make ga-status                         Show runner and latest run directory"
 	@echo "  make ga-dashboard                      Regenerate the latest dashboard once"
+	@echo "  make ga-dashboard-serve                Serve dashboards on port 18080"
 	@echo "  make ga-shared-resume RUN_ID=<run-id>  Resume an existing shared-AWSIM run"
 	@echo "  make ga-shared-stop                    Stop shared GA and all four vehicles"
 	@echo "Legacy/separate-worker workflow:"
@@ -127,6 +130,14 @@ ga-dashboard:
 	PYTHONPATH=aichallenge/ml_workspace/genetic_algorithm/src python3 -m ga_pure_pursuit.progress_dashboard \
 		--run-dir "$$latest" --output "$$latest/dashboard.html"; \
 	echo "Open: $$latest/dashboard.html"
+
+ga-dashboard-serve: ga-dashboard
+	@latest=$$(find aichallenge/ml_workspace/genetic_algorithm/runs -mindepth 1 -maxdepth 1 -type d -name '20*' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-); \
+	relative=$${latest#./}; \
+	echo "Dashboard server: http://$(GA_DASHBOARD_BIND):$(GA_DASHBOARD_PORT)/$$relative/dashboard.html"; \
+	echo "From another PC, replace $(GA_DASHBOARD_BIND) with this host's IP address."; \
+	echo "Stop the server with Ctrl-C."; \
+	python3 -m http.server $(GA_DASHBOARD_PORT) --bind $(GA_DASHBOARD_BIND) --directory .
 
 ga-ipc-clean:
 	@find aichallenge/ml_workspace/genetic_algorithm/ipc \

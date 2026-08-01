@@ -183,6 +183,9 @@ make ga-status
 # The dashboard is refreshed automatically; this forces a one-time redraw.
 make ga-dashboard
 
+# Generate the latest dashboard and serve it over HTTP.
+make ga-dashboard-serve
+
 # Stop the runner, AWSIM, and all four Autoware domains.
 make ga-shared-stop
 
@@ -219,6 +222,23 @@ PYTHONPATH=aichallenge/ml_workspace/genetic_algorithm/src python3 \
 ```
 
 The browser refreshes the generated page every 15 seconds.
+
+On a remote GA host, serve the generated dashboards with:
+
+```bash
+make ga-dashboard-serve
+```
+
+Then open the URL printed by the command from another PC, replacing
+`0.0.0.0` with the GA host's IP address. The defaults are bind address
+`0.0.0.0` and port `18080`; override them when needed:
+
+```bash
+make ga-dashboard-serve GA_DASHBOARD_BIND=127.0.0.1 GA_DASHBOARD_PORT=18080
+```
+
+The loopback-only form is suitable for SSH port forwarding with
+`ssh -L 18080:127.0.0.1:18080 USER@HOST`.
 
 Set `run.generations` to `0` to continue creating generations until the GA
 runner is stopped manually. A positive value keeps the original finite
