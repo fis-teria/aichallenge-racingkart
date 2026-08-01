@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh \
-	simulator rosbag-cleaner clean-rosbags dev ga ga-help ga-search ga-status ga-logs ga-stop ga-dashboard ga-dashboard-serve ga-parallel ga-joint ga-shared ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
+	simulator rosbag-cleaner clean-rosbags dev ga ga-help ga-search ga-status ga-logs ga-stop ga-dashboard ga-dashboard-serve ga-parallel ga-joint ga-shared ga-shared-rviz ga-shared-resume ga-shared-stop ga-parallel-resume ga-ipc-clean ga-workers-start ga-parallel-rviz ga-parallel-status ga-parallel-logs ga-parallel-stop \
 	dev2 dev3 dev4 ga-ghost4-poc ga-ghost4-poc-stop driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
@@ -83,6 +83,7 @@ ga:
 ga-help:
 	@echo "Current shared-AWSIM workflow (recommended):"
 	@echo "  make ga-shared                         Start one AWSIM + four ghost vehicles + GA"
+	@echo "  make ga-shared-rviz                    Start RViz for shared vehicle/domain 1"
 	@echo "  make ga-logs                           Follow GA runner logs"
 	@echo "  make ga-status                         Show runner and latest run directory"
 	@echo "  make ga-dashboard                      Regenerate the latest dashboard once"
@@ -189,10 +190,30 @@ ga-shared:
 	$$ready || { echo "Shared AWSIM Autoware domains did not become ready"; exit 1; }
 	GA_CONFIG=/aichallenge/ml_workspace/genetic_algorithm/config/experiment_shared_ghost4_ros2.yaml \
 		docker compose up -d --force-recreate ga-runner
+	$(MAKE) ga-shared-rviz
 	@echo "Shared-AWSIM four-candidate GA started. Follow it with: make ga-logs"
+
+ga-shared-rviz:
+	@uid=$$(id -u); \
+	display="$${DISPLAY:-}"; \
+	if [ -z "$$display" ]; then \
+		display=$$(find /tmp/.X11-unix -maxdepth 1 -type s -name 'X[0-9]*' -printf '%f\n' 2>/dev/null \
+			| sed 's/^X/:/' | sort -t: -k2,2n | head -1); \
+	fi; \
+	xauthority="$${XAUTHORITY:-}"; \
+	if [ ! -f "$$xauthority" ]; then \
+		xauthority=$$(find "/run/user/$$uid" -maxdepth 1 -type f -name '.mutter-Xwaylandauth.*' \
+			-print -quit 2>/dev/null); \
+	fi; \
+	test -n "$$display" || { echo "No desktop Xwayland display found; log in to the host desktop first"; exit 2; }; \
+	test -f "$$xauthority" || { echo "No Xwayland authority found for uid $$uid"; exit 2; }; \
+	echo "Starting RViz on $$display with $$xauthority"; \
+	DISPLAY="$$display" XAUTHORITY="$$xauthority" ROS_DOMAIN_ID=1 docker compose up -d --force-recreate rviz2
+	@echo "RViz started for shared vehicle/domain 1 on the host desktop."
 
 ga-shared-stop:
 	-docker compose stop ga-runner
+	-docker compose stop rviz2
 	$(MAKE) ga-ghost4-poc-stop
 
 ga-shared-resume:

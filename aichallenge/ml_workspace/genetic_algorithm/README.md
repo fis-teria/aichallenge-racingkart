@@ -176,6 +176,9 @@ The current four-candidate shared-AWSIM workflow is:
 # Start one AWSIM, four independent ghost vehicles, and the GA runner.
 make ga-shared
 
+# `make ga-shared` also opens RViz for vehicle/domain 1. Restart only RViz with:
+make ga-shared-rviz
+
 # Monitor the runner and locate the latest run.
 make ga-logs
 make ga-status
@@ -239,6 +242,12 @@ make ga-dashboard-serve GA_DASHBOARD_BIND=127.0.0.1 GA_DASHBOARD_PORT=18080
 
 The loopback-only form is suitable for SSH port forwarding with
 `ssh -L 18080:127.0.0.1:18080 USER@HOST`.
+
+For the shared four-vehicle workflow, `make ga-shared` also starts RViz for
+vehicle/domain 1. When invoked over SSH it detects the active host Xwayland
+display and Mutter authority automatically, so RViz opens on the GA host's
+logged-in desktop. Use `make ga-shared-rviz` to restart RViz without restarting
+the GA.
 
 Set `run.generations` to `0` to continue creating generations until the GA
 runner is stopped manually. A positive value keeps the original finite
