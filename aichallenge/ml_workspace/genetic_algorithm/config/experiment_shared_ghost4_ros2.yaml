@@ -76,7 +76,8 @@
     "training_run_dirs": [
       "/aichallenge/ml_workspace/genetic_algorithm/runs/20260730T191550Z",
       "/aichallenge/ml_workspace/genetic_algorithm/runs/20260730T224048Z",
-      "/aichallenge/ml_workspace/genetic_algorithm/runs/20260801T142454Z"
+      "/aichallenge/ml_workspace/genetic_algorithm/runs/20260801T142454Z",
+      "/aichallenge/ml_workspace/genetic_algorithm/runs/20260802T032538Z"
     ],
     "initial_seed_count": 10,
     "minimum_training_samples": 40,
@@ -88,12 +89,15 @@
   "phase2": {
     "enabled": true,
     "training_run_dirs": [
-      "/aichallenge/ml_workspace/genetic_algorithm/runs/20260801T142454Z"
+      "/aichallenge/ml_workspace/genetic_algorithm/runs/20260801T142454Z",
+      "/aichallenge/ml_workspace/genetic_algorithm/runs/20260802T032538Z"
     ],
     "archive_bins": [8, 8],
     "feasibility_neighbors": 16,
     "failure_penalty": 200000.0,
     "novelty_fraction": 0.2,
+    "minimum_emitter_pool_fraction": 0.1,
+    "minimum_selected_per_emitter": 2,
     "trust_region_radius": 0.06,
     "path_novelty_radius": 0.16
   },

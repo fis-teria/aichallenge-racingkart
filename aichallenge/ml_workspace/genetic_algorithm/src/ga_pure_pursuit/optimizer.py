@@ -143,7 +143,7 @@ class Optimizer:
             "generation": generation,
             "population": population,
             "random_state": repr(self.rng.getstate()),
-            "population_emitters": emitters or ["ga"] * len(population),
+            "population_emitters": emitters or ["seed"] * len(population),
             "emitter_bandit": self.emitter_bandit.state(),
         }
         target = self.run_dir / "checkpoint" / f"generation_{generation:05d}.json"
@@ -156,7 +156,7 @@ class Optimizer:
         data = json.loads(checkpoints[-1].read_text(encoding="utf-8"))
         self.rng.setstate(ast.literal_eval(data["random_state"]))
         self.emitter_bandit.restore(data.get("emitter_bandit", {}))
-        self._resumed_emitters = data.get("population_emitters", ["ga"] * len(data["population"]))
+        self._resumed_emitters = data.get("population_emitters", ["seed"] * len(data["population"]))
         return int(data["generation"]) + 1, data["population"]
 
     def _evaluate(self, generation: int, index: int, genome: dict[str, float]) -> float:
@@ -221,7 +221,7 @@ class Optimizer:
                 self.rng,
                 self._initial_seeds(),
             )
-            population_emitters = ["ga"] * len(population)
+            population_emitters = ["seed"] * len(population)
         generation_limit = int(settings["generations"])
         generation_numbers = (
             itertools.count(start_generation)
@@ -311,8 +311,15 @@ class Optimizer:
             candidate_emitters: list[str] = []
             phase2_settings = self.config.get("phase2", {})
             archive_parents = self.archive.genomes()
+            emitter_allocation = (
+                self.emitter_bandit.allocation(
+                    breeding_limit, self.rng,
+                    float(phase2_settings.get("minimum_emitter_pool_fraction", 0.1)),
+                )
+                if self.phase2_enabled else ["ga"] * breeding_limit
+            )
             while len(candidate_pool) < breeding_limit:
-                emitter = self.emitter_bandit.choose() if self.phase2_enabled else "ga"
+                emitter = emitter_allocation[len(candidate_pool)]
                 first = tournament(ranked, int(settings["tournament_size"]), self.rng)
                 second = tournament(ranked, int(settings["tournament_size"]), self.rng)
                 if emitter == "trust_region":
@@ -340,20 +347,17 @@ class Optimizer:
                     continue
                 if self.rng.random() < float(settings["crossover_probability"]):
                     first, second = blend_crossover(first, second, self.bounds, self.rng)
-                for child in (first, second):
-                    candidate_pool.append(
-                        mutate(
-                            child,
-                            self.bounds,
-                            mutation_probability,
-                            mutation_sigma,
-                            self.rng,
-                            active_names,
-                        )
+                candidate_pool.append(
+                    mutate(
+                        first,
+                        self.bounds,
+                        mutation_probability,
+                        mutation_sigma,
+                        self.rng,
+                        active_names,
                     )
-                    candidate_emitters.append("ga")
-                    if len(candidate_pool) >= breeding_limit:
-                        break
+                )
+                candidate_emitters.append("ga")
             for _ in range(immigrant_count):
                 candidate_pool.append(
                     mutate(
@@ -383,6 +387,7 @@ class Optimizer:
                         self.feasibility, selection_count, self.rng,
                         float(phase2_settings.get("failure_penalty", 200000.0)),
                         float(phase2_settings.get("novelty_fraction", 0.2)),
+                        int(phase2_settings.get("minimum_selected_per_emitter", 2)),
                     )
                     selected = [item[0] for item in selected_pairs]
                     selected_emitters = [item[1] for item in selected_pairs]
@@ -412,7 +417,7 @@ class Optimizer:
                         flush=True,
                     )
             population = elites + selected
-            population_emitters = ["ga"] * len(elites) + selected_emitters
+            population_emitters = ["elite"] * len(elites) + selected_emitters
             if (generation + 1) % int(settings.get("checkpoint_every", 1)) == 0:
                 self._checkpoint(generation, population, population_emitters)
         best = self.storage.best(1)[0]

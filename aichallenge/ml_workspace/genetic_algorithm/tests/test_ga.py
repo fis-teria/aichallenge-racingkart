@@ -199,6 +199,31 @@ def test_emitter_bandit_explores_every_emitter():
     assert {bandit.choose() for _ in range(4)} == {"ga", "trust", "novelty", "random"}
 
 
+def test_emitter_bandit_counts_only_evaluated_candidates_and_keeps_minimum_pool_share():
+    bandit = EmitterBandit(["ga", "trust", "novelty", "random"])
+    allocation = bandit.allocation(100, random.Random(3), minimum_fraction=0.1)
+    assert bandit.pulls == {name: 0 for name in bandit.names}
+    assert all(allocation.count(name) >= 10 for name in bandit.names)
+    bandit.update("trust", 1.0)
+    assert bandit.pulls["trust"] == 1
+
+
+def test_phase2_selection_guarantees_each_emitter_a_real_evaluation():
+    bounds = {"a": Bounds(0.0, 1.0)}
+    fitness = KnnSurrogate(bounds, {"a": 0.5}, neighbors=2)
+    feasibility = KnnFeasibilityModel(bounds, {"a": 0.5}, neighbors=2)
+    observations = [Observation({"a": value / 10}, value, 1.0, {}) for value in range(11)]
+    fitness.fit([(item.genome, item.fitness) for item in observations])
+    feasibility.fit(observations)
+    candidates = [({"a": (index + offset) / 100}, emitter)
+                  for index, emitter in enumerate(("ga", "trust", "novelty", "random"))
+                  for offset in range(1, 10)]
+    selected = select_feasible_candidates(
+        candidates, fitness, feasibility, 8, random.Random(4), minimum_per_emitter=1
+    )
+    assert {emitter for _, emitter in selected} == {"ga", "trust", "novelty", "random"}
+
+
 def test_lateral_tracking_penalty_has_soft_and_hard_regions():
     weights = {
         "invalid": 1_000_000, "unfinished": 200_000, "collision": 20_000,

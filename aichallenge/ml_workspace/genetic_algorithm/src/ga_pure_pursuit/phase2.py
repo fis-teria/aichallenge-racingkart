@@ -118,24 +118,37 @@ class EmitterBandit:
         self.names = names
         self.pulls = {name: 0 for name in names}
         self.rewards = {name: 0.0 for name in names}
+        self._choice_index = 0
 
     def choose(self) -> str:
-        for name in self.names:
-            if self.pulls[name] == 0:
-                self.pulls[name] += 1
-                return name
-        total = sum(self.pulls.values())
-        chosen = max(
-            self.names,
-            key=lambda name: self.rewards[name] / self.pulls[name]
-            + math.sqrt(2.0 * math.log(total) / self.pulls[name]),
-        )
-        self.pulls[chosen] += 1
+        chosen = self.names[self._choice_index % len(self.names)]
+        self._choice_index += 1
         return chosen
+
+    def allocation(
+        self, count: int, rng: random.Random, minimum_fraction: float = 0.1
+    ) -> list[str]:
+        """Allocate a pool without changing bandit statistics.
+
+        Pulls are updated only after a candidate is physically evaluated.
+        """
+        minimum = min(count // len(self.names), max(1, round(count * minimum_fraction)))
+        allocation = [name for name in self.names for _ in range(minimum)]
+        total = max(1, sum(self.pulls.values()))
+        weights = []
+        for name in self.names:
+            pulls = self.pulls[name]
+            mean = (self.rewards[name] + 1.0) / (pulls + 2.0)
+            exploration = math.sqrt(2.0 * math.log(total + 1.0) / (pulls + 1.0))
+            weights.append(mean + exploration)
+        allocation.extend(rng.choices(self.names, weights=weights, k=count - len(allocation)))
+        rng.shuffle(allocation)
+        return allocation
 
     def update(self, name: str, reward: float) -> None:
         if name not in self.pulls:
             return
+        self.pulls[name] += 1
         self.rewards[name] += max(0.0, float(reward))
 
     def state(self) -> dict[str, Any]:
@@ -169,6 +182,7 @@ def select_feasible_candidates(
     candidates: list[tuple[dict[str, float], str]], fitness_model: Any,
     feasibility_model: KnnFeasibilityModel, count: int, rng: random.Random,
     failure_penalty: float = 200000.0, novelty_fraction: float = 0.2,
+    minimum_per_emitter: int = 0,
 ) -> list[tuple[dict[str, float], str]]:
     scored = []
     for genome, emitter in candidates:
@@ -176,8 +190,17 @@ def select_feasible_candidates(
         probability, feasibility_uncertainty = feasibility_model.predict(genome)
         acquisition = prediction + failure_penalty * (1.0 - probability)
         scored.append((genome, emitter, acquisition, uncertainty + feasibility_uncertainty))
-    exploit_count = max(1, count - round(count * novelty_fraction))
-    selected = sorted(scored, key=lambda item: item[2])[:exploit_count]
+    selected = []
+    if minimum_per_emitter > 0:
+        for emitter in sorted({item[1] for item in scored}):
+            selected.extend(sorted(
+                (item for item in scored if item[1] == emitter), key=lambda item: item[2]
+            )[:minimum_per_emitter])
+    selected = selected[:count]
+    selected_ids = {id(item[0]) for item in selected}
+    remaining = [item for item in scored if id(item[0]) not in selected_ids]
+    exploit_target = max(len(selected), count - round(count * novelty_fraction))
+    selected.extend(sorted(remaining, key=lambda item: item[2])[:exploit_target - len(selected)])
     selected_ids = {id(item[0]) for item in selected}
     remaining = [item for item in scored if id(item[0]) not in selected_ids]
     uncertain = sorted(remaining, key=lambda item: item[3], reverse=True)[: count - len(selected)]
