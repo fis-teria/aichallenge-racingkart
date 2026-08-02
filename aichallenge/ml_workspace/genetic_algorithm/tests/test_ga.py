@@ -32,6 +32,10 @@ from ga_pure_pursuit.progress_dashboard import (
 )
 from ga_pure_pursuit.config import validate_config
 from ga_pure_pursuit.surrogate import KnnSurrogate, select_candidates
+from ga_pure_pursuit.phase2 import (
+    EmitterBandit, KnnFeasibilityModel, MapElitesArchive, Observation,
+    select_feasible_candidates,
+)
 
 
 def test_repair_is_bounded_and_idempotent():
@@ -154,6 +158,45 @@ def test_cpu_surrogate_prefers_predicted_fast_candidates_and_keeps_exploration()
     assert len(selected) == 5
     assert any(item["a"] <= 0.2 for item in selected)
     assert len({item["a"] for item in selected}) == 5
+
+
+def test_phase2_feasibility_rejects_fast_but_unfinished_region():
+    bounds = {"a": Bounds(0.0, 1.0)}
+    fitness = KnnSurrogate(bounds, {"a": 0.5}, neighbors=2)
+    feasibility = KnnFeasibilityModel(bounds, {"a": 0.5}, neighbors=2)
+    observations = [
+        Observation({"a": 0.0}, 10.0, 0.0, {}),
+        Observation({"a": 0.1}, 11.0, 0.0, {}),
+        Observation({"a": 0.8}, 20.0, 1.0, {}),
+        Observation({"a": 1.0}, 21.0, 1.0, {}),
+    ]
+    fitness.fit([(item.genome, item.fitness) for item in observations])
+    feasibility.fit(observations)
+    selected = select_feasible_candidates(
+        [({"a": 0.05}, "ga"), ({"a": 0.9}, "trust_region")],
+        fitness, feasibility, 1, random.Random(2), failure_penalty=1000.0,
+        novelty_fraction=0.0,
+    )
+    assert selected[0][0]["a"] == 0.9
+
+
+def test_map_elites_keeps_best_completed_candidate_per_cell():
+    archive = MapElitesArchive((4, 4))
+    slow = Observation({"path_offset_00": 0.4}, 50.0, 1.0,
+                       {"steering_angle_rms_rad": 0.1})
+    fast = Observation({"path_offset_00": 0.45}, 45.0, 1.0,
+                       {"steering_angle_rms_rad": 0.11})
+    failed = Observation({"path_offset_00": 0.45}, 1.0, 0.0,
+                         {"steering_angle_rms_rad": 0.11})
+    assert archive.add(slow)
+    assert archive.add(fast)
+    assert not archive.add(failed)
+    assert archive.genomes() == [fast.genome]
+
+
+def test_emitter_bandit_explores_every_emitter():
+    bandit = EmitterBandit(["ga", "trust", "novelty", "random"])
+    assert {bandit.choose() for _ in range(4)} == {"ga", "trust", "novelty", "random"}
 
 
 def test_lateral_tracking_penalty_has_soft_and_hard_regions():

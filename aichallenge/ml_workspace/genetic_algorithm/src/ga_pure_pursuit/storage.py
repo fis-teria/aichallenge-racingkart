@@ -120,3 +120,33 @@ class Storage:
             (json.loads(row[0]), float(row[1]))
             for row in rows
         ]
+
+    def observations(self):
+        from .phase2 import Observation
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT c.candidate_id, c.genome_json, c.fitness, e.metrics_json "
+                "FROM candidates c JOIN episodes e ON e.candidate_id=c.candidate_id "
+                "WHERE c.status='complete' AND c.fitness IS NOT NULL "
+                "ORDER BY c.candidate_id, e.repeat_index"
+            ).fetchall()
+        grouped: dict[str, tuple[dict[str, float], float, list[dict[str, Any]]]] = {}
+        for candidate_id, genome_json, fitness, metrics_json in rows:
+            item = grouped.setdefault(
+                candidate_id, (json.loads(genome_json), float(fitness), [])
+            )
+            item[2].append(json.loads(metrics_json))
+        observations = []
+        for genome, fitness, episodes in grouped.values():
+            numeric: dict[str, float] = {}
+            keys = {key for episode in episodes for key, value in episode.items()
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)}
+            for key in keys:
+                values = [float(episode[key]) for episode in episodes
+                          if isinstance(episode.get(key), (int, float))
+                          and not isinstance(episode.get(key), bool)]
+                if values:
+                    numeric[key] = sum(values) / len(values)
+            completion = sum(bool(episode.get("completed", False)) for episode in episodes) / len(episodes)
+            observations.append(Observation(genome, fitness, completion, numeric))
+        return observations

@@ -17,6 +17,10 @@ from .genome import bounds_from_config, initialize_population, parameter_hash
 from .operators import blend_crossover, mutate, tournament
 from .storage import Storage
 from .surrogate import KnnSurrogate, load_training_samples, select_candidates
+from .phase2 import (
+    EmitterBandit, KnnFeasibilityModel, MapElitesArchive, load_observations,
+    path_novelty_candidate, select_feasible_candidates, trust_region_candidate,
+)
 
 
 def required_repeat_count(settings: dict[str, Any], metrics: dict[str, Any]) -> int:
@@ -87,6 +91,18 @@ class Optimizer:
             config["fitness"],
             set(self.bounds),
         )
+        phase2 = config.get("phase2", {})
+        self.phase2_enabled = bool(phase2.get("enabled", False))
+        emitter_names = ["ga", "trust_region", "path_novelty", "random_restart"]
+        self.emitter_bandit = EmitterBandit(emitter_names)
+        self.feasibility = KnnFeasibilityModel(
+            self.bounds, config["baseline"], int(phase2.get("feasibility_neighbors", 16))
+        )
+        training_dirs = list(surrogate_settings.get("training_run_dirs", []))
+        training_dirs.extend(phase2.get("training_run_dirs", []))
+        self.external_observations = load_observations(training_dirs, set(self.bounds))
+        self.archive = MapElitesArchive(tuple(phase2.get("archive_bins", [8, 8])))
+        self.archive.build(self.external_observations)
 
     def _initial_seeds(self) -> list[dict[str, float]]:
         seeds: list[dict[str, float]] = []
@@ -122,11 +138,13 @@ class Optimizer:
             json.dumps(self.config, indent=2, sort_keys=True), encoding="utf-8"
         )
 
-    def _checkpoint(self, generation: int, population: list[dict[str, float]]) -> None:
+    def _checkpoint(self, generation: int, population: list[dict[str, float]], emitters=None) -> None:
         data = {
             "generation": generation,
             "population": population,
             "random_state": repr(self.rng.getstate()),
+            "population_emitters": emitters or ["ga"] * len(population),
+            "emitter_bandit": self.emitter_bandit.state(),
         }
         target = self.run_dir / "checkpoint" / f"generation_{generation:05d}.json"
         target.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
@@ -137,6 +155,8 @@ class Optimizer:
             return None
         data = json.loads(checkpoints[-1].read_text(encoding="utf-8"))
         self.rng.setstate(ast.literal_eval(data["random_state"]))
+        self.emitter_bandit.restore(data.get("emitter_bandit", {}))
+        self._resumed_emitters = data.get("population_emitters", ["ga"] * len(data["population"]))
         return int(data["generation"]) + 1, data["population"]
 
     def _evaluate(self, generation: int, index: int, genome: dict[str, float]) -> float:
@@ -191,6 +211,7 @@ class Optimizer:
         resumed = self._resume_state() if self.resume else None
         if resumed:
             start_generation, population = resumed
+            population_emitters = self._resumed_emitters
         else:
             start_generation = 0
             population = initialize_population(
@@ -200,6 +221,7 @@ class Optimizer:
                 self.rng,
                 self._initial_seeds(),
             )
+            population_emitters = ["ga"] * len(population)
         generation_limit = int(settings["generations"])
         generation_numbers = (
             itertools.count(start_generation)
@@ -227,6 +249,10 @@ class Optimizer:
                     for index, genome in indexed_population
                 ]
             ranked.sort(key=lambda item: item[1])
+            if self.phase2_enabled:
+                cutoff = sorted(fitness_values)[max(0, len(fitness_values) // 4 - 1)]
+                for emitter, fitness in zip(population_emitters, fitness_values):
+                    self.emitter_bandit.update(emitter, 1.0 if fitness <= cutoff else 0.0)
             print(
                 f"generation={generation} best={ranked[0][1]:.6f} "
                 f"hash={parameter_hash(ranked[0][0])}",
@@ -282,9 +308,36 @@ class Optimizer:
             )
             breeding_limit = candidate_pool_size - immigrant_count
             candidate_pool: list[dict[str, float]] = []
+            candidate_emitters: list[str] = []
+            phase2_settings = self.config.get("phase2", {})
+            archive_parents = self.archive.genomes()
             while len(candidate_pool) < breeding_limit:
+                emitter = self.emitter_bandit.choose() if self.phase2_enabled else "ga"
                 first = tournament(ranked, int(settings["tournament_size"]), self.rng)
                 second = tournament(ranked, int(settings["tournament_size"]), self.rng)
+                if emitter == "trust_region":
+                    parent = self.rng.choice(archive_parents or elites)
+                    candidate_pool.append(trust_region_candidate(
+                        parent, self.bounds, self.rng,
+                        float(phase2_settings.get("trust_region_radius", mutation_sigma)),
+                        active_names,
+                    ))
+                    candidate_emitters.append(emitter)
+                    continue
+                if emitter == "path_novelty":
+                    parent = self.rng.choice(archive_parents or elites)
+                    candidate_pool.append(path_novelty_candidate(
+                        parent, self.bounds, self.rng,
+                        float(phase2_settings.get("path_novelty_radius", 0.16)),
+                    ))
+                    candidate_emitters.append(emitter)
+                    continue
+                if emitter == "random_restart":
+                    candidate_pool.append(initialize_population(
+                        self.config["baseline"], self.bounds, 1, self.rng
+                    )[0])
+                    candidate_emitters.append(emitter)
+                    continue
                 if self.rng.random() < float(settings["crossover_probability"]):
                     first, second = blend_crossover(first, second, self.bounds, self.rng)
                 for child in (first, second):
@@ -298,6 +351,7 @@ class Optimizer:
                             active_names,
                         )
                     )
+                    candidate_emitters.append("ga")
                     if len(candidate_pool) >= breeding_limit:
                         break
             for _ in range(immigrant_count):
@@ -311,6 +365,7 @@ class Optimizer:
                         active_names,
                     )
                 )
+                candidate_emitters.append("random_restart")
             training_samples = (
                 self.external_training_samples + self.storage.training_samples()
             )
@@ -319,14 +374,25 @@ class Optimizer:
             )
             if surrogate_enabled and len(training_samples) >= minimum_samples:
                 self.surrogate.fit(training_samples)
-                selected = select_candidates(
-                    candidate_pool,
-                    self.surrogate,
-                    selection_count,
-                    self.rng,
-                    float(surrogate_settings.get("exploit_fraction", 0.6)),
-                    float(surrogate_settings.get("uncertainty_fraction", 0.2)),
-                )
+                if self.phase2_enabled:
+                    observations = self.external_observations + self.storage.observations()
+                    self.feasibility.fit(observations)
+                    self.archive.build(observations)
+                    selected_pairs = select_feasible_candidates(
+                        list(zip(candidate_pool, candidate_emitters)), self.surrogate,
+                        self.feasibility, selection_count, self.rng,
+                        float(phase2_settings.get("failure_penalty", 200000.0)),
+                        float(phase2_settings.get("novelty_fraction", 0.2)),
+                    )
+                    selected = [item[0] for item in selected_pairs]
+                    selected_emitters = [item[1] for item in selected_pairs]
+                else:
+                    selected = select_candidates(
+                        candidate_pool, self.surrogate, selection_count, self.rng,
+                        float(surrogate_settings.get("exploit_fraction", 0.6)),
+                        float(surrogate_settings.get("uncertainty_fraction", 0.2)),
+                    )
+                    selected_emitters = [candidate_emitters[candidate_pool.index(item)] for item in selected]
                 predictions = [
                     self.surrogate.predict(candidate)[0] for candidate in selected
                 ]
@@ -338,6 +404,7 @@ class Optimizer:
                 )
             else:
                 selected = candidate_pool[:selection_count]
+                selected_emitters = candidate_emitters[:selection_count]
                 if surrogate_enabled:
                     print(
                         f"surrogate warmup samples={len(training_samples)}/"
@@ -345,8 +412,9 @@ class Optimizer:
                         flush=True,
                     )
             population = elites + selected
+            population_emitters = ["ga"] * len(elites) + selected_emitters
             if (generation + 1) % int(settings.get("checkpoint_every", 1)) == 0:
-                self._checkpoint(generation, population)
+                self._checkpoint(generation, population, population_emitters)
         best = self.storage.best(1)[0]
         (self.run_dir / "best.json").write_text(
             json.dumps(best, indent=2, sort_keys=True), encoding="utf-8"
