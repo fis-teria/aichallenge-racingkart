@@ -99,7 +99,7 @@
     "minimum_emitter_pool_fraction": 0.1,
     "minimum_selected_per_emitter": 2,
     "trust_region_radius": 0.06,
-    "path_novelty_radius": 0.16
+    "path_novelty_radius": 0.09
   },
   "baseline": {
     "lookahead_gain": 0.9506029522798438,
