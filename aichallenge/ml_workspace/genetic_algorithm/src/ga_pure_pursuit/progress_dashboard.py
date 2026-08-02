@@ -236,6 +236,52 @@ def build_data(run_dir: Path) -> dict[str, Any]:
             item["id"],
         ))
         generation_comparison.append({"generation": generation, "rows": rows})
+    if len(generation_comparison) == 2:
+        previous_rows = [
+            row for row in generation_comparison[0]["rows"]
+            if row["flying_lap"] is not None
+        ]
+        for row in generation_comparison[1]["rows"]:
+            row["reference_id"] = None
+            row["lap_delta"] = None
+            row["gene_deltas"] = {}
+            row["top_changed_genes"] = []
+            if row["flying_lap"] is None or not previous_rows:
+                continue
+
+            def normalized_gene_distance(reference: dict[str, Any]) -> float:
+                differences = []
+                for name in gene_names:
+                    current_value = row["genes"].get(name)
+                    reference_value = reference["genes"].get(name)
+                    bounds = search_space.get(name, {})
+                    width = float(bounds.get("max", 0.0)) - float(bounds.get("min", 0.0))
+                    if current_value is None or reference_value is None or width <= 0.0:
+                        continue
+                    differences.append(
+                        ((float(current_value) - float(reference_value)) / width) ** 2
+                    )
+                return sum(differences) / max(1, len(differences))
+
+            reference = min(previous_rows, key=normalized_gene_distance)
+            row["reference_id"] = reference["id"]
+            row["lap_delta"] = float(row["flying_lap"]) - float(reference["flying_lap"])
+            normalized_changes = []
+            for name in gene_names:
+                value = row["genes"].get(name)
+                reference_value = reference["genes"].get(name)
+                if value is None or reference_value is None:
+                    continue
+                delta = float(value) - float(reference_value)
+                row["gene_deltas"][name] = delta
+                bounds = search_space.get(name, {})
+                width = float(bounds.get("max", 0.0)) - float(bounds.get("min", 0.0))
+                if width > 0.0:
+                    normalized_changes.append((abs(delta) / width, name))
+            if row["lap_delta"] < 0.0:
+                row["top_changed_genes"] = [
+                    name for _, name in sorted(normalized_changes, reverse=True)[:3]
+                ]
     candidate_path = Path(best_metrics.get("candidate_path", "")) if lap_best else None
     if candidate_path and not candidate_path.exists() and str(candidate_path).startswith("/aichallenge/"):
         candidate_path = run_dir.resolve().parents[4] / str(candidate_path).removeprefix("/")
@@ -311,6 +357,7 @@ table {{border-collapse:separate;border-spacing:0;width:max-content;min-width:10
 th,td {{padding:6px 8px;border-right:1px solid #233955;border-bottom:1px solid #233955;white-space:nowrap;text-align:right}}
 th {{position:sticky;top:0;background:#17263b;color:#bcd0ea;z-index:2}} td:first-child,th:first-child {{position:sticky;left:0;text-align:left;background:#142238;z-index:1}}
 th:first-child {{z-index:3}} tr.generation-start td {{border-top:3px solid #60a5fa}} td.pending {{color:var(--muted)}}
+tr.improved td:first-child {{color:#6ee7b7}} td.gene-candidate {{background:#123d38;color:#a7f3d0;font-weight:650}} .delta-good {{color:#6ee7b7}} .delta-bad {{color:#fca5a5}} .gene-delta {{display:block;color:#93a9c5;font-size:.68rem}}
 </style>
 <h1>GA Progress Dashboard</h1><div class="sub" id="subtitle"></div>
 <div class="cards" id="cards"></div>
@@ -326,7 +373,7 @@ th:first-child {{z-index:3}} tr.generation-start td {{border-top:3px solid #60a5
  </section>
  <section class="panel"><h2>経路の変化</h2><canvas id="path"></canvas><div class="help">灰色が元経路、緑が最良経路。大きくギザギザせず、コーナーを滑らかに外→内→外へ通るのが理想。</div></section>
  <section class="panel"><h2>遺伝子の収束</h2><canvas id="genes"></canvas><div class="help">横が世代、縦が遺伝子。色が世代間で変わらなくなると収束。早すぎる収束は探索不足のサイン。</div></section>
- <section class="panel wide"><h2>N-1 / N世代 個体別Lapタイムと遺伝子</h2><div class="table-wrap"><table id="generationTable"></table></div><div class="help">最新世代Nと直前世代N-1を2周目の速い順で表示。横スクロールで全探索遺伝子を比較でき、評価中の個体は「評価中」と表示。</div></section>
+ <section class="panel wide"><h2>N-1 / N世代 個体別Lapタイムと遺伝子</h2><div class="table-wrap"><table id="generationTable"></table></div><div class="help">N世代は遺伝子的に最も近いN-1個体と比較。Δ2周目が負なら短縮。短縮行の★は正規化変化量が大きい遺伝子上位3つで、改善要因の候補（因果の確定ではない）。</div></section>
 </div>
 <script>
 const D={payload};
@@ -353,8 +400,10 @@ chart('latestActuation',[{{name:'目標加速度',color:'#fb923c',data:LT.filter
 function pathChart(){{const [c,w,h]=setup('path'),all=D.baseline_path.concat(D.best_path);if(!all.length)return;let xs=all.map(p=>p[0]),ys=all.map(p=>p[1]),x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys),pad=20,s=Math.min((w-2*pad)/(x1-x0),(h-2*pad)/(y1-y0));function draw(a,color,width){{c.strokeStyle=color;c.lineWidth=width;c.beginPath();a.forEach((p,i)=>{{let x=pad+(p[0]-x0)*s,y=h-pad-(p[1]-y0)*s;i?c.lineTo(x,y):c.moveTo(x,y)}});c.stroke()}}draw(D.baseline_path,'#64748b',4);draw(D.best_path,'#34d399',2)}}pathChart();
 function heat(){{const [c,w,h]=setup('genes'),R=D.gene_heatmap,N=D.gene_names.length;if(!R.length)return;let l=185,t=12,cw=(w-l-8)/R.length,ch=(h-t-8)/N;c.font='9px sans-serif';D.gene_names.forEach((n,i)=>{{c.fillStyle='#91a4bf';c.fillText(n.replace('path_offset_','path_'),3,t+(i+.75)*ch);}});R.forEach((r,x)=>r.values.forEach((v,y)=>{{if(v==null)return;c.fillStyle=`hsl(${{220-v*190}} 80% 55%)`;c.fillRect(l+x*cw,t+y*ch,Math.max(cw-1,1),Math.max(ch-1,1))}}))}}heat();
 function generationTable(){{const table=document.getElementById('generationTable'),groups=D.generation_comparison||[],names=D.gene_names||[];
- const head=['世代 / 個体','状態','Fitness','1周目(s)','2周目(s)',...names];
- const rows=groups.flatMap(group=>group.rows.map((row,index)=>{{const status=row.flying_lap==null?(row.status==='complete'?'Lap欠測':'評価中'):'完了';return `<tr class="${{index===0?'generation-start':''}}"><td>N=${{group.generation}} / ${{row.id}}</td><td class="${{status==='完了'?'':'pending'}}">${{status}}</td><td>${{fmt(row.fitness,3)}}</td><td>${{fmt(row.standing_lap)}}</td><td>${{fmt(row.flying_lap)}}</td>${{names.map(name=>`<td>${{fmt(row.genes[name],4)}}</td>`).join('')}}</tr>`}}));
+ const head=['世代 / 個体','状態','N-1比較元','Δ2周目(s)','Fitness','1周目(s)','2周目(s)',...names];
+ const rows=groups.flatMap(group=>group.rows.map((row,index)=>{{const status=row.flying_lap==null?(row.status==='complete'?'Lap欠測':'評価中'):'完了',improved=row.lap_delta!=null&&row.lap_delta<0,top=new Set(row.top_changed_genes||[]);
+  const geneCells=names.map(name=>{{const delta=(row.gene_deltas||{{}})[name],star=top.has(name),cls=star?'gene-candidate':'';return `<td class="${{cls}}">${{star?'★ ':''}}${{fmt(row.genes[name],4)}}${{delta==null?'':`<span class="gene-delta">Δ ${{delta>=0?'+':''}}${{fmt(delta,4)}}</span>`}}</td>`}}).join('');
+  return `<tr class="${{index===0?'generation-start ':''}}${{improved?'improved':''}}"><td>N=${{group.generation}} / ${{row.id}}</td><td class="${{status==='完了'?'':'pending'}}">${{status}}</td><td>${{row.reference_id||'—'}}</td><td class="${{row.lap_delta==null?'':improved?'delta-good':'delta-bad'}}">${{row.lap_delta==null?'—':`${{row.lap_delta>=0?'+':''}}${{fmt(row.lap_delta,3)}}`}}</td><td>${{fmt(row.fitness,3)}}</td><td>${{fmt(row.standing_lap)}}</td><td>${{fmt(row.flying_lap)}}</td>${{geneCells}}</tr>`}}));
  table.innerHTML=`<thead><tr>${{head.map(value=>`<th>${{value}}</th>`).join('')}}</tr></thead><tbody>${{rows.join('')}}</tbody>`;
 }}generationTable();
 </script></html>"""

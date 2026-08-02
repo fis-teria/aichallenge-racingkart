@@ -487,6 +487,8 @@ def test_progress_dashboard_html_contains_explanatory_panels():
     assert "遺伝子の収束" in document
     assert "N-1 / N世代 個体別Lapタイムと遺伝子" in document
     assert "generationTable" in document
+    assert "Δ2周目" in document
+    assert "top_changed_genes" in document
 
 
 def test_zero_generations_is_accepted_as_unlimited():
