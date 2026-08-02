@@ -190,6 +190,14 @@
     "high_steering_speed_loss_acceleration_threshold_mps2": 0.15,
     "high_steering_speed_loss_command_min_mps2": 0.1,
     "high_steering_speed_loss_minimum_lap": 2,
+    "high_steering_exposure": 0.04,
+    "high_steering_exposure_threshold_rad": 0.12,
+    "high_steering_exposure_command_min_mps2": 0.1,
+    "high_steering_exposure_minimum_lap": 2,
+    "steering_unwind_delay": 0.01,
+    "steering_unwind_corner_threshold_rad": 0.18,
+    "steering_unwind_release_threshold_rad": 0.06,
+    "steering_unwind_minimum_lap": 2,
     "progress_credit": 100.0
   }
 }

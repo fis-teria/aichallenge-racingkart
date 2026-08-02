@@ -11,9 +11,11 @@ from ga_pure_pursuit.evaluator import SharedAwsimBatchEvaluator, WorkerPoolEvalu
 from ga_pure_pursuit.diagnostics import render_html
 from ga_pure_pursuit.episode_monitor import finite_mean, percentile
 from ga_pure_pursuit.fitness import (
+    high_steering_exposure_rad_s,
     high_steering_speed_loss_mps,
     score,
     speed_recovery_deficit_m,
+    steering_unwind_delay_seconds,
     unintended_speed_loss_mps,
 )
 from ga_pure_pursuit.genome import Bounds, initialize_population, parameter_hash, repair
@@ -139,6 +141,29 @@ def test_high_steering_speed_loss_only_counts_large_steering_deceleration():
     }
     # The first two deceleration intervals touch a large steering sample.
     assert abs(high_steering_speed_loss_mps(metrics) - 0.74) < 1.0e-9
+
+
+def test_high_steering_exposure_integrates_angle_above_deadband():
+    metrics = {"diagnostic_trace": [
+        {"lap": 2, "lap_time_seconds": 1.0, "steering_angle_rad": 0.10,
+         "commanded_acceleration_mps2": 0.8},
+        {"lap": 2, "lap_time_seconds": 1.5, "steering_angle_rad": 0.20,
+         "commanded_acceleration_mps2": 0.8},
+        {"lap": 2, "lap_time_seconds": 2.0, "steering_angle_rad": 0.30,
+         "commanded_acceleration_mps2": 0.8},
+    ]}
+    # Trapezoidal mean angles 0.15 and 0.25, minus 0.10 deadband.
+    assert abs(high_steering_exposure_rad_s(metrics, 0.10) - 0.10) < 1.0e-9
+
+
+def test_steering_unwind_delay_counts_corner_exit_until_neutral():
+    metrics = {"diagnostic_trace": [
+        {"lap": 2, "lap_time_seconds": 1.0, "steering_angle_rad": 0.20},
+        {"lap": 2, "lap_time_seconds": 1.2, "steering_angle_rad": 0.14},
+        {"lap": 2, "lap_time_seconds": 1.4, "steering_angle_rad": 0.09},
+        {"lap": 2, "lap_time_seconds": 1.6, "steering_angle_rad": 0.04},
+    ]}
+    assert abs(steering_unwind_delay_seconds(metrics, 0.18, 0.06) - 0.4) < 1.0e-9
 
 
 def test_cpu_surrogate_prefers_predicted_fast_candidates_and_keeps_exploration():

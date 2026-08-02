@@ -129,6 +129,81 @@ def high_steering_speed_loss_mps(
     return float(total)
 
 
+def high_steering_exposure_rad_s(
+    metrics: dict[str, Any],
+    steering_threshold_rad: float = 0.12,
+    commanded_acceleration_min_mps2: float = 0.1,
+    minimum_lap: int = 2,
+) -> float:
+    """Integrate steering angle beyond a deadband while acceleration is requested."""
+    total = 0.0
+    previous: dict[str, Any] | None = None
+    for item in metrics.get("diagnostic_trace", []):
+        required = (
+            item.get("lap"), item.get("lap_time_seconds"),
+            item.get("commanded_acceleration_mps2"), item.get("steering_angle_rad"),
+        )
+        if any(value is None for value in required):
+            previous = None
+            continue
+        if previous is not None and int(item["lap"]) >= minimum_lap:
+            same_lap = int(previous["lap"]) == int(item["lap"])
+            delta_time = float(item["lap_time_seconds"]) - float(
+                previous["lap_time_seconds"]
+            )
+            if (
+                same_lap
+                and 1.0e-4 < delta_time <= 1.0
+                and float(item["commanded_acceleration_mps2"])
+                >= commanded_acceleration_min_mps2
+            ):
+                excess = max(
+                    0.0,
+                    0.5 * (
+                        abs(float(previous["steering_angle_rad"]))
+                        + abs(float(item["steering_angle_rad"]))
+                    ) - steering_threshold_rad,
+                )
+                total += excess * delta_time
+        previous = item
+    return float(total)
+
+
+def steering_unwind_delay_seconds(
+    metrics: dict[str, Any],
+    corner_threshold_rad: float = 0.18,
+    release_threshold_rad: float = 0.06,
+    minimum_lap: int = 2,
+) -> float:
+    """Measure time from leaving a large-steering corner until steering is neutral."""
+    total = 0.0
+    corner_seen = False
+    previous: dict[str, Any] | None = None
+    for item in metrics.get("diagnostic_trace", []):
+        lap = item.get("lap")
+        lap_time = item.get("lap_time_seconds")
+        steering = item.get("steering_angle_rad")
+        if lap is None or lap_time is None or steering is None:
+            corner_seen = False
+            previous = None
+            continue
+        lap = int(lap)
+        angle = abs(float(steering))
+        if previous is not None and lap >= minimum_lap:
+            same_lap = int(previous["lap"]) == lap
+            delta_time = float(lap_time) - float(previous["lap_time_seconds"])
+            if same_lap and 1.0e-4 < delta_time <= 1.0:
+                if corner_seen and angle < corner_threshold_rad:
+                    if angle > release_threshold_rad:
+                        total += delta_time
+                    else:
+                        corner_seen = False
+        if angle >= corner_threshold_rad:
+            corner_seen = True
+        previous = item
+    return float(total)
+
+
 def score(metrics: dict[str, Any], weights: dict[str, float]) -> float:
     invalid = bool(metrics.get("invalid", False))
     completed = bool(metrics.get("completed", False))
@@ -200,6 +275,28 @@ def score(metrics: dict[str, Any], weights: dict[str, float]) -> float:
         minimum_lap=int(weights.get("high_steering_speed_loss_minimum_lap", 2)),
     )
     value += float(weights.get("high_steering_speed_loss", 0.0)) * high_steering_loss
+    steering_exposure = high_steering_exposure_rad_s(
+        metrics,
+        steering_threshold_rad=float(
+            weights.get("high_steering_exposure_threshold_rad", 0.12)
+        ),
+        commanded_acceleration_min_mps2=float(
+            weights.get("high_steering_exposure_command_min_mps2", 0.1)
+        ),
+        minimum_lap=int(weights.get("high_steering_exposure_minimum_lap", 2)),
+    )
+    value += float(weights.get("high_steering_exposure", 0.0)) * steering_exposure
+    unwind_delay = steering_unwind_delay_seconds(
+        metrics,
+        corner_threshold_rad=float(
+            weights.get("steering_unwind_corner_threshold_rad", 0.18)
+        ),
+        release_threshold_rad=float(
+            weights.get("steering_unwind_release_threshold_rad", 0.06)
+        ),
+        minimum_lap=int(weights.get("steering_unwind_minimum_lap", 2)),
+    )
+    value += float(weights.get("steering_unwind_delay", 0.0)) * unwind_delay
     if not completed:
         value -= weights["progress_credit"] * float(metrics.get("progress", 0.0))
     return float(value)
