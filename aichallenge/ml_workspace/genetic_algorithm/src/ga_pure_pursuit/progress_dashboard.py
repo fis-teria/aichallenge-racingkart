@@ -209,6 +209,33 @@ def build_data(run_dir: Path) -> dict[str, Any]:
         default=None,
     )
     latest_lap, latest_metrics = representative_metrics(latest_lap_best)
+    comparison_generations = (
+        [value for value in (latest_generation - 1, latest_generation) if value >= 0]
+        if latest_generation is not None else []
+    )
+    generation_comparison = []
+    for generation in comparison_generations:
+        rows = []
+        for item in candidates:
+            if item["generation"] != generation:
+                continue
+            rows.append({
+                "id": item["id"],
+                "status": item["status"],
+                "fitness": item["fitness"],
+                "standing_lap": validated_metric(item, "standing_lap_time_seconds"),
+                "flying_lap": validated_metric(item, "flying_lap_time_seconds"),
+                "genes": {
+                    name: item["genome"].get(name)
+                    for name in gene_names
+                },
+            })
+        rows.sort(key=lambda item: (
+            item["flying_lap"] is None,
+            item["flying_lap"] if item["flying_lap"] is not None else float("inf"),
+            item["id"],
+        ))
+        generation_comparison.append({"generation": generation, "rows": rows})
     candidate_path = Path(best_metrics.get("candidate_path", "")) if lap_best else None
     if candidate_path and not candidate_path.exists() and str(candidate_path).startswith("/aichallenge/"):
         candidate_path = run_dir.resolve().parents[4] / str(candidate_path).removeprefix("/")
@@ -219,6 +246,7 @@ def build_data(run_dir: Path) -> dict[str, Any]:
         "generations": generation_rows,
         "gene_names": gene_names,
         "gene_heatmap": gene_heatmap,
+        "generation_comparison": generation_comparison,
         "baseline_path": _load_xy(_resolve_base_path(run_dir, config)),
         "best_path": _load_xy(candidate_path),
         "trace": trace,
@@ -278,6 +306,11 @@ h1 {{ margin:0 0 4px }} .sub {{ color:var(--muted); margin-bottom:14px }} .cards
 .grid {{ display:grid;grid-template-columns:1fr 1fr;gap:12px }} .panel h2 {{ font-size:1rem;margin:0 0 8px }} .panel h2.trace-subtitle {{margin-top:16px;padding-top:12px;border-top:1px solid #29405f}} canvas {{ width:100%;height:310px }} canvas.compact {{height:150px;margin-top:8px}}
 #speed,#latestSpeed {{height:220px}} #actuation,#latestActuation {{height:90px;margin-top:4px}}
 .help {{ color:var(--muted);font-size:.88rem;line-height:1.5;margin-top:6px }} @media(max-width:900px) {{.cards{{grid-template-columns:repeat(2,1fr)}}.grid{{grid-template-columns:1fr}}}}
+.wide {{grid-column:1/-1}} .table-wrap {{overflow:auto;max-height:560px;border:1px solid #29405f;border-radius:7px}}
+table {{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-size:.78rem}}
+th,td {{padding:6px 8px;border-right:1px solid #233955;border-bottom:1px solid #233955;white-space:nowrap;text-align:right}}
+th {{position:sticky;top:0;background:#17263b;color:#bcd0ea;z-index:2}} td:first-child,th:first-child {{position:sticky;left:0;text-align:left;background:#142238;z-index:1}}
+th:first-child {{z-index:3}} tr.generation-start td {{border-top:3px solid #60a5fa}} td.pending {{color:var(--muted)}}
 </style>
 <h1>GA Progress Dashboard</h1><div class="sub" id="subtitle"></div>
 <div class="cards" id="cards"></div>
@@ -293,6 +326,7 @@ h1 {{ margin:0 0 4px }} .sub {{ color:var(--muted); margin-bottom:14px }} .cards
  </section>
  <section class="panel"><h2>経路の変化</h2><canvas id="path"></canvas><div class="help">灰色が元経路、緑が最良経路。大きくギザギザせず、コーナーを滑らかに外→内→外へ通るのが理想。</div></section>
  <section class="panel"><h2>遺伝子の収束</h2><canvas id="genes"></canvas><div class="help">横が世代、縦が遺伝子。色が世代間で変わらなくなると収束。早すぎる収束は探索不足のサイン。</div></section>
+ <section class="panel wide"><h2>N-1 / N世代 個体別Lapタイムと遺伝子</h2><div class="table-wrap"><table id="generationTable"></table></div><div class="help">最新世代Nと直前世代N-1を2周目の速い順で表示。横スクロールで全探索遺伝子を比較でき、評価中の個体は「評価中」と表示。</div></section>
 </div>
 <script>
 const D={payload};
@@ -318,6 +352,11 @@ chart('latestSpeed',[{{name:'実速度',color:'#38bdf8',data:LT.filter(x=>x.actu
 chart('latestActuation',[{{name:'目標加速度',color:'#fb923c',data:LT.filter(x=>x.commanded_acceleration!=null).map(x=>[x.t,x.commanded_acceleration])}},{{name:'実測加速度',color:'#34d399',data:LT.filter(x=>x.actual_acceleration!=null).map(x=>[x.t,x.actual_acceleration])}}]);
 function pathChart(){{const [c,w,h]=setup('path'),all=D.baseline_path.concat(D.best_path);if(!all.length)return;let xs=all.map(p=>p[0]),ys=all.map(p=>p[1]),x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys),pad=20,s=Math.min((w-2*pad)/(x1-x0),(h-2*pad)/(y1-y0));function draw(a,color,width){{c.strokeStyle=color;c.lineWidth=width;c.beginPath();a.forEach((p,i)=>{{let x=pad+(p[0]-x0)*s,y=h-pad-(p[1]-y0)*s;i?c.lineTo(x,y):c.moveTo(x,y)}});c.stroke()}}draw(D.baseline_path,'#64748b',4);draw(D.best_path,'#34d399',2)}}pathChart();
 function heat(){{const [c,w,h]=setup('genes'),R=D.gene_heatmap,N=D.gene_names.length;if(!R.length)return;let l=185,t=12,cw=(w-l-8)/R.length,ch=(h-t-8)/N;c.font='9px sans-serif';D.gene_names.forEach((n,i)=>{{c.fillStyle='#91a4bf';c.fillText(n.replace('path_offset_','path_'),3,t+(i+.75)*ch);}});R.forEach((r,x)=>r.values.forEach((v,y)=>{{if(v==null)return;c.fillStyle=`hsl(${{220-v*190}} 80% 55%)`;c.fillRect(l+x*cw,t+y*ch,Math.max(cw-1,1),Math.max(ch-1,1))}}))}}heat();
+function generationTable(){{const table=document.getElementById('generationTable'),groups=D.generation_comparison||[],names=D.gene_names||[];
+ const head=['世代 / 個体','状態','Fitness','1周目(s)','2周目(s)',...names];
+ const rows=groups.flatMap(group=>group.rows.map((row,index)=>{{const status=row.flying_lap==null?(row.status==='complete'?'Lap欠測':'評価中'):'完了';return `<tr class="${{index===0?'generation-start':''}}"><td>N=${{group.generation}} / ${{row.id}}</td><td class="${{status==='完了'?'':'pending'}}">${{status}}</td><td>${{fmt(row.fitness,3)}}</td><td>${{fmt(row.standing_lap)}}</td><td>${{fmt(row.flying_lap)}}</td>${{names.map(name=>`<td>${{fmt(row.genes[name],4)}}</td>`).join('')}}</tr>`}}));
+ table.innerHTML=`<thead><tr>${{head.map(value=>`<th>${{value}}</th>`).join('')}}</tr></thead><tbody>${{rows.join('')}}</tbody>`;
+}}generationTable();
 </script></html>"""
 
 

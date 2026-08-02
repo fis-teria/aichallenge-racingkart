@@ -475,6 +475,7 @@ def test_progress_dashboard_html_contains_explanatory_panels():
         "generations": [],
         "gene_names": [],
         "gene_heatmap": [],
+        "generation_comparison": [],
         "baseline_path": [],
         "best_path": [],
         "trace": [],
@@ -484,6 +485,8 @@ def test_progress_dashboard_html_contains_explanatory_panels():
     assert "世代ごとの改善" in document
     assert "速度追従" in document
     assert "遺伝子の収束" in document
+    assert "N-1 / N世代 個体別Lapタイムと遺伝子" in document
+    assert "generationTable" in document
 
 
 def test_zero_generations_is_accepted_as_unlimited():
