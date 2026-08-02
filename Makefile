@@ -139,12 +139,13 @@ ga-dashboard:
 	test -n "$$latest" || { echo "No GA run found"; exit 2; }; \
 	PYTHONPATH=aichallenge/ml_workspace/genetic_algorithm/src python3 -m ga_pure_pursuit.progress_dashboard \
 		--run-dir "$$latest" --output "$$latest/dashboard.html"; \
-	echo "Open: $$latest/dashboard.html"
+	cp "$$latest/dashboard.html" aichallenge/ml_workspace/genetic_algorithm/runs/dashboard.html; \
+	echo "Open (fixed): aichallenge/ml_workspace/genetic_algorithm/runs/dashboard.html"
 
 ga-dashboard-serve: ga-dashboard
 	@latest=$$(find aichallenge/ml_workspace/genetic_algorithm/runs -mindepth 1 -maxdepth 1 -type d -name '20*' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-); \
 	relative=$${latest#./}; \
-	echo "Dashboard server: http://$(GA_DASHBOARD_BIND):$(GA_DASHBOARD_PORT)/$$relative/dashboard.html"; \
+	echo "Dashboard server: http://$(GA_DASHBOARD_BIND):$(GA_DASHBOARD_PORT)/aichallenge/ml_workspace/genetic_algorithm/runs/dashboard.html"; \
 	echo "From another PC, replace $(GA_DASHBOARD_BIND) with this host's IP address."; \
 	echo "Stop the server with Ctrl-C."; \
 	python3 -m http.server $(GA_DASHBOARD_PORT) --bind $(GA_DASHBOARD_BIND) --directory .

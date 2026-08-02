@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import threading
 from pathlib import Path
 
@@ -20,11 +21,16 @@ def run_with_dashboard(optimizer: Optimizer) -> dict:
 
     def render() -> None:
         try:
+            run_dashboard = optimizer.run_dir / "dashboard.html"
             write_dashboard(
                 optimizer.run_dir,
-                optimizer.run_dir / "dashboard.html",
+                run_dashboard,
                 DASHBOARD_REFRESH_SECONDS,
             )
+            latest_dashboard = optimizer.run_dir.parent / "dashboard.html"
+            temporary = latest_dashboard.with_suffix(".html.tmp")
+            shutil.copyfile(run_dashboard, temporary)
+            temporary.replace(latest_dashboard)
         except Exception as error:  # Dashboard failure must not stop an experiment.
             print(f"dashboard refresh failed: {error}", flush=True)
 
@@ -40,6 +46,7 @@ def run_with_dashboard(optimizer: Optimizer) -> dict:
     )
     watcher.start()
     print(f"dashboard: {optimizer.run_dir / 'dashboard.html'}", flush=True)
+    print(f"dashboard (latest): {optimizer.run_dir.parent / 'dashboard.html'}", flush=True)
     try:
         return optimizer.run()
     finally:
