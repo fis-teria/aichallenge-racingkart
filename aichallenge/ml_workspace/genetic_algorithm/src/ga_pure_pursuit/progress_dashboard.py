@@ -373,7 +373,7 @@ tr.improved td:first-child {{color:#6ee7b7}} td.gene-candidate {{background:#123
  </section>
  <section class="panel"><h2>経路の変化</h2><canvas id="path"></canvas><div class="help">灰色が元経路、緑が最良経路。大きくギザギザせず、コーナーを滑らかに外→内→外へ通るのが理想。</div></section>
  <section class="panel"><h2>遺伝子の収束</h2><canvas id="genes"></canvas><div class="help">横が世代、縦が遺伝子。色が世代間で変わらなくなると収束。早すぎる収束は探索不足のサイン。</div></section>
- <section class="panel wide"><h2>N-1 / N世代 個体別Lapタイムと遺伝子</h2><div class="table-wrap"><table id="generationTable"></table></div><div class="help">N世代は遺伝子的に最も近いN-1個体と比較。Δ2周目が負なら短縮。短縮行の★は正規化変化量が大きい遺伝子上位3つで、改善要因の候補（因果の確定ではない）。</div></section>
+ <section class="panel wide"><h2>N-1 / N世代 個体別Lapタイムと遺伝子</h2><div class="table-wrap" id="generationTableWrap"><table id="generationTable"></table></div><div class="help">N世代は遺伝子的に最も近いN-1個体と比較。Δ2周目が負なら短縮。短縮行の★は正規化変化量が大きい遺伝子上位3つで、改善要因の候補（因果の確定ではない）。</div></section>
 </div>
 <script>
 const D={payload};
@@ -406,6 +406,10 @@ function generationTable(){{const table=document.getElementById('generationTable
   return `<tr class="${{index===0?'generation-start ':''}}${{improved?'improved':''}}"><td>N=${{group.generation}} / ${{row.id}}</td><td class="${{status==='完了'?'':'pending'}}">${{status}}</td><td>${{row.reference_id||'—'}}</td><td class="${{row.lap_delta==null?'':improved?'delta-good':'delta-bad'}}">${{row.lap_delta==null?'—':`${{row.lap_delta>=0?'+':''}}${{fmt(row.lap_delta,3)}}`}}</td><td>${{fmt(row.fitness,3)}}</td><td>${{fmt(row.standing_lap)}}</td><td>${{fmt(row.flying_lap)}}</td>${{geneCells}}</tr>`}}));
  table.innerHTML=`<thead><tr>${{head.map(value=>`<th>${{value}}</th>`).join('')}}</tr></thead><tbody>${{rows.join('')}}</tbody>`;
 }}generationTable();
+const scrollKey=`ga-dashboard-scroll:${{D.run_id}}`;
+function saveScrollPosition(){{const wrap=document.getElementById('generationTableWrap'),state={{windowY:window.scrollY,tableX:wrap?.scrollLeft||0,tableY:wrap?.scrollTop||0}};try{{sessionStorage.setItem(scrollKey,JSON.stringify(state))}}catch(_error){{window.name=JSON.stringify({{key:scrollKey,state}})}}}}
+function restoreScrollPosition(){{let state=null;try{{state=JSON.parse(sessionStorage.getItem(scrollKey)||'null')}}catch(_error){{try{{const saved=JSON.parse(window.name||'null');if(saved?.key===scrollKey)state=saved.state}}catch(_ignored){{}}}}if(!state)return;const wrap=document.getElementById('generationTableWrap');if(wrap){{wrap.scrollLeft=state.tableX||0;wrap.scrollTop=state.tableY||0}}window.scrollTo(0,state.windowY||0)}}
+history.scrollRestoration='manual';window.addEventListener('pagehide',saveScrollPosition);window.addEventListener('beforeunload',saveScrollPosition);requestAnimationFrame(()=>requestAnimationFrame(restoreScrollPosition));
 </script></html>"""
 
 

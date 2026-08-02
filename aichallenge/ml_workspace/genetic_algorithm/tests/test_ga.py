@@ -489,6 +489,9 @@ def test_progress_dashboard_html_contains_explanatory_panels():
     assert "generationTable" in document
     assert "Δ2周目" in document
     assert "top_changed_genes" in document
+    assert "generationTableWrap" in document
+    assert "saveScrollPosition" in document
+    assert "restoreScrollPosition" in document
 
 
 def test_zero_generations_is_accepted_as_unlimited():
