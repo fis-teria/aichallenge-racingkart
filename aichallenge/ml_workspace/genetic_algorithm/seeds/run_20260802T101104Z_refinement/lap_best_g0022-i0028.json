@@ -1,0 +1,33 @@
+{
+  "candidate_id": "g0022-i0028",
+  "fitness": 53.827242645241036,
+  "generation": 22,
+  "parameter_hash": "sha256:4db9cab874fb94f0cd6334e0fb748a824dbd4273217a799a27098790e14a4fb2",
+  "parameters": {
+    "curvature_lookahead_min_distance": 1.3837925405416882,
+    "curvature_lookahead_sensitivity": 2.2371953756815275,
+    "curvature_lookahead_smoothing_alpha": 0.2591465603916399,
+    "curvature_speed_preview_distance": 15.020608423299441,
+    "dual_preview_blend": 0.26538181838611313,
+    "dual_preview_near_ratio": 0.5960553378014487,
+    "lookahead_gain": 0.9501432991771341,
+    "lookahead_min_distance": 2.3962549532406836,
+    "path_offset_00": -0.49875917967455474,
+    "path_offset_01": -0.21695889695405268,
+    "path_offset_02": 0.06288119501787826,
+    "path_offset_03": -1.372835418895232,
+    "path_offset_04": -0.5913849248580101,
+    "path_offset_05": 0.40130849035522254,
+    "path_offset_06": -0.44927274583045407,
+    "path_offset_07": -0.20451189770489422,
+    "path_offset_08": 0.32514318576417983,
+    "path_offset_09": 0.1842578934907353,
+    "path_offset_10": -0.12690915061882665,
+    "path_offset_11": 0.8678139868851555,
+    "path_offset_12": 0.7555297031650947,
+    "path_offset_13": -0.20008984973154914,
+    "path_offset_14": -0.4101658753129118,
+    "path_offset_15": -0.2660330637240548,
+    "steering_tire_angle_gain": 2.202544918047652
+  }
+}
