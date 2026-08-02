@@ -82,7 +82,7 @@
     "initial_seed_count": 10,
     "minimum_training_samples": 40,
     "neighbors": 12,
-    "candidate_pool_multiplier": 32,
+    "candidate_pool_multiplier": 64,
     "exploit_fraction": 0.6,
     "uncertainty_fraction": 0.2
   },
