@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +34,26 @@ class Storage:
     def __init__(self, path: Path):
         self.path = path
         self._lock = threading.RLock()
-        self.connection = sqlite3.connect(path, check_same_thread=False)
+        self.connection = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
+        self.connection.execute("PRAGMA busy_timeout=30000")
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
         self.connection.executescript(SCHEMA)
+
+    def _write_transaction(self, operation, attempts: int = 5) -> None:
+        """Commit a write while tolerating short-lived dashboard/worker locks."""
+        for attempt in range(attempts):
+            try:
+                with self._lock:
+                    with self.connection:
+                        operation()
+                return
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error).lower() or attempt + 1 >= attempts:
+                    raise
+                with self._lock:
+                    self.connection.rollback()
+                time.sleep(0.05 * (2 ** attempt))
 
     def close(self) -> None:
         with self._lock:
@@ -52,12 +71,12 @@ class Storage:
     def begin_candidate(
         self, candidate_id: str, generation: int, genome: dict[str, float], parameter_hash: str
     ) -> None:
-        with self._lock:
-            with self.connection:
-                self.connection.execute(
-                    "INSERT OR REPLACE INTO candidates VALUES (?, ?, ?, ?, NULL, 'running')",
-                    (candidate_id, generation, json.dumps(genome, sort_keys=True), parameter_hash),
-                )
+        def write() -> None:
+            self.connection.execute(
+                "INSERT OR REPLACE INTO candidates VALUES (?, ?, ?, ?, NULL, 'running')",
+                (candidate_id, generation, json.dumps(genome, sort_keys=True), parameter_hash),
+            )
+        self._write_transaction(write)
 
     def complete_candidate(
         self,
@@ -65,24 +84,24 @@ class Storage:
         episodes: list[tuple[int, dict[str, Any], float]],
         fitness: float,
     ) -> None:
-        with self._lock:
-            with self.connection:
-                for repeat, metrics, episode_score in episodes:
-                    self.connection.execute(
-                        "INSERT OR REPLACE INTO episodes VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            f"{candidate_id}-r{repeat:02d}",
-                            candidate_id,
-                            repeat,
-                            json.dumps(metrics, sort_keys=True),
-                            episode_score,
-                            str(metrics.get("exit_reason", "unknown")),
-                        ),
-                    )
+        def write() -> None:
+            for repeat, metrics, episode_score in episodes:
                 self.connection.execute(
-                    "UPDATE candidates SET fitness=?, status='complete' WHERE candidate_id=?",
-                    (fitness, candidate_id),
+                    "INSERT OR REPLACE INTO episodes VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        f"{candidate_id}-r{repeat:02d}",
+                        candidate_id,
+                        repeat,
+                        json.dumps(metrics, sort_keys=True),
+                        episode_score,
+                        str(metrics.get("exit_reason", "unknown")),
+                    ),
                 )
+            self.connection.execute(
+                "UPDATE candidates SET fitness=?, status='complete' WHERE candidate_id=?",
+                (fitness, candidate_id),
+            )
+        self._write_transaction(write)
 
     def best(self, limit: int = 1) -> list[dict[str, Any]]:
         with self._lock:

@@ -34,6 +34,7 @@ from ga_pure_pursuit.progress_dashboard import (
 )
 from ga_pure_pursuit.config import validate_config
 from ga_pure_pursuit.surrogate import KnnSurrogate, select_candidates
+from ga_pure_pursuit.storage import Storage
 from ga_pure_pursuit.phase2 import (
     EmitterBandit, KnnFeasibilityModel, MapElitesArchive, Observation,
     select_feasible_candidates,
@@ -53,6 +54,34 @@ def test_repair_is_bounded_and_idempotent():
 
 def test_hash_is_order_independent():
     assert parameter_hash({"a": 1.0, "b": 2.0}) == parameter_hash({"b": 2.0, "a": 1.0})
+
+
+def test_storage_uses_wal_and_waits_for_transient_write_lock(tmp_path):
+    storage = Storage(tmp_path / "run.sqlite3")
+    assert storage.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert storage.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+    blocker = __import__("sqlite3").connect(tmp_path / "run.sqlite3")
+    blocker.execute("BEGIN IMMEDIATE")
+    errors = []
+    def write_candidate():
+        try:
+            storage.begin_candidate("candidate", 0, {"a": 0.5}, "hash")
+        except Exception as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=write_candidate)
+    worker.start()
+    time.sleep(0.05)
+    blocker.commit()
+    worker.join(timeout=2.0)
+    blocker.close()
+    assert not worker.is_alive()
+    assert not errors
+    assert storage.connection.execute(
+        "SELECT status FROM candidates WHERE candidate_id='candidate'"
+    ).fetchone() == ("running",)
+    storage.close()
 
 
 def test_operators_remain_bounded():
