@@ -38,6 +38,10 @@ PYTHONPATH=src python3 -m pytest
 The default `experiment.yaml` deliberately uses `mock` mode. It cannot move a
 vehicle.
 
+The staged design for migrating from the current GA to constrained Lap
+optimization, block-specific surrogate models, and CMA-ES is documented in
+[`docs/constrained_surrogate_cmaes_design.md`](docs/constrained_surrogate_cmaes_design.md).
+
 An interrupted run can be resumed from its latest generation checkpoint:
 
 ```bash
