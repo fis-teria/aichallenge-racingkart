@@ -16,6 +16,7 @@
   <depend>autoware_auto_vehicle_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>motion_utils</depend>
+  <depend>multi_purpose_mpc_ros_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>std_msgs</depend>
   <depend>tf2</depend>

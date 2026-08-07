@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Test-only V4 -> Pure Pursuit -> Mux stack. No AWSIM or vehicle interface. -->
+<launch>
+  <arg name="topic_token"/>
+  <arg name="mux_capture_output_path"/>
+  <arg name="mux_selector_manifest_sha256"/>
+  <arg name="mux_capture_epoch_nonce"/>
+  <arg name="mux_capture_epoch"/>
+  <let name="root" value="/aic_test/v4_pp_mux_stage2/$(var topic_token)"/>
+
+  <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">
+    <arg name="simulation" value="true"/>
+    <arg name="use_sim_time" value="false"/>
+    <arg name="node_name" value="aic_test_v4_stage2_pure_pursuit"/>
+    <arg name="input_kinematics" value="$(var root)/input/kinematics"/>
+    <arg name="input_trajectory" value="$(var root)/input/trajectory"/>
+    <arg name="input_mpc_predicted_horizon" value="$(var root)/unused/mpc_predicted_horizon"/>
+    <arg name="input_mpc_predicted_horizon_contract" value="$(var root)/unused/mpc_predicted_horizon_contract"/>
+    <arg name="input_mpc_health" value="$(var root)/unused/mpc_health"/>
+    <arg name="input_steering_status" value="$(var root)/unused/steering_status"/>
+    <arg name="input_recovery_status" value="$(var root)/unused/recovery_status"/>
+    <arg name="input_overtake_plan" value="$(var root)/input/plan"/>
+    <arg name="input_race_armed" value="$(var root)/input/race_armed"/>
+    <arg name="input_overtake_reference_override" value="$(var root)/input/reference_override"/>
+    <arg name="output_control_cmd" value="$(var root)/pp/control_cmd"/>
+    <arg name="output_raw_control_cmd" value="$(var root)/pp/raw_control_cmd"/>
+    <arg name="output_recovery_control_cmd" value="$(var root)/pp/recovery_control_cmd"/>
+    <arg name="output_debug" value="$(var root)/pp/debug"/>
+    <arg name="output_controller_tracking_status" value="$(var root)/pp/tracking_status"/>
+    <arg name="output_controller_command_envelope" value="$(var root)/pp/command_envelope"/>
+    <arg name="output_controller_execution_envelope" value="$(var root)/pp/execution_envelope"/>
+    <arg name="output_free_run_execution_ack" value="$(var root)/pp/free_run_execution_ack"/>
+    <arg name="output_free_run_source_key" value="$(var root)/pp/free_run_source_key"/>
+    <arg name="output_lookahead_point" value="$(var root)/pp/lookahead_point"/>
+    <arg name="use_external_target_vel" value="false"/>
+    <arg name="use_overtake_reference_override" value="true"/>
+    <arg name="require_overtake_reference_override_fresh" value="true"/>
+    <arg name="state_lattice_v4_poc_identity_gate_enabled" value="false"/>
+    <arg name="state_lattice_v4_poc_command_activation_enabled" value="true"/>
+    <arg name="overtake_override_timeout_sec" value="0.30"/>
+    <arg name="max_odom_age_sec" value="0.30"/>
+    <arg name="max_trajectory_age_sec" value="0.30"/>
+    <arg name="max_override_age_sec" value="0.30"/>
+    <arg name="stop_on_stale_input" value="true"/>
+    <arg name="diagnostic_throttle_sec" value="0.02"/>
+    <arg name="aw2_shadow_transport_enabled" value="false"/>
+    <arg name="c002ay0_shadow_capture_enabled" value="false"/>
+    <arg name="state_lattice_source_binding_shadow_enabled" value="false"/>
+    <arg name="free_run_live_exact_ack_enabled" value="false"/>
+    <arg name="pp_core_exact_snapshot_enabled" value="false"/>
+    <arg name="state_lattice_v2_live_proposal_accept_enabled" value="false"/>
+    <arg name="state_lattice_v2_command_activation_enabled" value="false"/>
+  </include>
+
+  <node pkg="hybrid_control_mux" exec="hybrid_control_mux_node.py"
+        name="aic_test_v4_stage2_hybrid_control_mux" output="screen">
+    <param from="$(find-pkg-share hybrid_control_mux)/config/hybrid_control_mux.param.yaml"/>
+    <param name="use_sim_time" value="false"/>
+    <param name="primary_source" value="pure_pursuit"/>
+    <param name="require_safety_constraint" value="true"/>
+    <param name="recovery_enabled" value="false"/>
+    <param name="state_lattice_instant_control_enabled" value="false"/>
+    <param name="free_run_live_exact_observe_enabled" value="false"/>
+    <param name="free_run_live_exact_pre_ack_hold_enabled" value="false"/>
+    <param name="pure_pursuit_cmd_timeout_sec" value="0.30"/>
+    <param name="pure_pursuit_tracking_status_timeout_sec" value="0.30"/>
+    <param name="pure_pursuit_envelope_timeout_sec" value="0.30"/>
+    <param name="safety_constraint_timeout_sec" value="0.30"/>
+    <param name="overtake_plan_timeout_sec" value="0.30"/>
+    <param name="control_loop_max_gap_sec" value="0.20"/>
+    <param name="ros_clock_stall_timeout_sec" value="0.30"/>
+    <param name="race_arm_required" value="true"/>
+    <param name="debug_publish_period_sec" value="0.02"/>
+    <!-- Private Stage-2 observability only: no target identity is injected. -->
+    <param name="mux_runtime_measurement_enabled" value="false"/>
+    <param name="latest_sample_observability_enabled" value="true"/>
+    <param name="mux_runtime_measurement_output_path" value="$(var mux_capture_output_path)"/>
+    <param name="mux_runtime_measurement_selector_manifest_sha256" value="$(var mux_selector_manifest_sha256)"/>
+    <param name="mux_runtime_measurement_capture_epoch_nonce" value="$(var mux_capture_epoch_nonce)"/>
+    <param name="mux_runtime_measurement_expected_capture_epoch" value="$(var mux_capture_epoch)"/>
+    <remap from="input/mpc_control_cmd" to="$(var root)/unused/mpc_control_cmd"/>
+    <remap from="input/pure_pursuit_control_cmd" to="$(var root)/pp/control_cmd"/>
+    <remap from="input/pure_pursuit_tracking_status" to="$(var root)/pp/tracking_status"/>
+    <remap from="input/pure_pursuit_command_envelope" to="$(var root)/pp/command_envelope"/>
+    <remap from="input/state_lattice_control_cmd" to="$(var root)/unused/state_lattice_control_cmd"/>
+    <remap from="input/free_run_execution_ack" to="$(var root)/pp/free_run_execution_ack"/>
+    <remap from="input/free_run_source_key" to="$(var root)/pp/free_run_source_key"/>
+    <remap from="input/recovery_control_cmd" to="$(var root)/unused/recovery_control_cmd"/>
+    <remap from="input/recovery_status" to="$(var root)/unused/recovery_status"/>
+    <remap from="input/recovery_permit" to="$(var root)/unused/recovery_permit"/>
+    <remap from="input/external_safety_status" to="$(var root)/unused/external_safety_status"/>
+    <remap from="input/safety_constraint" to="$(var root)/input/safety_constraint"/>
+    <remap from="input/overtake_plan" to="$(var root)/input/plan"/>
+    <remap from="input/mpc_health" to="$(var root)/unused/mpc_health"/>
+    <remap from="input/race_armed" to="$(var root)/input/race_armed"/>
+    <remap from="input/awsim_state" to="$(var root)/input/awsim_state"/>
+    <remap from="output/control_cmd" to="$(var root)/output/control_cmd"/>
+    <remap from="output/debug" to="$(var root)/mux/debug"/>
+    <remap from="output/controller_tracking_status" to="$(var root)/mux/tracking_status"/>
+    <remap from="output/motion_authority_grant" to="$(var root)/mux/motion_authority_grant"/>
+  </node>
+</launch>

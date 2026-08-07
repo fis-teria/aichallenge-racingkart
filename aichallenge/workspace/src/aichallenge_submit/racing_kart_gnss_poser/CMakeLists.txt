@@ -19,6 +19,7 @@ set(GNSS_POSER_HEADERS
   include/gnss_poser/convert.hpp
   include/gnss_poser/gnss_poser_core.hpp
   include/gnss_poser/gnss_stat.hpp
+  include/gnss_poser/position_covariance.hpp
 )
 
 ament_auto_add_library(gnss_poser_node SHARED
@@ -34,6 +35,13 @@ rclcpp_components_register_node(gnss_poser_node
   PLUGIN "gnss_poser::GNSSPoser"
   EXECUTABLE gnss_poser
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_position_covariance test/test_position_covariance.cpp)
+  target_include_directories(test_position_covariance PRIVATE include)
+  ament_target_dependencies(test_position_covariance sensor_msgs)
+endif()
 
 ament_auto_package(INSTALL_TO_SHARE
   launch

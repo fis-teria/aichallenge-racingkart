@@ -373,24 +373,27 @@ corner_side_by_side =
 
 ## 壁余裕
 
-安全コリドーは次で決まります。
+回廊CSVの `d_min/d_max` はlanelet路面端です。中心点の互換安全帯は次で決まります。
 
 ```text
 lower_d = d_min_m + min_wall_margin_m
 upper_d = d_max_m - min_wall_margin_m
 ```
 
-`ego_wall_clearance_m` は、自車dがこの範囲からどれだけ余裕を持つかです。
+`ego_wall_clearance_m` は、自車中心dがこの範囲からどれだけ余裕を持つかを示す
+診断値です。
 
 ```text
 min(ego_d - lower_d, upper_d - ego_d)
 ```
 
-負なら自車は安全コリドー外です。
+負なら自車中心は安全コリドー外です。正でも車体接触なしを意味しません。
+最終候補認可では `SafetyEvaluator` が `base_link`基準の前後端・半幅から四隅を
+展開し、走行中自己位置余裕を残して全cornerが路面端内かを別途検査します。
 
 `RECOVERY` と `YIELD_BEHIND` の参照生成では、開始dを安全コリドー内にclampします。
 これは壁外d列をMPCへ渡さないためです。
-安全コリドー外、または `recovery_release_lateral_error_m` を超える横誤差が残る `RECOVERY` では `outside_corridor_recovery_centering_time_sec` を使い、低速/停止中でも距離ベース補間だけに依存せず中心方向へ参照を進めます。
+`RECOVERY` の横profileは物理前進距離だけで進めます。停止近傍で時間比率を併用すると、極小の前進距離へ大きな横移動が圧縮されて曲率が過大になるためです。`outside_corridor_recovery_centering_time_sec` は設定互換用として残しますが、横profile生成には使用しません。
 
 ## 安全評価
 
@@ -429,6 +432,9 @@ FOLLOW、RECOVERY、SIDE_BY_SIDE_KEEP、YIELD_BEHIND、SAFE_STOPで目標速度�
   - `follow_gap_closing_*` が有効で、同一コリドーの通常前走車とのgapが
     `follow_gap_closing_engage_gap_m` 以上、入力fresh、MPC健全、横並び/譲り/
     停止低速障害物でない時だけ、最大 `follow_gap_closing_max_speed_bonus_mps` を加える
+  - 実運用では `follow_gap_closing_engage_gap_m` を目標車間と同じ `4.5 m` にし、
+    目標車間を超えたら即座にbonusを計算する。固定距離で加速を許可するのではなく、
+    bonusを含む予測軌道がSafetyEvaluatorを通ることを必須とする
   - bonusを使う候補の `s(t)` は
     `follow_gap_closing_assumed_accel_mps2` で即時加速する最遠到達距離として
     SafetyEvaluatorへ渡し、通らなければ候補を採用しない
@@ -641,6 +647,72 @@ overtake decision:
 - 大きい横ずれ中は、parallel side candidateや壁リスクがあれば `RECOVERY` を優先する
 - `pass_gap_reason` は `no_target`, `ok`, `left_gap_narrow`, `right_gap_narrow`, `both_gap_narrow`, `large_lateral_error` の意味を崩さない
 - 複数の速度ガードが同時に成立した場合は、最も低い速度capとその理由を出力する
+- V2 shadowの `/overtake/v2/shadow/plan` は、未認可理由を
+  `authorization_failure_mask` と `authorization_failure_reasons` に出す。候補欠落、
+  SafetyEvaluator未評価/reject、入力stale、tracking不成立、trajectory形状不正、
+  constraint停止中を区別する
+- V2 shadowの `trajectory_authorized=true` は、SafetyEvaluator通過済みで配信可能な
+  trajectoryと、同一plan generationの非停止constraintが揃った周期だけとする。
+  release確認中はtrajectory候補が有効でもfalseのままになる
+- PASS中にControllerTrackingStatusが一時的なplan/command stamp mismatchだけを示す周期は、
+  未認可の現在d保持へ閉じつつ同一attempt、target、side、committed profileを有界回数だけ
+  保持する。回復時は同じPASSを再評価し、連続不成立またはMPC stale/hard failureでは
+  `ABORT_HOLD`へ移る。target欠測とtracking不成立のhold回数は共有し、交互発生で無期限保持しない
+- start-gridの1 generation continuityは、世代差だけでは許可しない。ControllerTrackingStatusの
+  header stampとcommand ageがfreshで、PP commandがfresh、mux理由が`ready`または次plan先着だけを
+  示す`plan_generation_mismatch`であり、Nodeが保持するcurrent/previous generationの型付き履歴が
+  「同じtarget ID・同じPASS sideのcommitted PASS」である場合だけ継続根拠にする。current-d
+  stop/FOLLOW世代、別target、2世代以上前、stale、watchdog/stop理由のproofは流用しない。
+  final PPが同じ条件で`mpc_horizon_usable=false`を証明した場合、非稼働MPCのhealth stale/solve-timeを
+  PASS停止理由にはしないが、候補のSafetyEvaluatorとcontroller trackabilityは毎周期再評価する
+- start-grid transactionでtrackingを失い、現在dのSAFE_STOP trajectory自体も他車予測との
+  重なりで不成立な場合は、未評価の横軌道を選ばない。`maneuver_transaction_tracking_stop_active`
+  により縦停止を要求し、横trackingは無認可のまま、FSMは同じtarget/sideを保持する
+- start-gridの`ATTACK_FOLLOW` STOP解除確認では、Muxが同じtarget・attempt・direction=0、
+  freshなplan/constraint/PP command/status、連続trajectoryを検証した正確なN-1世代だけを
+  `attack_follow_stop_transport_release_ready`として受理する。これはSTOP解除の連続確認専用で、
+  PASS warm-up ACK待ち、PASSING、target/attempt変更、E-stop/watchdog/faultでは使用しない。
+  `ControllerTrackingStatus.reason`は診断専用とし、Plannerの認可分岐には使用しない
+  `FOLLOW_BLOCKED`へ留まる。中心向きYIELD/RECOVERYを理由にABORTへ遷移しない
+- Gate 2認可済みPASSは原則としてtarget ID、side、committed target dを通過完了まで保持する。
+  例外は、選択側への実横進捗が設定閾値以下の「未開始PASS」で、freshな同一targetが
+  安全相互作用包絡より先へ設定相対速度以上で離れ続けたことを連続確認できた場合だけとする。
+  このhandoff周期はPASS候補を凍結し、SafetyEvaluator通過済みFOLLOW/RECOVERYだけを選べる。
+  次周期から近い対象を別transactionとして再分類する。解放した同一targetが相互作用包絡外へ
+  離れ続ける間は再ラッチを抑止し、別IDが近傍対象になった時、または同一IDが再びcatch可能な
+  相対距離・相対速度になった時だけ新規Gate 2評価を許す。横へコミット済みのPASS、一時欠測、
+  stale観測、単発の距離・速度変動はこの例外で解放しない
+- commit済みPASSは、実publish済みwireがtarget dへ到達し、終端0.5 m以上が平坦に
+  なった時点でtransactionの空間形状を固定する。以後はraw localized profileへ毎周期
+  張り直さず、unwrapped ego sで既通過部分をcropする。有限publish wireより先に
+  認可済みslow chainが続く場合は、初回に固定したchain ID/side/各waypoint dとの
+  identity一致を確認し、fresh観測で前進更新した同じwaypoint sから空間形状を補完する。
+  新しいID、side、waypoint dへ過去の認可を移さない。固定wireと実測dの差は
+  診断値として残し、候補可否は実測d connectorを含む実publish形状のtrackability、
+  corridor、fresh SafetyEvaluatorで判定する。staged chain中の横移動は先頭車のscalar
+  target dではなく、固定した全waypointの最外側dまでを認可包絡とし、その包絡端を
+  `safe_stop_lateral_error_threshold_m`より越えた逸脱だけは明示拒否する。時刻列、速度予測、
+  全相手予測、壁、controller trackability、SafetyEvaluatorは毎周期freshに再評価し、
+  どれかが不成立ならraw PASSへ暗黙に戻さずcurrent-d hold/STOPへ閉じる。前周期の
+  ControllerTrackingStatusを候補生成の前提へ戻して循環させず、実行可否は既存の
+  tracking/constraint authorityで独立にfail-closedする
+- slow chainの現在targetを幾何的に抜いた場合は、次周期にtarget IDだけを次waypointへ
+  進める。PASS side、初回avoid/full-offset marker、全chain waypoint、実行commitを保持し、
+  現在egoから短い新規profileを作り直さない。これにより、先頭車の`merge_front_gap_m`を
+  確保した時点で次車までの距離が短くても、すでに進めていた横分離を失わない。
+  handoff後の候補も現周期の全相手SafetyEvaluator、corridor、controller trackability、
+  下流generation authorityを通過した場合だけ実行する
+- 通常`SAFE_STOP`でも、最終候補が同周期のSafetyEvaluator、controller幾何制約、longitudinal
+  modelを通り、ego/V2X/reference/全観測相手と予測列が完全で、publish直前再評価後の全d点が
+  現在ego dと一致する定数holdの場合だけ`lateral_tracking_authorized_during_stop=true`とする。
+  Muxは同一generation/stampのplan/constraintとfreshなPP proofが揃った場合だけ、その操舵と縦停止を
+  合成する。中心復帰、非定数d、stale/欠損入力、publish reject、E-stop/watchdogは対象外とする
+- shadow解析では未認可候補の形状も比較できるよう、配信可能なpoints自体は
+  `trajectory_authorized=false` でも格納する。下流authorityは必ず認可flagと同一generationの
+  constraintを同時確認し、未認可pointsを制御入力に使わない
+- `/debug/overtake/metrics` には `v2_effective_trajectory_authorized`、
+  `v2_trajectory_publishable`、`v2_authorization_failure_reasons`、
+  `v2_constraint_prefilter_reason`、`v2_constraint_filtered_reason` を出す
 
 実行例:
 

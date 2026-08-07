@@ -71,10 +71,11 @@ safe_stop_release_speed_mps: 0.50
 `makeCandidate(CandidateType::SAFE_STOP, ...)` は次を満たします。
 
 - 目標横位置 `target_d` は現在の `ego.frenet.d` を安全コリドー内にclampした値。
-- 候補の全 `d` は `d_min_m + min_wall_margin_m` から `d_max_m - min_wall_margin_m` の範囲内。
+- 候補の全中心 `d` は `d_min_m + min_wall_margin_m` から `d_max_m - min_wall_margin_m` の範囲内。
+- さらに全候補点の車体四隅が、自己位置余裕を残してlanelet路面端内にある。
 - `v_ref` は全点 `safe_stop_v_mps`。
 - `shift_distance` は急な横移動を避けるため、`merge_distance_m` 以上を使う。
-- safety evaluator で `wall_margin` / `opponent_collision` を評価する。
+- safety evaluator で `wall_margin` / `wall_footprint_margin` / `opponent_collision` を評価する。
 
 STOP候補は、停止しながら横へ大きく逃げる軌道ではありません。目的は「安全コリドー内の現在位置を保ちながら、前方へ進む意図を最小化する」ことです。
 
@@ -144,7 +145,11 @@ FOLLOW_BLOCKED / YIELD_BEHIND / SIDE_BY_SIDE_KEEP / ABORT_RECOVERY
 `SAFE_STOP` は best-effort override を許可しません。
 
 ```text
-SAFE_STOP active_override = selected.feasible のときだけ true
+SAFE_STOP active_override =
+  selected.safety_evaluated && selected.feasible &&
+  selected.pass_target_corridor_valid &&
+  selected.controller_tracking_profile_valid &&
+  selected.longitudinal_profile_valid のときだけ true
 ```
 
 理由:
@@ -152,7 +157,41 @@ SAFE_STOP active_override = selected.feasible のときだけ true
 - `opponent_collision` でrejectされた停止候補をpublishすると、停止意図でも衝突判定済み軌道をMPCへ渡すことになる。
 - `wall_margin` でrejectされた停止候補をpublishすると、壁側に残る軌道を固定する可能性がある。
 
+縦停止中の横trackingはさらに厳しく、ego/V2X/reference/全観測相手の包含と予測列が同周期で
+完全であり、publish直前再評価後も横列の全点が当該周期のego dと一致する定数holdの場合だけ
+認可します。`OvertakePlan`の同一generation/stamp、SafetyConstraintのstop要求、freshなPP commandと
+ControllerTrackingStatusが揃った場合に限り、Muxが縦速度・加速度だけを停止側へ合成します。
+中心復帰、新規回避、古いprofile、入力欠損、外部E-stop、watchdog停止では操舵保持を許可しません。
+
 `SAFE_STOP` が infeasible の場合は、planner内だけで解決できない状態として扱い、debug reason に `safe_stop_infeasible` を出します。terminal failsafe へ接続するかは別仕様で決めます。
+
+## 未完了PASSの実行HOLD
+
+同じtarget IDとPASS sideを認可済みで、まだ幾何・安全完了していないPASSでは、
+一周期の候補rejectを通常の`YIELD_BEHIND`や中心向き`RECOVERY`の開始根拠にしません。
+横trajectoryの所有順は次へ固定します。
+
+1. freshな全対象・残りstaged waypoint・SafetyEvaluator・trackabilityを満たす同じPASS
+2. 同じtransactionの認可PASS側へ進む、SafetyEvaluator・trackability済みATTACK_FOLLOW
+3. SafetyEvaluator済みcurrent-d RECOVERY/HOLDまたはcurrent-d SAFE_STOP
+4. current-d STOPも不成立または入力不完全なら、横列なしのspeed-only STOP
+
+2は単なるcurrent-d保持ではなく、認可済みtarget ID・PASS side・staged target dを
+維持した低速横profileです。毎周期freshな全相手を含むSafetyEvaluatorとcontroller
+trackabilityを通過した場合だけ使い、未認可の別側・別target・中心復帰には使いません。
+
+3または4ではmodeを`FOLLOW_BLOCKED`に保ち、
+`maneuver_transaction_tracking_stop_active=true`でSafetyConstraintへ縦停止を要求します。
+target ID、PASS side、認可target d、staged waypointは変更せず、中心復帰phaseも開始しません。
+stale対象や途中waypoint欠損時は過去の横列を再利用せず、4へfail-closedします。
+current-d STOP/HOLDへ入った周期は、publish直前のrate limitやcurve holdでも前周期の
+PASS列を混ぜず、同周期に評価した定数d列をそのまま再検証します。
+
+同じPASSを再開する場合は、現在poseから再接続した候補をfreshな全対象で再評価し、
+停止中にpublishしたgeneration/token/stampと`ControllerTrackingStatus`を照合した後、
+SafetyConstraintのrelease debounceが完了してから縦STOPを解除します。
+明示的に認可されたtransaction abort centeringだけが、このHOLDより優先して
+中心復帰へ所有権を移せます。
 
 ## debug / report 契約
 

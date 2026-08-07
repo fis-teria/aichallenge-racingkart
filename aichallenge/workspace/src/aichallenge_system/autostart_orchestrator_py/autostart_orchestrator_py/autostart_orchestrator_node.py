@@ -7,6 +7,7 @@ import signal
 import shlex
 import subprocess
 import queue
+import math
 import threading
 import time
 from pathlib import Path
@@ -16,12 +17,240 @@ import rclpy
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 
 
 _DashboardPayload = tuple[str, str, Optional[str], bool, bool, str, str]
+_INITIAL_POSE_GNSS_NOT_READY = "no GNSS data received yet"
+
+
+def _vehicle_state_qos() -> QoSProfile:
+    """Match AWSIM's latched race-state publisher contract."""
+    return QoSProfile(
+        # AWSIM can publish Ready -> WaitStart -> Start as a short burst.
+        # Retain the official depth-10 history while preserving the latched
+        # reliable/transient-local compatibility needed by late joiners.
+        depth=10,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+
+
+class _RaceArmLatch:
+    """One-shot race arm latch for a single orchestrator process.
+
+    Start and initialization may arrive on different threads and in either
+    order.  A reset/finish advances the generation so an old initialization
+    result can never re-arm a completed race.  When neutral states are
+    configured, a non-neutral arm state is accepted only after one neutral
+    observation in the current reset generation.  This distinguishes AWSIM's
+    pre-count Start from the official Start that follows Ready.
+    """
+
+    def __init__(
+        self,
+        arm_on_states: list[str],
+        disarm_on_states: list[str],
+        neutral_states: list[str],
+        terminal_states: list[str],
+    ) -> None:
+        self._arm_on_states = {self.normalize(state) for state in arm_on_states}
+        self._disarm_on_states = {
+            self.normalize(state) for state in disarm_on_states
+        }
+        self._neutral_states = {self.normalize(state) for state in neutral_states}
+        self._terminal_states = {self.normalize(state) for state in terminal_states}
+        if self._arm_on_states and not self._neutral_states:
+            raise ValueError(
+                "neutral_states must not be empty when arm_on_states are configured"
+            )
+        self._generation = 0
+        self._initialization_complete = False
+        self._start_seen = False
+        self._arm_pending = False
+        self._armed = False
+        self._terminal_blocked = False
+        self._neutral_seen_since_reset = False
+        self._last_observation_reason = ""
+        self._last_state = ""
+
+    @staticmethod
+    def normalize(raw: Optional[str]) -> str:
+        return "".join(ch for ch in (raw or "").strip().lower() if ch.isalnum())
+
+    @property
+    def armed(self) -> bool:
+        return self._armed
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def initialization_complete(self) -> bool:
+        return self._initialization_complete
+
+    @property
+    def last_observation_reason(self) -> str:
+        return self._last_observation_reason
+
+    def begin_initialization(self) -> tuple[bool, int]:
+        if self._terminal_blocked or self._armed:
+            return False, self._generation
+        self._initialization_complete = False
+        return True, self._generation
+
+    def complete_initialization(
+        self, generation: int, succeeded: bool
+    ) -> tuple[bool, bool]:
+        if int(generation) != self._generation or self._terminal_blocked:
+            return False, self._armed
+        self._initialization_complete = bool(succeeded)
+        if not self._initialization_complete:
+            self._arm_pending = False
+            self._armed = False
+        elif self._start_seen or self._arm_pending:
+            self._start_seen = True
+            self._arm_pending = False
+            self._armed = True
+        return True, self._armed
+
+    def initialization_active(self, generation: int) -> bool:
+        """Return whether pre-Start initialization may still affect this race."""
+        return (
+            int(generation) == self._generation
+            and not self._terminal_blocked
+            and not self._armed
+            and not self._start_seen
+        )
+
+    def observe_state(self, raw_state: Optional[str]) -> bool:
+        state = self.normalize(raw_state)
+        self._last_observation_reason = ""
+        if not state:
+            state_changed = self._last_state != "<invalid>"
+            self._last_state = "<invalid>"
+            if state_changed:
+                self._generation += 1
+            self._initialization_complete = False
+            self._start_seen = False
+            self._arm_pending = False
+            self._armed = False
+            self._terminal_blocked = True
+            self._neutral_seen_since_reset = False
+            return self._armed
+
+        state_changed = state != self._last_state
+        self._last_state = state
+        if state in self._disarm_on_states:
+            # Repeated publication of the same reset state is one edge.  This
+            # keeps an initialization started from Grounded from being
+            # invalidated by duplicate Grounded samples.
+            if not state_changed:
+                self._last_observation_reason = "duplicate_reset_state"
+                return self._armed
+            self._last_observation_reason = "reset_edge"
+            self._generation += 1
+            self._initialization_complete = False
+            self._start_seen = False
+            self._arm_pending = False
+            self._armed = False
+            self._terminal_blocked = state in self._terminal_states
+            self._neutral_seen_since_reset = False
+            return self._armed
+
+        if self._terminal_blocked:
+            return self._armed
+
+        if state in self._arm_on_states:
+            is_neutral_state = state in self._neutral_states
+            if is_neutral_state:
+                self._neutral_seen_since_reset = True
+            elif not self._neutral_seen_since_reset:
+                # AWSIMの通常レースでReady前に来るStartはカウント開始側なので、
+                # neutralを一度も見ていないarm状態では走行をarmしない。公式Start
+                # はdomain0で確認後、専用serviceからobserve_official_start()へ渡す。
+                # SafetyGateはReady自体をarm_onへ含めるためReadyでarmできる。
+                self._last_observation_reason = "arm_state_before_neutral"
+                return self._armed
+            else:
+                # A vehicle-domain Start is useful as a running-state
+                # observation but is not authoritative for coordinated motion.
+                # Only the domain0-confirmed service event may arm here.
+                self._last_observation_reason = "arm_state_requires_official_start"
+                return self._armed
+            if not self._initialization_complete:
+                # Ready means the simulator has finished vehicle setup. Keep it
+                # pending until initial pose and control-mode setup complete.
+                self._arm_pending = True
+                return self._armed
+            self._start_seen = True
+            self._armed = True
+            return self._armed
+
+        if state in self._neutral_states:
+            self._neutral_seen_since_reset = True
+            return self._armed
+
+        # Only explicitly configured running states are neutral.  Corrupted or
+        # unknown state values fail closed and require a reset + initialization
+        # before another Start can arm the planner.
+        if state_changed:
+            self._generation += 1
+        self._initialization_complete = False
+        self._start_seen = False
+        self._arm_pending = False
+        self._armed = False
+        self._terminal_blocked = True
+        self._neutral_seen_since_reset = False
+        return self._armed
+
+    def observe_official_start(self) -> bool:
+        """Accept an authoritative Start without mutating vehicle-state history."""
+        self._last_observation_reason = ""
+        if self._armed:
+            self._last_observation_reason = "already_armed"
+            return self._armed
+        if self._terminal_blocked:
+            self._last_observation_reason = "terminal_blocked"
+            return self._armed
+        if not self._neutral_seen_since_reset:
+            # An early or stale request must not consume the current
+            # initialization generation.  The caller may retry only after the
+            # real vehicle-state stream has qualified this race with Ready.
+            self._last_observation_reason = "official_start_before_neutral"
+            return self._armed
+        if not self._initialization_complete:
+            # Official Start is a one-way race boundary.  If initialization is
+            # not complete here, reject delayed completion for this generation
+            # instead of allowing it to arm motion after the race has begun.
+            self._generation += 1
+            self._initialization_complete = False
+            self._start_seen = False
+            self._arm_pending = False
+            self._armed = False
+            self._terminal_blocked = True
+            self._last_observation_reason = "official_start_before_initialization"
+            return self._armed
+        self._start_seen = True
+        self._arm_pending = False
+        self._armed = True
+        self._last_observation_reason = "official_start"
+        return self._armed
+
+    def force_disarm(self) -> bool:
+        self._generation += 1
+        self._initialization_complete = False
+        self._start_seen = False
+        self._arm_pending = False
+        self._armed = False
+        self._terminal_blocked = True
+        self._neutral_seen_since_reset = False
+        return self._armed
 
 
 class AutostartOrchestrator(Node):
@@ -64,6 +293,19 @@ class AutostartOrchestrator(Node):
             raise RuntimeError(f"required parameter is not set: {name}")
         return value
 
+    def _initialize_optional_string_array_parameter(self, name: str) -> None:
+        parameter = self.get_parameter_or(name)
+        if parameter.type_ != Parameter.Type.NOT_SET:
+            return
+        result = self.set_parameters(
+            [Parameter(name, Parameter.Type.STRING_ARRAY, [])]
+        )[0]
+        if not result.successful:
+            raise RuntimeError(
+                f"failed to initialize optional string array parameter "
+                f"'{name}': {result.reason}"
+            )
+
     def __init__(self) -> None:
         super().__init__("autostart_orchestrator")
 
@@ -93,10 +335,42 @@ class AutostartOrchestrator(Node):
             self._require_parameter(name)
         self.declare_parameter("enable_debug_visualization", False)
         self.declare_parameter("enable_motion_analytics", True)
+        # An untyped empty Python list is inferred as BYTE_ARRAY by rclpy Humble.
+        # Declare the intended type explicitly so a YAML string-array override
+        # cannot abort the orchestrator before the race-arm publisher starts.
+        self.declare_parameter(
+            "rosbag_required_nonempty_topics", Parameter.Type.STRING_ARRAY
+        )
+        self.declare_parameter(
+            "rosbag_required_present_topics", Parameter.Type.STRING_ARRAY
+        )
+        self.declare_parameter(
+            "rosbag_required_any_nonempty_topic_groups",
+            Parameter.Type.STRING_ARRAY,
+        )
+        for name in (
+            "rosbag_required_nonempty_topics",
+            "rosbag_required_present_topics",
+            "rosbag_required_any_nonempty_topic_groups",
+        ):
+            self._initialize_optional_string_array_parameter(name)
         self.declare_parameter("motion_analytics_cmd", "ros2 run aichallenge_system_launch motion_analytics.py")
         self.declare_parameter("motion_analytics_input_dir", "")
         self.declare_parameter("initial_pose_service_timeout_sec", 120.0)
+        self.declare_parameter("initial_pose_retry_interval_sec", 1.0)
         self.declare_parameter("capture_stop_timeout_sec", 60.0)
+        self.declare_parameter("race_arm_topic", "/overtake/race_armed")
+        self.declare_parameter(
+            "initialization_ready_topic", "/autostart/initialization_ready"
+        )
+        self.declare_parameter(
+            "official_start_service", "/autostart/official_start"
+        )
+        self.declare_parameter("race_arm_on_vehicle_state", "Start")
+        self.declare_parameter("race_arm_neutral_vehicle_states", "Ready")
+        self.declare_parameter(
+            "race_disarm_on_vehicle_state", "Spawned,Grounded,Finish"
+        )
 
         vehicle_state_topic = str(self.get_parameter("vehicle_state_topic").value).strip()
         if not vehicle_state_topic:
@@ -117,12 +391,67 @@ class AutostartOrchestrator(Node):
             self._debug_panel_queue = queue.Queue(maxsize=128)
             self._start_debug_visualization()
 
-        self._cond = threading.Condition()
+        self._race_arm_lock = threading.RLock()
+        self._cond = threading.Condition(self._race_arm_lock)
         self._last_vehicle_state: Optional[str] = None
+        self._race_arm_on_states = self._normalize_state_list(
+            str(self.get_parameter("race_arm_on_vehicle_state").value or "")
+        )
+        self._race_disarm_on_states = self._normalize_state_list(
+            str(self.get_parameter("race_disarm_on_vehicle_state").value or "")
+        )
+        self._race_arm_neutral_states = self._normalize_state_list(
+            str(self.get_parameter("race_arm_neutral_vehicle_states").value or "")
+        )
+        race_terminal_states = self._normalize_state_list(
+            str(self.get_parameter("stop_on_vehicle_state").value or "")
+        )
+        for stop_state in race_terminal_states:
+            if stop_state not in self._race_disarm_on_states:
+                self._race_disarm_on_states.append(stop_state)
+        self._race_arm_latch = _RaceArmLatch(
+            self._race_arm_on_states,
+            self._race_disarm_on_states,
+            self._race_arm_neutral_states,
+            race_terminal_states,
+        )
+        self._race_armed = False
 
         rclpy.get_default_context().on_shutdown(self._on_rclpy_shutdown)
 
-        self._sub = self.create_subscription(String, vehicle_state_topic, self._on_vehicle_state, 10, callback_group=cbg)
+        race_arm_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._race_arm_pub = self.create_publisher(
+            Bool, str(self.get_parameter("race_arm_topic").value), race_arm_qos
+        )
+        self._initialization_ready = False
+        self._initialization_ready_pub = self.create_publisher(
+            Bool,
+            str(self.get_parameter("initialization_ready_topic").value),
+            race_arm_qos,
+        )
+        self._publish_race_arm(False, force=True)
+        self._publish_initialization_ready(False, force=True)
+        # AWSIM publishes state only on transitions and retains the latest value
+        # with TRANSIENT_LOCAL durability. The orchestrator commonly starts after
+        # AWSIM has already entered Grounded/Ready, so a VOLATILE subscription can
+        # wait forever with state=None and delay the official Start.
+        self._sub = self.create_subscription(
+            String,
+            vehicle_state_topic,
+            self._on_vehicle_state,
+            _vehicle_state_qos(),
+            callback_group=cbg,
+        )
+        self._official_start_svc = self.create_service(
+            SetBool,
+            str(self.get_parameter("official_start_service").value),
+            self._on_official_start,
+            callback_group=cbg,
+        )
 
         self._cli_initial_pose = self.create_client(
             Trigger, str(self.get_parameter("initial_pose_service").value), callback_group=cbg
@@ -139,6 +468,7 @@ class AutostartOrchestrator(Node):
         self._rosbag_log_fp: Optional[object] = None
         self._motion_analytics_run_once = False
         self._motion_analytics_lock = threading.Lock()
+        self._finalize_recordings_lock = threading.Lock()
         self._latest_link_lock = threading.Lock()
         self._capture_stop_lock = threading.Lock()
         self._capture_stop_thread: Optional[threading.Thread] = None
@@ -403,16 +733,117 @@ class AutostartOrchestrator(Node):
             rclpy.shutdown()
 
     def _on_vehicle_state(self, msg: String) -> None:
-        state = (msg.data or "").strip()
-        if not state:
-            return
+        state = msg.data or ""
         with self._cond:
             self._last_vehicle_state = state
+            should_arm = self._race_arm_latch.observe_state(state)
+            if (
+                self._race_arm_latch.last_observation_reason
+                == "arm_state_before_neutral"
+            ):
+                neutral_states = ",".join(self._race_arm_neutral_states)
+                self.get_logger().info(
+                    "overtake race arm deferred: "
+                    f"state={state} waiting_for_neutral={neutral_states}"
+                )
+            if self._normalize_state(state) in {
+                self._normalize_state(item)
+                for item in self._race_disarm_on_states
+            } and self._race_arm_latch.last_observation_reason != (
+                "duplicate_reset_state"
+            ):
+                self._publish_initialization_ready(False)
+            self._publish_race_arm(should_arm)
             self._cond.notify_all()
+
+    def _on_official_start(
+        self, request: SetBool.Request, response: SetBool.Response
+    ) -> SetBool.Response:
+        with self._cond:
+            force_publish = False
+            if request.data:
+                should_arm = self._race_arm_latch.observe_official_start()
+                reason = self._race_arm_latch.last_observation_reason
+                response.success = bool(should_arm)
+            else:
+                should_arm = self._race_arm_latch.force_disarm()
+                reason = "official_start_cancelled"
+                response.success = not should_arm
+                # A successful cancellation is a causal rollback event, even
+                # when the retained state was already false.  Do not let the
+                # publisher's value de-duplication hide this fresh evidence.
+                force_publish = response.success
+            response.message = reason
+            self._publish_race_arm(should_arm, force=force_publish)
+            self.get_logger().info(
+                "official race start service: "
+                f"request={'arm' if request.data else 'cancel'} "
+                f"accepted={'true' if response.success else 'false'} "
+                f"vehicle_state={self._last_vehicle_state or ''} "
+                f"reason={reason}"
+            )
+            self._cond.notify_all()
+        return response
+
+    def _publish_race_arm(self, armed: bool, *, force: bool = False) -> None:
+        with self._race_arm_lock:
+            armed = bool(armed)
+            if not force and armed == self._race_armed:
+                return
+            self._race_armed = armed
+            msg = Bool()
+            msg.data = armed
+            self._race_arm_pub.publish(msg)
+            self.get_logger().info(
+                f"overtake race arm={'true' if armed else 'false'}"
+            )
+
+    def _publish_initialization_ready(
+        self, ready: bool, *, force: bool = False
+    ) -> None:
+        ready = bool(ready)
+        if not force and ready == self._initialization_ready:
+            return
+        self._initialization_ready = ready
+        msg = Bool()
+        msg.data = ready
+        self._initialization_ready_pub.publish(msg)
+        self.get_logger().info(
+            f"race initialization ready={'true' if ready else 'false'}"
+        )
+
+    def _begin_race_start_initialization(self) -> tuple[bool, int]:
+        with self._race_arm_lock:
+            return self._race_arm_latch.begin_initialization()
+
+    def _complete_race_start_initialization(
+        self, generation: int, succeeded: bool
+    ) -> None:
+        with self._race_arm_lock:
+            accepted, should_arm = self._race_arm_latch.complete_initialization(
+                generation, succeeded
+            )
+            if not accepted:
+                self.get_logger().warn(
+                    "discarding stale race initialization result: "
+                    f"started_generation={generation} "
+                    f"current_generation={self._race_arm_latch.generation}"
+                )
+                return
+            self._publish_initialization_ready(
+                self._race_arm_latch.initialization_complete
+            )
+            self._publish_race_arm(should_arm)
+
+    def _force_race_disarm(self) -> None:
+        with self._race_arm_lock:
+            self._race_arm_latch.force_disarm()
+            self._publish_initialization_ready(False)
+            self._publish_race_arm(False)
 
     @staticmethod
     def _normalize_state(raw: Optional[str]) -> str:
-        return "".join(ch for ch in (raw or "").strip().lower() if ch.isalnum())
+        return _RaceArmLatch.normalize(raw)
 
     @staticmethod
     def _vehicle_label_from_domain_id(raw: str) -> str:
@@ -462,51 +893,181 @@ class AutostartOrchestrator(Node):
                 self._cond.wait(timeout=1.0)
         return False, self._last_vehicle_state
 
-    def _do_start_initialization(self, call_initial_pose: bool, request_control_mode: bool) -> None:
+    def _race_initialization_active(self, generation: int) -> bool:
+        with self._race_arm_lock:
+            return self._race_arm_latch.initialization_active(generation)
+
+    def _wait_initial_pose_retry_interval(
+        self, generation: int, deadline: float, interval_sec: float
+    ) -> bool:
+        with self._cond:
+            if not self._race_arm_latch.initialization_active(generation):
+                return False
+            remaining_sec = deadline - time.monotonic()
+            if remaining_sec <= 0.0:
+                return False
+            self._cond.wait(timeout=min(interval_sec, remaining_sec))
+            return self._race_arm_latch.initialization_active(generation)
+
+    def _call_trigger_before_start(
+        self, client, generation: int, deadline: float
+    ) -> tuple[bool, str]:
+        event = threading.Event()
+        result: tuple[bool, str] = (False, "no_response")
+        # service待機中にStart/Finishが観測された場合、無効化後のinitial-pose
+        # requestを送らない。状態確認と送信をcallbackと同じlockで直列化する。
+        with self._race_arm_lock:
+            if not self._race_arm_latch.initialization_active(generation):
+                return False, "initialization invalidated before request"
+            future = client.call_async(Trigger.Request())
+
+        def _done(_fut) -> None:
+            nonlocal result
+            try:
+                resp = _fut.result()
+                result = (bool(resp.success), str(resp.message))
+            except Exception as exc:  # noqa: BLE001
+                result = (False, f"exception: {exc}")
+            finally:
+                event.set()
+
+        future.add_done_callback(_done)
+        while True:
+            if not self._race_initialization_active(generation):
+                try:
+                    client.remove_pending_request(future)
+                except Exception:  # noqa: BLE001
+                    pass
+                return False, "initialization invalidated before Start"
+            remaining_sec = deadline - time.monotonic()
+            if remaining_sec <= 0.0:
+                try:
+                    client.remove_pending_request(future)
+                except Exception:  # noqa: BLE001
+                    pass
+                return False, "initial pose retry deadline exceeded"
+            if event.wait(timeout=min(0.1, remaining_sec)):
+                if not self._race_initialization_active(generation):
+                    return False, "stale initial pose response discarded"
+                return result
+
+    def _do_start_initialization(
+        self,
+        call_initial_pose: bool,
+        request_control_mode: bool,
+        generation: int,
+    ) -> bool:
         if not (call_initial_pose or request_control_mode):
             self._set_workflow_state(
                 self._STATE_REQUEST_CONTROL_MODE,
                 "initial pose / control mode disabled",
             )
-            return
+            return self._race_initialization_active(generation)
 
         if call_initial_pose:
-            timeout_sec = float(self.get_parameter("initial_pose_service_timeout_sec").value)
-            timeout_arg: Optional[float] = timeout_sec if timeout_sec > 0.0 else None
+            timeout_sec = float(
+                self.get_parameter("initial_pose_service_timeout_sec").value
+            )
+            retry_interval_sec = float(
+                self.get_parameter("initial_pose_retry_interval_sec").value
+            )
+            if (
+                not math.isfinite(timeout_sec)
+                or timeout_sec <= 0.0
+                or not math.isfinite(retry_interval_sec)
+                or retry_interval_sec <= 0.0
+            ):
+                self.get_logger().error(
+                    "invalid bounded initial-pose retry configuration: "
+                    f"timeout={timeout_sec} interval={retry_interval_sec}"
+                )
+                return False
             self._set_workflow_state(
                 self._STATE_WAIT_INITIAL_POSE,
                 f"waiting service and calling {self.get_parameter('initial_pose_service').value}"
-                + (f" (timeout {timeout_sec:.0f}s)" if timeout_arg is not None else ""),
+                + f" (overall timeout {timeout_sec:.0f}s)",
             )
-            deadline = None if timeout_arg is None else time.monotonic() + timeout_arg
-            if self._wait_for_service(self._cli_initial_pose, timeout_sec=timeout_arg):
-                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-                ok, msg = self._call_trigger(self._cli_initial_pose, timeout_sec=remaining)
-                if ok:
-                    self.get_logger().info(f"initial pose: success={ok} msg={msg}")
-                else:
-                    self.get_logger().warn(
-                        f"skip initial pose (call failed/timed out): {msg}; proceeding to capture/rosbag"
-                    )
-            else:
-                self.get_logger().warn(
-                    "skip initial pose (service not found within timeout); proceeding to capture/rosbag"
+            deadline = time.monotonic() + timeout_sec
+            attempt = 0
+            initial_pose_ok = False
+            last_message = "initial pose service unavailable"
+            while self._race_initialization_active(generation):
+                remaining_sec = deadline - time.monotonic()
+                if remaining_sec <= 0.0:
+                    last_message = "initial pose retry deadline exceeded"
+                    break
+                service_wait_sec = min(retry_interval_sec, remaining_sec)
+                if not self._wait_for_service(
+                    self._cli_initial_pose, timeout_sec=service_wait_sec
+                ):
+                    last_message = "initial pose service unavailable"
+                    continue
+                attempt += 1
+                ok, msg = self._call_trigger_before_start(
+                    self._cli_initial_pose, generation, deadline
                 )
+                if ok:
+                    initial_pose_ok = True
+                    self.get_logger().info(
+                        f"initial pose: success={ok} attempt={attempt} msg={msg}"
+                    )
+                    break
+                last_message = msg
+                if msg.strip() != _INITIAL_POSE_GNSS_NOT_READY:
+                    break
+                self.get_logger().warn(
+                    "initial pose waiting for GNSS: "
+                    f"attempt={attempt} retry_in={retry_interval_sec:.2f}s"
+                )
+                if not self._wait_initial_pose_retry_interval(
+                    generation, deadline, retry_interval_sec
+                ):
+                    break
+            if not initial_pose_ok:
+                self.get_logger().warn(
+                    "initial pose failed or was invalidated before Start: "
+                    f"attempts={attempt} msg={last_message}; race arm remains false"
+                )
+                return False
 
-        self._set_workflow_state(self._STATE_REQUEST_CONTROL_MODE, "initial pose completed")
+        if not self._race_initialization_active(generation):
+            self.get_logger().warn(
+                "race initialization invalidated before control mode request"
+            )
+            return False
+
+        self._set_workflow_state(
+            self._STATE_REQUEST_CONTROL_MODE, "initial pose completed"
+        )
 
         if request_control_mode:
             self._set_workflow_state(
                 self._STATE_REQUEST_CONTROL_MODE,
                 f"requesting control mode on {self.get_parameter('control_mode_request_topic').value}",
             )
-            ok, msg = self._publish_control_mode()
+            # state確認とpublishを同じlock内で行い、Start callbackとの順序を固定する。
+            with self._race_arm_lock:
+                if not self._race_arm_latch.initialization_active(generation):
+                    self.get_logger().warn(
+                        "control mode request suppressed after Start/reset"
+                    )
+                    return False
+                ok, msg = self._publish_control_mode()
             if ok:
-                self.get_logger().info(f"control mode request: success={ok} msg={msg}")
+                self.get_logger().info(
+                    f"control mode request: success={ok} msg={msg}"
+                )
             else:
-                self.get_logger().warn(f"skip control mode request: {msg}")
+                self.get_logger().warn(
+                    f"control mode request failed: {msg}; race arm remains false"
+                )
+                return False
 
-        self._set_workflow_state(self._STATE_REQUEST_CONTROL_MODE, "initialization done")
+        self._set_workflow_state(
+            self._STATE_REQUEST_CONTROL_MODE,
+            "initialization done",
+        )
+        return True
 
     def _wait_for_service(self, client, timeout_sec: Optional[float] = None) -> bool:
         if timeout_sec is None:
@@ -554,15 +1115,34 @@ class AutostartOrchestrator(Node):
 
     def _rosbag_argv(self) -> list[str]:
         topics = [str(t).strip() for t in (self.get_parameter("rosbag_topics").value or []) if str(t).strip()]
+        required_topics = self._required_rosbag_topics()
         if not topics:
+            if required_topics:
+                raise RuntimeError(
+                    "rosbag_topics is empty while required topics are configured: "
+                    f"{required_topics}"
+                )
             return []
+        unrecorded_required_topics = [
+            topic for topic in required_topics if topic not in topics
+        ]
+        if unrecorded_required_topics:
+            raise RuntimeError(
+                "rosbag required topics are not in rosbag_topics: "
+                f"{unrecorded_required_topics}"
+            )
 
         output = str(self.get_parameter("rosbag_output").value)
         storage_id = str(self.get_parameter("rosbag_storage_id").value)
         compression_format = str(self.get_parameter("rosbag_compression_format").value).strip()
         compression_mode = str(self.get_parameter("rosbag_compression_mode").value).strip()
 
-        argv: list[str] = ["ros2", "bag", "record", *topics, "-o", output, "-s", storage_id]
+        # 制御系publisherよりrecorderが先に起動しても、明示topicを開始時点で
+        # 取りこぼさない。特にmux debugは実行後解析の最終authority証跡になる。
+        argv: list[str] = [
+            "ros2", "bag", "record", "--include-unpublished-topics",
+            *topics, "-o", output, "-s", storage_id,
+        ]
         compression_enabled = bool(compression_format) and bool(compression_mode)
         compression_misconfigured = bool(compression_format) ^ bool(compression_mode)
 
@@ -640,6 +1220,145 @@ class AutostartOrchestrator(Node):
                     log_fp.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    @staticmethod
+    def _missing_required_rosbag_topics(
+        required_topics: list[str], topic_counts: dict[str, int]
+    ) -> list[str]:
+        return [topic for topic in required_topics if topic_counts.get(topic, 0) <= 0]
+
+    @staticmethod
+    def _absent_required_rosbag_topics(
+        required_topics: list[str], topic_counts: dict[str, int]
+    ) -> list[str]:
+        return [topic for topic in required_topics if topic not in topic_counts]
+
+    @staticmethod
+    def _empty_required_rosbag_topic_groups(
+        required_groups: list[list[str]], topic_counts: dict[str, int]
+    ) -> list[list[str]]:
+        return [
+            group
+            for group in required_groups
+            if group and all(topic_counts.get(topic, 0) <= 0 for topic in group)
+        ]
+
+    def _required_rosbag_topics(self) -> list[str]:
+        topics = [
+            str(topic).strip()
+            for topic in (
+                self.get_parameter("rosbag_required_nonempty_topics").value or []
+            )
+            if str(topic).strip()
+        ]
+        topics.extend(
+            str(topic).strip()
+            for topic in (
+                self.get_parameter("rosbag_required_present_topics").value or []
+            )
+            if str(topic).strip()
+        )
+        for group in (
+            self.get_parameter(
+                "rosbag_required_any_nonempty_topic_groups"
+            ).value
+            or []
+        ):
+            topics.extend(
+                topic.strip()
+                for topic in str(group).split(",")
+                if topic.strip()
+            )
+        return list(dict.fromkeys(topics))
+
+    def _validate_required_rosbag_topics(self) -> bool:
+        required_nonempty_topics = [
+            str(topic).strip()
+            for topic in (
+                self.get_parameter("rosbag_required_nonempty_topics").value or []
+            )
+            if str(topic).strip()
+        ]
+        required_present_topics = [
+            str(topic).strip()
+            for topic in (
+                self.get_parameter("rosbag_required_present_topics").value or []
+            )
+            if str(topic).strip()
+        ]
+        required_any_nonempty_topic_groups = [
+            [
+                topic.strip()
+                for topic in str(group).split(",")
+                if topic.strip()
+            ]
+            for group in (
+                self.get_parameter(
+                    "rosbag_required_any_nonempty_topic_groups"
+                ).value
+                or []
+            )
+        ]
+        if not (
+            required_nonempty_topics
+            or required_present_topics
+            or required_any_nonempty_topic_groups
+        ):
+            return True
+
+        output_uri = self._output_dir() / self._param_str("rosbag_output")
+        storage_id = self._param_str("rosbag_storage_id")
+        try:
+            import rosbag2_py
+
+            metadata = rosbag2_py.Info().read_metadata(str(output_uri), storage_id)
+            topic_counts = {
+                entry.topic_metadata.name: int(entry.message_count)
+                for entry in metadata.topics_with_message_count
+            }
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(
+                "failed to validate required rosbag topics: "
+                f"uri={output_uri} storage_id={storage_id} error={exc}"
+            )
+            return False
+
+        missing_topics = self._missing_required_rosbag_topics(
+            required_nonempty_topics, topic_counts
+        )
+        if missing_topics:
+            self.get_logger().error(
+                "rosbag required topics have zero messages: "
+                f"topics={missing_topics} uri={output_uri}"
+            )
+            return False
+        absent_topics = self._absent_required_rosbag_topics(
+            required_present_topics, topic_counts
+        )
+        if absent_topics:
+            self.get_logger().error(
+                "rosbag required topics are absent from metadata: "
+                f"topics={absent_topics} uri={output_uri}"
+            )
+            return False
+        empty_groups = self._empty_required_rosbag_topic_groups(
+            required_any_nonempty_topic_groups, topic_counts
+        )
+        if empty_groups:
+            self.get_logger().error(
+                "rosbag required any-of topic groups have zero messages: "
+                f"groups={empty_groups} uri={output_uri}"
+            )
+            return False
+
+        self.get_logger().info(
+            "rosbag required nonempty topics validated: "
+            + ", ".join(
+                f"{topic}={topic_counts[topic]}"
+                for topic in required_nonempty_topics
+            )
+        )
+        return True
 
     def _param_str(self, name: str, default: str = "") -> str:
         value = self.get_parameter(name).value
@@ -730,9 +1449,14 @@ class AutostartOrchestrator(Node):
     def _stop_rosbag_with_postprocess(self, enable_motion_analytics: bool) -> None:
         had_rosbag = self._rosbag_proc is not None
         self._stop_rosbag()
+        required_topics_valid = (
+            not had_rosbag or self._validate_required_rosbag_topics()
+        )
         if had_rosbag and enable_motion_analytics:
             self._set_workflow_state(self._STATE_POST_PROCESS, "running motion_analytics")
             self._run_motion_analytics()
+        if not required_topics_valid:
+            raise RuntimeError("required rosbag topic validation failed")
 
     def _start_capture_stop_async(self) -> None:
         with self._capture_stop_lock:
@@ -767,14 +1491,15 @@ class AutostartOrchestrator(Node):
     def _finalize_recordings(
         self, enable_rosbag: bool, enable_capture: bool, enable_motion_analytics: bool
     ) -> None:
-        if enable_capture:
-            self._start_capture_stop_async()
-        try:
-            if enable_rosbag:
-                self._stop_rosbag_with_postprocess(enable_motion_analytics)
-        finally:
+        with self._finalize_recordings_lock:
             if enable_capture:
-                self._join_capture_stop()
+                self._start_capture_stop_async()
+            try:
+                if enable_rosbag:
+                    self._stop_rosbag_with_postprocess(enable_motion_analytics)
+            finally:
+                if enable_capture:
+                    self._join_capture_stop()
 
     @staticmethod
     def _latest_file_by_pattern(base_dir: Path, pattern: str) -> Optional[Path]:
@@ -970,7 +1695,23 @@ class AutostartOrchestrator(Node):
                 self._set_workflow_state(self._STATE_WAIT_START, "start_on_vehicle_state is empty; start immediately")
                 self.get_logger().info("start_on_vehicle_state is empty; starting immediately")
 
-            self._do_start_initialization(call_initial_pose, request_control_mode)
+            initialization_accepted, initialization_generation = (
+                self._begin_race_start_initialization()
+            )
+            if initialization_accepted:
+                initialization_succeeded = self._do_start_initialization(
+                    call_initial_pose,
+                    request_control_mode,
+                    initialization_generation,
+                )
+                self._complete_race_start_initialization(
+                    initialization_generation, initialization_succeeded
+                )
+            else:
+                self.get_logger().warn(
+                    "race initialization skipped after terminal/reset state: "
+                    f"generation={initialization_generation}"
+                )
 
             if not (enable_capture or enable_rosbag):
                 self._set_workflow_state(self._STATE_RUNNING, "running without recording")
@@ -1005,6 +1746,14 @@ class AutostartOrchestrator(Node):
             self.get_logger().info(f"wait stop: {self._vehicle_state_topic} == {stop_on}")
             ok, last = self._wait_for_vehicle_state(stop_on)
             if not ok:
+                if not rclpy.ok():
+                    # An external launch/container shutdown is an intentional
+                    # recording stop, not a failure to observe the configured
+                    # vehicle terminal state.
+                    self._finalize_recordings(
+                        enable_rosbag, enable_capture, enable_motion_analytics
+                    )
+                    return
                 self.get_logger().error(f"failed waiting stop: expected={stop_on} last={last}")
                 self._set_workflow_state(self._STATE_STOPPING, f"stop wait failed: expected={stop_on} last={last}")
                 self._finalize_recordings(enable_rosbag, enable_capture, enable_motion_analytics)
@@ -1020,6 +1769,7 @@ class AutostartOrchestrator(Node):
             if exit_on_finish:
                 self._shutdown()
         except Exception as e:  # noqa: BLE001
+            self._force_race_disarm()
             self.get_logger().error(f"unhandled exception in worker: {e}")
             self._set_workflow_state(self._STATE_ERROR, f"unhandled exception: {e}")
             try:
@@ -1037,13 +1787,24 @@ class AutostartOrchestrator(Node):
 
     def destroy_node(self) -> bool:
         try:
+            if rclpy.ok():
+                self._force_race_disarm()
+            else:
+                # The shutdown callback already invalidated ROS publishers.
+                # Keep the internal latch fail-closed without publishing on a
+                # dead context.
+                with self._race_arm_lock:
+                    self._race_arm_latch.force_disarm()
             self._stop_debug_visualization()
             enable_motion_analytics = bool(self.get_parameter("enable_motion_analytics").value)
             enable_rosbag = bool(self.get_parameter("enable_rosbag").value)
             enable_capture = bool(self.get_parameter("enable_capture").value)
             self._finalize_recordings(enable_rosbag, enable_capture, enable_motion_analytics)
-        finally:
-            return super().destroy_node()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"recording finalization failed during destroy: {exc}")
+            self._set_workflow_state(self._STATE_ERROR, f"recording finalization failed: {exc}")
+            self._set_exit_code(10)
+        return super().destroy_node()
 
 
 def main() -> int:
@@ -1053,18 +1814,18 @@ def main() -> int:
         rclpy.spin(node)
     except KeyboardInterrupt:
         node.get_logger().info("KeyboardInterrupt received, shutting down node gracefully.")
+        node._shutdown()
     finally:
-        exit_code = int(getattr(node, "exit_code", 0))
         worker = getattr(node, "_worker", None)
-        try:
-            node.destroy_node()
-        finally:
-            if rclpy.ok():
-                rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
         if worker is not None and worker.is_alive():
-            worker.join(timeout=5.0)
-        exit_code = max(exit_code, int(getattr(node, "exit_code", 0)))
-        return exit_code
+            worker.join(timeout=30.0)
+        if worker is not None and worker.is_alive():
+            node.get_logger().error("worker did not finish during shutdown")
+            node._set_exit_code(10)
+        node.destroy_node()
+        return int(getattr(node, "exit_code", 0))
 
 
 if __name__ == "__main__":

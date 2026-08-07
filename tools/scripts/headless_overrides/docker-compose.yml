@@ -13,12 +13,24 @@ x-autoware-base: &autoware-base
     - TZ=Asia/Tokyo
     - RUN_MODE=${RUN_MODE:-}
     - SIM_MODE=${SIM_MODE:-}
+    - RUN_KIND=${RUN_KIND:-}
+    - PLANNER_PP_CONTROL_SMOKE_LIVE_SPATIAL=${PLANNER_PP_CONTROL_SMOKE_LIVE_SPATIAL:-false}
     - AWSIM_START_MODE
     - AWSIM_START_COUNT_SECONDS
+    - RACE_ARM_ON_VEHICLE_STATE=${RACE_ARM_ON_VEHICLE_STATE:-Start}
+    - AUTOSTART_DEBUG_VISUALIZATION=${AUTOSTART_DEBUG_VISUALIZATION:-true}
     - __NV_PRIME_RENDER_OFFLOAD=${__NV_PRIME_RENDER_OFFLOAD:-1}
     - __VK_LAYER_NV_optimus=${__VK_LAYER_NV_optimus:-NVIDIA_only}
     - VK_ICD_FILENAMES
     - CONTROL_METHOD=${CONTROL_METHOD:-}
+    - STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED=${STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED:-false}
+    - PP_CORE_EXACT_SNAPSHOT_ENABLED=${PP_CORE_EXACT_SNAPSHOT_ENABLED:-false}
+    - OVERTAKE_TRAJECTORY_BACKEND=${OVERTAKE_TRAJECTORY_BACKEND:-current}
+    - STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED=${STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED:-false}
+    - STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED=${STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED:-false}
+    - STATE_LATTICE_V2_PRODUCER_INSTANCE_ID=${STATE_LATTICE_V2_PRODUCER_INSTANCE_ID:-0}
+    - STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID=${STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID:-}
+    - STATE_LATTICE_V2_SESSION_ID=${STATE_LATTICE_V2_SESSION_ID:-}
     - LAUNCH_AWSIM=${LAUNCH_AWSIM:-true}
     - RUN_RVIZ=${RUN_RVIZ:-true}
     - AWSIM_VEHICLES
@@ -35,7 +47,7 @@ x-autoware-base: &autoware-base
     - HOST_GID=${HOST_GID:-}
     - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
   volumes:
-    - ./output:${OUTPUT_ROOT:-/output}
+    - ${OUTPUT_HOST_ROOT:-./output}:${OUTPUT_ROOT:-/output}
     - ./aichallenge:/aichallenge
     - ./remote:/remote
     - ./vehicle:/vehicle
@@ -54,7 +66,7 @@ x-autoware-base: &autoware-base
 x-autoware-eval-base: &autoware-eval-base
   <<: *autoware-base
   volumes:
-    - ./output:${OUTPUT_ROOT:-/output}
+    - ${OUTPUT_HOST_ROOT:-./output}:${OUTPUT_ROOT:-/output}
     # /aichallenge is baked into the eval image; intentionally not mounted here
     # - ./aichallenge:/aichallenge
     - ./vehicle/cyclonedds.xml:/opt/autoware/cyclonedds.xml
@@ -93,6 +105,10 @@ services:
   # Autoware service
   autoware:
     <<: *autoware-base
+    # The wrapper translates SIGINT into a coordinated ros2 launch shutdown.
+    # Allow launch escalation (120 s + 30 s) and ownership finalization.
+    stop_signal: SIGINT
+    stop_grace_period: 180s
     command: ["bash", "-lc", "exec /aichallenge/run_autoware.bash ${RUN_MODE:-awsim} ${ROS_DOMAIN_ID:-1} ${LOG_DIR:-}"]
 
   # Autoware service
@@ -107,6 +123,20 @@ services:
   autoware-command:
     <<: *autoware-base
     command: ["bash", "-lc", "cd ${CMD_WORKDIR:-/aichallenge} && exec bash -lc \"${CMD:-}\""]
+
+  # Packaged-byte Gate runtime.  Keep this separate from the developer service:
+  # /aichallenge must come from the eval image, never from the host checkout.
+  autoware-eval-runtime:
+    <<: *autoware-eval-base
+    image: "aichallenge-2025-eval"
+    stop_signal: SIGINT
+    stop_grace_period: 180s
+    command: ["bash", "-lc", "exec /aichallenge/run_autoware.bash ${RUN_MODE:-awsim} ${ROS_DOMAIN_ID:-1} ${LOG_DIR:-}"]
+
+  autoware-eval-command:
+    <<: *autoware-eval-base
+    image: "aichallenge-2025-eval"
+    command: ["bash", "-lc", "exec sleep infinity"]
 
   autoware-simulator-evaluation:
     <<: *autoware-eval-base

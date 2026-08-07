@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,14 @@ TIMESERIES_FIELDS = [
     "selected",
     "attempt_id",
     "target_vehicle_id",
+    "maneuver_target_relative_s_m",
+    "maneuver_target_pass_complete",
+    "maneuver_target_pass_safety_approved",
+    "maneuver_target_change_reason",
+    "maneuver_target_previous_id",
+    "maneuver_target_new_id",
+    "maneuver_transaction_incomplete",
+    "maneuver_transaction_pass_type",
     "target_lateral_offset_m",
     "ego_lateral_offset",
     "ego_wall_clearance_m",
@@ -78,6 +87,13 @@ ATTEMPT_FIELDS = [
     "domain_id",
     "attempt_id",
     "target_vehicle_id",
+    "passed_target_ids",
+    "passed_target_count",
+    "target_handoff_count",
+    "target_churn_count",
+    "pass_side",
+    "pass_side_churn_count",
+    "premature_abort",
     "start_time_sec",
     "end_time_sec",
     "start_lap",
@@ -136,7 +152,8 @@ def build_overtake_outputs(
     for domain in domains:
         domain_id = str(getattr(domain, "domain_id"))
         timeseries = build_overtake_timeseries(run_id, domain)
-        attempts = extract_overtake_attempts(timeseries, cfg)
+        attempt_timeseries = build_overtake_attempt_timeseries(run_id, domain)
+        attempts = extract_overtake_attempts(attempt_timeseries or timeseries, cfg)
         blocked = detect_blocked_intervals(timeseries, cfg)
         missed = detect_missed_overtake_chances(timeseries, cfg)
         bins = build_overtake_map_bins(attempts, timeseries, blocked, missed, cfg)
@@ -215,6 +232,30 @@ def build_overtake_timeseries(run_id: str, domain: object) -> list[dict[str, obj
     return sorted(rows, key=lambda row: _float(row.get("timestamp_sec")) or 0.0)
 
 
+def build_overtake_attempt_timeseries(
+    run_id: str, domain: object
+) -> list[dict[str, object]]:
+    """Build the lossless planner event axis used for PASS transaction audit.
+
+    Vehicle telemetry is the authoritative axis for motion metrics, but its lower-rate
+    nearest join can miss the single planner cycle where pass_complete becomes true.
+    Attempt/target/side state therefore uses every planner debug sample directly and
+    only joins speed diagnostics onto it.
+    """
+
+    overtake_rows = list(getattr(domain, "overtake_debug_timeseries", []))
+    speed_rows = list(getattr(domain, "speed_profile_debug_timeseries", []))
+    rows: list[dict[str, object]] = []
+    for overtake in overtake_rows:
+        time_sec = _first_float(overtake, "time_sec", "timestamp_sec")
+        speed = _nearest(speed_rows, time_sec, tolerance_sec=0.4)
+        row = _merge_row({}, overtake, speed or {})
+        row["run_id"] = run_id
+        row["domain_id"] = getattr(domain, "domain_id")
+        rows.append(row)
+    return sorted(rows, key=lambda row: _float(row.get("timestamp_sec")) or 0.0)
+
+
 def compute_overtake_metrics(
     attempts: list[dict[str, object]],
     timeseries: list[dict[str, object]],
@@ -228,13 +269,40 @@ def compute_overtake_metrics(
     success_count = sum(1 for row in attempts if row.get("result") == "success")
     unsafe_success_count = sum(1 for row in attempts if row.get("result") == "unsafe_success")
     aborted_count = sum(1 for row in attempts if row.get("result") == "aborted")
+    premature_abort_count = sum(
+        1 for row in attempts if _truthy(row.get("premature_abort"))
+    )
+    passed_target_count = sum(_int(row.get("passed_target_count")) for row in attempts)
+    target_handoff_count = sum(_int(row.get("target_handoff_count")) for row in attempts)
+    target_churn_count = sum(_int(row.get("target_churn_count")) for row in attempts)
+    pass_side_churn_count = sum(
+        _int(row.get("pass_side_churn_count")) for row in attempts
+    )
     failure_count = sum(1 for row in attempts if row.get("result") in {"failed", "aborted", "unsafe_success"})
     collision_count = _domain_int(domain_metrics, "collision_count") + sum(1 for row in attempts if row.get("collision"))
     penalty_count = _domain_int(domain_metrics, "penalty_count") + sum(1 for row in attempts if row.get("penalty"))
     blocked_time = sum(_float(row.get("duration_sec")) or 0.0 for row in blocked)
     opportunity_time = sum(_float(row.get("duration_sec")) or 0.0 for row in missed)
-    mpc_infeasible_count = sum(_int(row.get("mpc_infeasible_count")) for row in attempts)
-    mpc_infeasible_count += sum(1 for row in timeseries if "infeasible" in str(row.get("mpc_status") or "").lower())
+    # overtake MPCが非稼働(active_override=false)の通常PP走行まで失敗へ数えると、
+    # 実制御では使用していないsolver診断だけでrunをrejectしてしまう。総数は
+    # 可観測性のため残し、合否に使う既存キーは制御権がある周期だけへ限定する。
+    total_mpc_infeasible_count = sum(
+        1
+        for row in timeseries
+        if "infeasible" in str(row.get("mpc_status") or "").lower()
+    )
+    if timeseries:
+        mpc_infeasible_count = sum(
+            1
+            for row in timeseries
+            if "infeasible" in str(row.get("mpc_status") or "").lower()
+            and _truthy(row.get("active_override"))
+        )
+    else:
+        mpc_infeasible_count = sum(
+            _int(row.get("mpc_infeasible_count")) for row in attempts
+        )
+        total_mpc_infeasible_count = mpc_infeasible_count
     min_vehicle_distance = _min(
         [_float(row.get("min_vehicle_distance_m")) for row in attempts]
         + [_float(row.get("closest_vehicle_distance_m")) for row in timeseries]
@@ -257,6 +325,11 @@ def compute_overtake_metrics(
         "success_count": success_count,
         "failure_count": failure_count,
         "aborted_count": aborted_count,
+        "premature_abort_count": premature_abort_count,
+        "passed_target_count": passed_target_count,
+        "target_handoff_count": target_handoff_count,
+        "target_churn_count": target_churn_count,
+        "pass_side_churn_count": pass_side_churn_count,
         "success_rate": (success_count / attempt_count) if attempt_count else 0.0,
         "failure_rate": (failure_count / attempt_count) if attempt_count else 0.0,
         "unsafe_success_count": unsafe_success_count,
@@ -274,6 +347,10 @@ def compute_overtake_metrics(
         "min_cbf_h": min_cbf_h,
         "max_cbf_slack": max_cbf_slack,
         "mpc_infeasible_count": mpc_infeasible_count,
+        "mpc_infeasible_count_total": total_mpc_infeasible_count,
+        "inactive_mpc_infeasible_count": max(
+            0, total_mpc_infeasible_count - mpc_infeasible_count
+        ),
         "avg_time_to_pass_sec": _avg(_float(row.get("time_to_pass_sec")) for row in attempts),
         "avg_return_to_line_time_sec": _avg(_float(row.get("return_to_line_time_sec")) for row in attempts),
         "avg_speed_loss_after_pass_mps": None,
@@ -298,6 +375,30 @@ def _merge_row(base: dict[str, object], overtake: dict[str, object], speed: dict
         "selected": _first_value(overtake, "selected"),
         "attempt_id": _first_value(overtake, "overtake_attempt_id", "attempt_id"),
         "target_vehicle_id": _first_value(overtake, "target_vehicle_id", "front_vehicle_id"),
+        "maneuver_target_relative_s_m": _first_value(
+            overtake, "maneuver_target_relative_s_m"
+        ),
+        "maneuver_target_pass_complete": _first_value(
+            overtake, "maneuver_target_pass_complete"
+        ),
+        "maneuver_target_pass_safety_approved": _first_value(
+            overtake, "maneuver_target_pass_safety_approved"
+        ),
+        "maneuver_target_change_reason": _first_value(
+            overtake, "maneuver_target_change_reason"
+        ),
+        "maneuver_target_previous_id": _first_value(
+            overtake, "maneuver_target_previous_id"
+        ),
+        "maneuver_target_new_id": _first_value(
+            overtake, "maneuver_target_new_id"
+        ),
+        "maneuver_transaction_incomplete": _first_value(
+            overtake, "maneuver_transaction_incomplete"
+        ),
+        "maneuver_transaction_pass_type": _first_value(
+            overtake, "maneuver_transaction_pass_type"
+        ),
         "target_lateral_offset_m": _first_value(overtake, "target_lateral_offset_m"),
         "ego_lateral_offset": _first_value(overtake, "ego_lateral_offset"),
         "ego_wall_clearance_m": _first_value(overtake, "ego_wall_clearance_m"),
@@ -307,7 +408,10 @@ def _merge_row(base: dict[str, object], overtake: dict[str, object], speed: dict
         "cbf_slack": _first_value(overtake, "cbf_slack"),
         "active_cbf_constraint_count": _first_value(overtake, "active_cbf_constraint_count"),
         "closest_vehicle_id": _first_value(overtake, "closest_vehicle_id", "front_vehicle_id"),
-        "closest_vehicle_distance_m": _first_value(overtake, "closest_vehicle_distance_m", "front_distance_m", "front_delta_s"),
+        # 旧planner debugのclosest_vehicle_distance_mはfrontの縦Δsをそのまま
+        # 出していた。横並びで0 mに見えるため、同じfront IDのΔs/Δdが揃う
+        # 場合は2次元中心距離を復元し、片方が欠けるlegacy bagだけ旧値へ戻す。
+        "closest_vehicle_distance_m": _planar_vehicle_distance(overtake),
         "mpc_status": _coalesce(_first_value(speed, "mpc_status"), "unknown"),
         "mpc_solve_time_ms": _first_value(speed, "mpc_solve_time_ms"),
         "mpc_infeasible_count": _first_value(speed, "mpc_infeasible_count"),
@@ -394,6 +498,16 @@ def _first_float(row: dict[str, object], *keys: str) -> float | None:
     return None
 
 
+def _planar_vehicle_distance(row: dict[str, object]) -> object:
+    delta_s = _first_float(row, "front_distance_m", "front_delta_s")
+    delta_d = _first_float(row, "front_delta_d")
+    if delta_s is not None and delta_d is not None:
+        return math.hypot(delta_s, delta_d)
+    return _first_value(
+        row, "closest_vehicle_distance_m", "front_distance_m", "front_delta_s"
+    )
+
+
 def _domain_int(metrics: object | None, key: str) -> int:
     if metrics is None:
         return 0
@@ -439,3 +553,11 @@ def _int(value: object) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes"}

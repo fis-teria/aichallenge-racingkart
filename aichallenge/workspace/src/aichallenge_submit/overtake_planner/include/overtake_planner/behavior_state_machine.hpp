@@ -17,6 +17,11 @@ public:
   double modeEnterTime() const { return mode_enter_time_sec_; }
   int safeStopHoldCount() const { return safe_stop_hold_count_; }
   int safeStopReleaseCount() const { return safe_stop_release_count_; }
+  int passLeftSafeCycles() const { return pass_left_safe_cycles_; }
+  int passRightSafeCycles() const { return pass_right_safe_cycles_; }
+  const std::string &passSafeCycleResetReason() const {
+    return pass_safe_cycle_reset_reason_;
+  }
   bool futureYieldHoldActive() const { return future_yield_hold_active_; }
 
 private:
@@ -32,6 +37,9 @@ private:
   double mode_enter_time_sec_{0.0};
   int pass_left_safe_cycles_{0};
   int pass_right_safe_cycles_{0};
+  std::string pass_safe_target_id_{};
+  CandidateType pass_safe_candidate_type_{CandidateType::FASTEST};
+  std::string pass_safe_cycle_reset_reason_{};
   int safe_stop_hold_count_{0};
   int safe_stop_release_count_{0};
   bool future_yield_hold_active_{false};

@@ -434,7 +434,7 @@ same_direction_min_s_dot_mps: 0.05
 | `yield_release_lateral_error_m` | `0.60` | `YIELD_BEHIND` と `future_yield_hold` を抜けるために必要な中心線からの横ずれ上限。負値で無効。 |
 | `min_pass_gap_m` | `1.80` | 狭い隙間の追い越しを抑える。 |
 | `min_wall_margin_m` | `0.50` | 壁余裕を広めに取る。 |
-| `safety_ellipse_b_m` | `1.8` | 横方向の他車接近に厳しくする。 |
+| `safety_ellipse_b_m` | `1.80` | Gate2実接触点（自車body前0.87 m・横1.66 m）を含む旋回swept bodyを覆う。`min_ellipse_h=0.20` 適用後の純横実効中心間隔は約1.972 mで、PASS目標にはさらに0.10 mを加え約2.072 mを要求する。 |
 | `safe_stop_v_mps` | `0.20` | 0速度ではなく小さい正値で停止意図を表す。 |
 | `safe_stop_trigger_cycles` | `1` | 回避不能時に早く安全停止へ倒す。 |
 

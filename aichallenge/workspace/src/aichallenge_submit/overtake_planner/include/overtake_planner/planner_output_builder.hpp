@@ -4,6 +4,11 @@
 
 namespace overtake_planner {
 
+std::string authoritativeTargetVehicleId(const BlockedInfo &blocked_info);
+
+bool authoritativePlanTrajectoryPayloadRequired(
+    bool trajectory_authorized, bool lateral_maneuver_required);
+
 struct PlannerOutputBuildInput {
   BehaviorMode mode;
   const EgoState &ego;
@@ -18,6 +23,8 @@ struct PlannerOutputBuildInput {
   double wall_soft_margin_m{0.0};
   const ActiveSectionSafety &active_section;
   const MpcHealthStatus &mpc_health;
+  bool pure_pursuit_primary_and_fresh{false};
+  bool verified_non_mpc_pure_pursuit{false};
 };
 
 class PlannerOutputBuilder {

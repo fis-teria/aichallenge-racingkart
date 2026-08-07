@@ -32,6 +32,7 @@ def extract_overtake_attempts(rows: list[dict[str, object]], config: dict[str, A
     attempts: list[dict[str, object]] = []
     active: list[dict[str, object]] = []
     attempt_id = 0
+    planner_attempt_id = ""
     saw_returning = False
 
     for row in ordered:
@@ -40,7 +41,37 @@ def extract_overtake_attempts(rows: list[dict[str, object]], config: dict[str, A
             if state in ATTEMPT_STATES:
                 attempt_id += 1
                 active = [row]
+                planner_attempt_id = _planner_attempt_id(row)
                 saw_returning = state == "RETURNING"
+            continue
+
+        current_planner_attempt_id = _planner_attempt_id(row)
+        if not planner_attempt_id and current_planner_attempt_id:
+            # vehicle時系列へnearest joinした先頭行は、同stampの軽量mode行を
+            # 拾ってattempt IDが空のことがある。直後の詳細debugで権威IDを
+            # 回収し、legacy timeout扱いのまま分割しない。
+            planner_attempt_id = current_planner_attempt_id
+        if (
+            planner_attempt_id
+            and current_planner_attempt_id
+            and current_planner_attempt_id != planner_attempt_id
+        ):
+            attempts.append(
+                classify_attempt(
+                    active,
+                    config,
+                    attempt_id,
+                    timeout=False,
+                    saw_returning=saw_returning,
+                )
+            )
+            active = []
+            planner_attempt_id = ""
+            saw_returning = False
+            if state in ATTEMPT_STATES:
+                attempt_id += 1
+                active = [row]
+                planner_attempt_id = current_planner_attempt_id
             continue
 
         active.append(row)
@@ -48,11 +79,27 @@ def extract_overtake_attempts(rows: list[dict[str, object]], config: dict[str, A
             saw_returning = True
 
         elapsed = _elapsed(active)
-        timeout = elapsed is not None and elapsed > _cfg(config, "success.t_pass_max_sec", 8.0)
-        finished = state in {"ABORTED", "COMPLETED"} or (saw_returning and state in {"NORMAL", "FOLLOWING"})
+        # Plannerが発行するattempt IDは、長い停止車列を同一PASS transactionで
+        # 抜く契約の権威情報。解析器側の固定8秒で分割すると、安全に保持された
+        # d2->d3->d4 handoffを複数のtimeout失敗へ捏造するため、legacy bagのように
+        # IDが無い場合だけ従来timeoutを適用する。
+        timeout = (
+            not planner_attempt_id
+            and elapsed is not None
+            and elapsed > _cfg(config, "success.t_pass_max_sec", 8.0)
+        )
+        terminal_state = state in {"ABORTED", "COMPLETED"}
+        if planner_attempt_id and terminal_state and not current_planner_attempt_id:
+            # 同stampに先行する軽量mode行だけではpass_complete/target IDを
+            # 判定できない。詳細行を待ち、完了PASSをpremature ABORTへ誤分類しない。
+            terminal_state = False
+        finished = terminal_state or (
+            saw_returning and state in {"NORMAL", "FOLLOWING"}
+        )
         if finished or timeout:
             attempts.append(classify_attempt(active, config, attempt_id, timeout=timeout, saw_returning=saw_returning))
             active = []
+            planner_attempt_id = ""
             saw_returning = False
 
     if active:
@@ -84,9 +131,17 @@ def classify_attempt(
         or (max_slack is not None and max_slack > _cfg(config, "success.major_slack_threshold", 0.20))
     )
 
-    if "ABORTED" in states:
+    completed_target_ids = _completed_target_ids(attempt_rows)
+    premature_abort = _premature_abort(attempt_rows, completed_target_ids)
+    explicit_pass_complete = bool(completed_target_ids)
+    if "ABORTED" in states and premature_abort:
         result = "aborted"
-    elif saw_returning or "COMPLETED" in states or _passed_target(attempt_rows, config):
+    elif (
+        explicit_pass_complete
+        or saw_returning
+        or "COMPLETED" in states
+        or _passed_target(attempt_rows, config)
+    ):
         result = "unsafe_success" if unsafe else "success"
     elif timeout:
         result = "failed"
@@ -96,6 +151,15 @@ def classify_attempt(
     abort_reason = str(end.get("overtake_abort_reason") or end.get("abort_reason") or "").strip()
     if result in {"aborted", "failed"} and not abort_reason:
         abort_reason = infer_abort_reason(attempt_rows, config, timeout=timeout)
+    elif result in {"success", "unsafe_success"}:
+        # PASS完了後のreentry gate待ちはABORT_RECOVERYというmode名でも
+        # premature abortではない。成功attemptへunknown abortを残さない。
+        abort_reason = ""
+
+    handoff_count, target_churn_count = _target_change_counts(
+        attempt_rows, completed_target_ids
+    )
+    pass_side, pass_side_churn_count = _pass_side_summary(attempt_rows)
 
     time_to_pass = _time_to_first_state(attempt_rows, "RETURNING")
     return_to_line = None
@@ -103,8 +167,15 @@ def classify_attempt(
         return_to_line = (_time(end) or 0.0) - ((_time(start) or 0.0) + time_to_pass)
 
     return {
-        "attempt_id": attempt_id,
+        "attempt_id": _first_non_empty(attempt_rows, "attempt_id") or attempt_id,
         "target_vehicle_id": _first_non_empty(attempt_rows, "target_vehicle_id", "front_vehicle_id"),
+        "passed_target_ids": ",".join(completed_target_ids),
+        "passed_target_count": len(completed_target_ids),
+        "target_handoff_count": handoff_count,
+        "target_churn_count": target_churn_count,
+        "pass_side": pass_side,
+        "pass_side_churn_count": pass_side_churn_count,
+        "premature_abort": premature_abort,
         "start_time_sec": _time(start),
         "end_time_sec": _time(end),
         "start_lap": start.get("lap", ""),
@@ -154,6 +225,97 @@ def _passed_target(rows: list[dict[str, object]], config: dict[str, Any]) -> boo
         if ego_s is not None and target_s is not None and ego_s > target_s + margin:
             return True
     return False
+
+
+def _planner_attempt_id(row: dict[str, object]) -> str:
+    value = row.get("attempt_id")
+    if value in (None, "", 0, "0"):
+        return ""
+    return str(value)
+
+
+def _completed_target_ids(rows: list[dict[str, object]]) -> list[str]:
+    completed: list[str] = []
+    for row in rows:
+        if not _truthy(row.get("maneuver_target_pass_complete")):
+            continue
+        target_id = str(
+            row.get("target_vehicle_id")
+            or row.get("maneuver_target_id")
+            or ""
+        ).strip()
+        if target_id and target_id not in completed:
+            completed.append(target_id)
+    return completed
+
+
+def _premature_abort(
+    rows: list[dict[str, object]], completed_target_ids: list[str]
+) -> bool:
+    last_target_id = ""
+    for row in rows:
+        target_id = str(
+            row.get("target_vehicle_id")
+            or row.get("maneuver_target_id")
+            or ""
+        ).strip()
+        if target_id:
+            last_target_id = target_id
+        if normalize_state(row.get("overtake_state")) != "ABORTED":
+            continue
+        if _truthy(row.get("maneuver_target_pass_complete")):
+            return False
+        return not last_target_id or last_target_id not in completed_target_ids
+    return False
+
+
+def _target_change_counts(
+    rows: list[dict[str, object]], completed_target_ids: list[str]
+) -> tuple[int, int]:
+    handoff_count = 0
+    churn_count = 0
+    previous_seen = ""
+    for row in rows:
+        target_id = str(
+            row.get("target_vehicle_id")
+            or row.get("maneuver_target_id")
+            or ""
+        ).strip()
+        if not target_id or target_id == previous_seen:
+            continue
+        if previous_seen:
+            reason = str(row.get("maneuver_target_change_reason") or "").strip()
+            previous_id = str(
+                row.get("maneuver_target_previous_id") or previous_seen
+            ).strip()
+            new_id = str(row.get("maneuver_target_new_id") or target_id).strip()
+            valid_handoff = (
+                reason == "previous_target_passed"
+                and previous_id == previous_seen
+                and new_id == target_id
+                and previous_seen in completed_target_ids
+            )
+            if valid_handoff:
+                handoff_count += 1
+            else:
+                churn_count += 1
+        previous_seen = target_id
+    return handoff_count, churn_count
+
+
+def _pass_side_summary(rows: list[dict[str, object]]) -> tuple[str, int]:
+    sides: list[str] = []
+    for row in rows:
+        side = str(
+            row.get("maneuver_transaction_pass_type")
+            or row.get("selected")
+            or ""
+        ).strip().upper()
+        if side not in {"PASS_LEFT", "PASS_RIGHT"}:
+            continue
+        if not sides or sides[-1] != side:
+            sides.append(side)
+    return (sides[0] if sides else "", max(0, len(sides) - 1))
 
 
 def _time_to_first_state(rows: list[dict[str, object]], state: str) -> float | None:

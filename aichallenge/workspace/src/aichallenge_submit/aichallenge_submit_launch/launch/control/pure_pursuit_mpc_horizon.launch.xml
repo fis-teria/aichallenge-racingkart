@@ -4,46 +4,161 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="use_obstacle_avoidance" default="true"/>
   <arg name="use_overtake_planner" default="true"/>
+  <arg name="mpc_enabled" default="true"/>
+  <arg name="state_lattice_mpc_health_speed_guard_enabled" default="true"/>
+  <arg name="require_state_lattice_override_fresh" default="false"/>
   <arg name="pure_pursuit_speed_mps" default="10.0"/>
   <arg name="wall_recovery_enabled" default="false"/>
+  <arg name="c002ay1_prod_measure_enabled" default="false"/>
+  <arg name="c002ay1_prod_measure_socket_path" default=""/>
+  <arg name="c002ay1_prod_measure_run_id" default=""/>
+  <arg name="c002ay1_prod_measure_planner_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_planner_instance_id" default="0"/>
+  <arg name="c002ay1_prod_measure_pp_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_pp_instance_id" default="0"/>
+  <arg name="c002ay1_prod_measure_selected_stream" default="legacy"/>
+  <arg name="c002ay0_shadow_capture_enabled" default="true"/>
+  <arg name="state_lattice_source_binding_shadow_enabled" default="true"/>
+  <arg name="c002ay0_shadow_worker_path" default=""/>
+  <arg name="c002ay0_shadow_session_generation" default="0"/>
+  <arg name="c002ay0_shadow_session_nonce" default="0"/>
+  <arg name="c002ay0_state_lattice_shadow_enabled" default="true"/>
+  <arg name="c002ay0_state_lattice_shadow_worker_path" default="$(find-pkg-prefix state_lattice_overtake_planner)/lib/state_lattice_overtake_planner/c002ay0_state_lattice_shadow_worker"/>
+  <arg name="c002ay0_state_lattice_shadow_session_generation" default="0"/>
+  <arg name="c002ay0_state_lattice_shadow_session_nonce" default="0"/>
+  <arg name="free_run_live_exact_observe_enabled" default="true"/>
+  <arg name="free_run_live_exact_pre_ack_hold_enabled" default="true"/>
+  <arg name="pp_core_exact_snapshot_enabled" default="false"/>
+  <arg name="state_lattice_v2_live_proposal_publish_enabled" default="false"/>
+  <arg name="state_lattice_v2_live_proposal_accept_enabled" default="false"/>
+  <arg name="state_lattice_v2_command_activation_enabled" default="false"/>
+  <arg name="state_lattice_v4_poc_identity_gate_enabled" default="false"/>
+  <arg name="state_lattice_v4_poc_command_activation_enabled" default="false"/>
+  <arg name="state_lattice_v2_producer_instance_id" default="0"/>
+  <arg name="state_lattice_v2_pp_producer_instance_id" default=""/>
+  <arg name="state_lattice_v2_session_id" default=""/>
+  <arg name="overtake_trajectory_backend" default="current"/>
+  <arg name="overtake_control_route" default="current"
+       description="Select overtake execution: current, state_lattice_pure_pursuit, state_lattice_instant_mux">
+    <choice value="current"/>
+    <choice value="state_lattice_pure_pursuit"/>
+    <choice value="state_lattice_instant_mux"/>
+  </arg>
+  <arg name="require_safety_constraint"
+       default="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' == 'current'&quot;)"/>
+  <let name="current_overtake_planner_enabled"
+       value="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' == 'current'&quot;)"/>
+  <let name="state_lattice_pure_pursuit_enabled"
+       value="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' == 'state_lattice_pure_pursuit'&quot;)"/>
+  <let name="state_lattice_instant_enabled"
+       value="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' == 'state_lattice_instant_mux'&quot;)"/>
+  <let name="reference_override_enabled"
+       value="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' in ('current', 'state_lattice_pure_pursuit')&quot;)"/>
+  <let name="control_kinematics_topic"
+       value="/delay_aware_mpc/localization/kinematic_state"
+       if="$(var mpc_enabled)"/>
+  <let name="control_kinematics_topic"
+       value="/localization/kinematic_state"
+       unless="$(var mpc_enabled)"/>
 
-  <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/delay_aware_mpc.launch.xml">
-    <arg name="use_sim_time" value="$(var use_sim_time)"/>
-    <arg name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
-    <arg name="use_overtake_planner" value="$(var use_overtake_planner)"/>
-    <arg name="config_path" value="$(find-pkg-share delay_aware_mpc_ros)/config/pure_pursuit_mpc_horizon_config.yaml"/>
-    <arg name="ref_vel_path" value="$(find-pkg-share delay_aware_mpc_ros)/config/ref_vel.yaml"/>
-    <arg name="output_control_cmd" value="/pure_pursuit_mpc_horizon/mpc/control_cmd"/>
-    <arg name="output_raw_control_cmd" value="/pure_pursuit_mpc_horizon/mpc/control_cmd_raw"/>
-    <arg name="output_mpc_predicted_horizon" value="/pure_pursuit_mpc_horizon/mpc/predicted_horizon"/>
-    <arg name="output_mpc_predicted_horizon_contract" value="/pure_pursuit_mpc_horizon/mpc/predicted_horizon_contract"/>
-    <arg name="input_control_cmd_raw" value="/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd_raw"/>
-    <arg name="overtake_horizon_points" value="40"/>
-    <arg name="overtake_mpc_health_solve_time_warn_ms" value="200.0"/>
-  </include>
+  <group if="$(var state_lattice_pure_pursuit_enabled)">
+    <include file="$(find-pkg-share state_lattice_overtake_planner)/launch/state_lattice_overtake_planner.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="input_odom" value="$(var control_kinematics_topic)"/>
+      <arg name="mpc_health_speed_guard_enabled" value="$(var state_lattice_mpc_health_speed_guard_enabled)"/>
+      <arg name="live_control_output_enabled" value="true"/>
+      <arg name="experimental_spatial_reference_override_live_publish_enabled" value="$(var state_lattice_v4_poc_command_activation_enabled)"/>
+      <arg name="instant_control_enabled" value="false"/>
+      <arg name="state_lattice_v2_live_proposal_publish_enabled" value="$(var state_lattice_v2_live_proposal_publish_enabled)"/>
+      <arg name="state_lattice_v2_producer_instance_id" value="$(var state_lattice_v2_producer_instance_id)"/>
+      <arg name="state_lattice_v2_base_attestation_accept_enabled" value="$(var state_lattice_v2_live_proposal_publish_enabled)"/>
+      <arg name="state_lattice_v2_expected_pp_producer_instance_id" value="$(var state_lattice_v2_pp_producer_instance_id)"/>
+      <arg name="state_lattice_v2_expected_pp_session_id" value="$(var state_lattice_v2_session_id)"/>
+      <arg name="controller_trackability_profile" value="pure_pursuit"/>
+      <arg name="safety_evaluation_enabled" value="true"/>
+      <arg name="c002ay0_state_lattice_shadow_enabled" value="$(var c002ay0_state_lattice_shadow_enabled)"/>
+      <arg name="c002ay0_state_lattice_shadow_worker_path" value="$(var c002ay0_state_lattice_shadow_worker_path)"/>
+      <arg name="c002ay0_state_lattice_shadow_session_generation" value="$(var c002ay0_state_lattice_shadow_session_generation)"/>
+      <arg name="c002ay0_state_lattice_shadow_session_nonce" value="$(var c002ay0_state_lattice_shadow_session_nonce)"/>
+      <arg name="output_instant_control_cmd" value="/state_lattice/instant_control_unused"/>
+      <arg name="output_reference_override" value="/overtake/reference_override"/>
+    </include>
+  </group>
+
+  <group if="$(var state_lattice_instant_enabled)">
+    <include file="$(find-pkg-share simple_state_lattice_planner)/launch/simple_state_lattice_planner.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="input_odom" value="$(var control_kinematics_topic)"/>
+      <arg name="live_control_output_enabled" value="true"/>
+      <arg name="safety_evaluation_enabled" value="true"/>
+      <arg name="output_control_cmd" value="/hybrid_control/state_lattice/control_cmd"/>
+    </include>
+  </group>
+
+  <group if="$(var mpc_enabled)">
+    <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/delay_aware_mpc.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
+      <arg name="use_overtake_planner" value="$(var current_overtake_planner_enabled)"/>
+      <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+      <arg name="overtake_trajectory_backend" value="$(var overtake_trajectory_backend)"/>
+      <arg name="config_path" value="$(find-pkg-share delay_aware_mpc_ros)/config/pure_pursuit_mpc_horizon_config.yaml"/>
+      <arg name="ref_vel_path" value="$(find-pkg-share delay_aware_mpc_ros)/config/ref_vel.yaml"/>
+      <arg name="output_control_cmd" value="/pure_pursuit_mpc_horizon/mpc/control_cmd"/>
+      <arg name="output_raw_control_cmd" value="/pure_pursuit_mpc_horizon/mpc/control_cmd_raw"/>
+      <arg name="output_mpc_predicted_horizon" value="/pure_pursuit_mpc_horizon/mpc/predicted_horizon"/>
+      <arg name="output_mpc_predicted_horizon_contract" value="/pure_pursuit_mpc_horizon/mpc/predicted_horizon_contract"/>
+      <arg name="input_control_cmd_raw" value="/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd_raw"/>
+      <arg name="overtake_horizon_points" value="40"/>
+      <arg name="overtake_mpc_health_solve_time_warn_ms" value="200.0"/>
+      <arg name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+      <arg name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+      <arg name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+      <arg name="c002ay1_prod_measure_planner_nonce" value="$(var c002ay1_prod_measure_planner_nonce)"/>
+      <arg name="c002ay1_prod_measure_planner_instance_id" value="$(var c002ay1_prod_measure_planner_instance_id)"/>
+      <arg name="c002ay1_prod_measure_selected_stream" value="$(var c002ay1_prod_measure_selected_stream)"/>
+    </include>
+  </group>
 
   <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">
     <arg name="simulation" value="$(var simulation)"/>
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
-    <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
+    <arg name="input_kinematics" value="$(var control_kinematics_topic)"/>
     <arg name="input_mpc_predicted_horizon" value="/pure_pursuit_mpc_horizon/mpc/predicted_horizon"/>
     <arg name="input_mpc_predicted_horizon_contract" value="/pure_pursuit_mpc_horizon/mpc/predicted_horizon_contract"/>
     <arg name="input_mpc_health" value="/mpc/speed_profile_debug"/>
     <arg name="input_steering_status" value="/vehicle/status/steering_status"/>
     <arg name="output_control_cmd" value="/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd"/>
     <arg name="output_raw_control_cmd" value="/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd_raw"/>
+    <arg name="output_controller_tracking_status" value="/hybrid_control/pure_pursuit/tracking_status"/>
+    <arg name="output_controller_command_envelope" value="/hybrid_control/pure_pursuit/command_envelope"/>
+    <arg name="output_controller_execution_envelope" value="/hybrid_control/pure_pursuit/execution_envelope"/>
+    <arg name="output_free_run_execution_ack" value="/hybrid_control/pure_pursuit/free_run_execution_ack"/>
+    <arg name="free_run_live_exact_ack_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
+    <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+    <arg name="state_lattice_v2_live_proposal_accept_enabled" value="$(var state_lattice_v2_live_proposal_accept_enabled)"/>
+    <arg name="state_lattice_v2_command_activation_enabled" value="$(var state_lattice_v2_command_activation_enabled)"/>
+    <arg name="state_lattice_v2_expected_producer_instance_id" value="$(var state_lattice_v2_producer_instance_id)"/>
+    <arg name="state_lattice_v2_base_attestation_publish_enabled" value="$(var state_lattice_v2_live_proposal_accept_enabled)"/>
+    <arg name="state_lattice_v2_base_attestation_producer_instance_id" value="$(var state_lattice_v2_pp_producer_instance_id)"/>
+    <arg name="state_lattice_v2_base_attestation_session_id" value="$(var state_lattice_v2_session_id)"/>
+    <arg name="input_overtake_plan" value="/overtake/plan"/>
+    <arg name="input_race_armed" value="/overtake/race_armed"/>
     <arg name="wheel_base" value="1.087"/>
     <arg name="use_external_target_vel" value="true"/>
     <arg name="external_target_vel" value="$(var pure_pursuit_speed_mps)"/>
-    <arg name="use_mpc_predicted_horizon" value="true"/>
+    <arg name="use_mpc_predicted_horizon" value="$(var mpc_enabled)"/>
     <arg name="max_mpc_horizon_age_sec" value="0.35"/>
     <arg name="min_mpc_horizon_points" value="5"/>
     <arg name="max_mpc_horizon_start_distance_m" value="3.0"/>
     <arg name="min_mpc_horizon_arc_length_m" value="4.0"/>
-    <arg name="require_solved_mpc_health_for_horizon" value="true"/>
+    <arg name="require_solved_mpc_health_for_horizon" value="$(var mpc_enabled)"/>
     <arg name="max_mpc_health_age_sec" value="0.35"/>
-    <arg name="require_matching_overtake_horizon_contract" value="true"/>
-    <arg name="use_overtake_reference_override" value="$(var use_overtake_planner)"/>
+    <arg name="require_matching_overtake_horizon_contract" value="$(var mpc_enabled)"/>
+    <arg name="use_overtake_reference_override" value="$(var reference_override_enabled)"/>
+    <arg name="require_overtake_reference_override_fresh" value="$(var require_state_lattice_override_fresh)"/>
+    <arg name="state_lattice_v4_poc_identity_gate_enabled" value="$(var state_lattice_v4_poc_identity_gate_enabled)"/>
+    <arg name="state_lattice_v4_poc_command_activation_enabled" value="$(var state_lattice_v4_poc_command_activation_enabled)"/>
     <arg name="input_overtake_reference_override" value="/overtake/reference_override"/>
     <arg name="lookahead_gain" value="0.5"/>
     <arg name="lookahead_min_distance" value="3.5"/>
@@ -62,12 +177,22 @@
     <arg name="horizon_curvature_feedforward_gain" value="0.0"/>
     <arg name="horizon_curvature_feedforward_max_rad" value="0.08"/>
     <arg name="speed_proportional_gain" value="0.8"/>
+    <arg name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+    <arg name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+    <arg name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+    <arg name="c002ay1_prod_measure_session_nonce" value="$(var c002ay1_prod_measure_pp_nonce)"/>
+    <arg name="c002ay1_prod_measure_instance_id" value="$(var c002ay1_prod_measure_pp_instance_id)"/>
+    <arg name="c002ay0_shadow_capture_enabled" value="$(var c002ay0_shadow_capture_enabled)"/>
+    <arg name="state_lattice_source_binding_shadow_enabled" value="$(var state_lattice_source_binding_shadow_enabled)"/>
+    <arg name="c002ay0_shadow_worker_path" value="$(var c002ay0_shadow_worker_path)"/>
+    <arg name="c002ay0_shadow_session_generation" value="$(var c002ay0_shadow_session_generation)"/>
+    <arg name="c002ay0_shadow_session_nonce" value="$(var c002ay0_shadow_session_nonce)"/>
   </include>
 
   <include file="$(find-pkg-share wall_recovery_planner)/launch/wall_recovery_planner.launch.xml">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="wall_recovery_enabled" value="$(var wall_recovery_enabled)"/>
-    <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
+    <arg name="input_kinematics" value="$(var control_kinematics_topic)"/>
     <arg name="input_reference_trajectory" value="/planning/scenario_planning/trajectory"/>
     <arg name="input_control_cmd" value="/control/command/control_cmd"/>
   </include>
@@ -76,34 +201,59 @@
     <arg name="simulation" value="$(var simulation)"/>
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="node_name" value="wall_recovery_pure_pursuit_node"/>
-    <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
+    <arg name="input_kinematics" value="$(var control_kinematics_topic)"/>
     <arg name="input_trajectory" value="/wall_recovery/trajectory"/>
     <arg name="input_recovery_status" value="/wall_recovery/status"/>
     <arg name="input_steering_status" value="/vehicle/status/steering_status"/>
     <arg name="output_control_cmd" value="/wall_recovery/pure_pursuit/unused_control_cmd"/>
     <arg name="output_raw_control_cmd" value="/wall_recovery/pure_pursuit/unused_control_cmd_raw"/>
     <arg name="output_recovery_control_cmd" value="/hybrid_control/recovery/control_cmd"/>
+    <arg name="output_controller_tracking_status" value="/wall_recovery/pure_pursuit/tracking_status"/>
+    <arg name="output_controller_command_envelope" value="/wall_recovery/pure_pursuit/command_envelope"/>
+    <arg name="output_controller_execution_envelope" value="/wall_recovery/pure_pursuit/execution_envelope"/>
+    <arg name="input_overtake_plan" value="/overtake/plan"/>
     <arg name="output_debug" value="/wall_recovery/pure_pursuit/debug"/>
     <arg name="output_lookahead_point" value="/wall_recovery/pure_pursuit/lookahead_point"/>
     <arg name="wheel_base" value="1.087"/>
     <arg name="use_external_target_vel" value="false"/>
     <arg name="use_mpc_predicted_horizon" value="false"/>
     <arg name="use_overtake_reference_override" value="false"/>
+    <arg name="state_lattice_v2_live_proposal_accept_enabled" value="false"/>
+    <arg name="state_lattice_v2_command_activation_enabled" value="false"/>
+    <arg name="state_lattice_v4_poc_identity_gate_enabled" value="false"/>
+    <arg name="state_lattice_v4_poc_command_activation_enabled" value="false"/>
     <arg name="recovery_mode" value="true"/>
     <arg name="max_trajectory_age_sec" value="0.50"/>
     <arg name="lookahead_gain" value="0.5"/>
     <arg name="lookahead_min_distance" value="0.8"/>
     <arg name="curvature_adaptive_lookahead_enabled" value="false"/>
     <arg name="speed_proportional_gain" value="0.8"/>
+    <arg name="c002ay1_prod_measure_enabled" value="false"/>
+    <arg name="c002ay1_prod_measure_socket_path" value=""/>
+    <arg name="c002ay1_prod_measure_run_id" value=""/>
+    <arg name="c002ay1_prod_measure_session_nonce" value="0"/>
+    <arg name="c002ay1_prod_measure_instance_id" value="0"/>
+    <arg name="c002ay0_shadow_capture_enabled" value="false"/>
+    <arg name="state_lattice_source_binding_shadow_enabled" value="false"/>
+    <arg name="c002ay0_shadow_worker_path" value=""/>
+    <arg name="c002ay0_shadow_session_generation" value="0"/>
+    <arg name="c002ay0_shadow_session_nonce" value="0"/>
   </include>
 
   <include file="$(find-pkg-share hybrid_control_mux)/launch/hybrid_control_mux.launch.xml">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="param_file" value="$(find-pkg-share hybrid_control_mux)/config/pure_pursuit_mpc_horizon.param.yaml"/>
     <arg name="recovery_enabled" value="$(var wall_recovery_enabled)"/>
-    <arg name="require_safety_constraint" value="$(var use_overtake_planner)"/>
+    <arg name="require_safety_constraint" value="$(var require_safety_constraint)"/>
     <arg name="input_mpc_cmd" value="/pure_pursuit_mpc_horizon/mpc/control_cmd"/>
     <arg name="input_pure_pursuit_cmd" value="/pure_pursuit_mpc_horizon/pure_pursuit/control_cmd"/>
+    <arg name="input_pure_pursuit_command_envelope" value="/hybrid_control/pure_pursuit/command_envelope"/>
+    <arg name="input_free_run_execution_ack" value="/hybrid_control/pure_pursuit/free_run_execution_ack"/>
+    <arg name="free_run_live_exact_observe_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
+    <arg name="free_run_live_exact_pre_ack_hold_enabled" value="$(var free_run_live_exact_pre_ack_hold_enabled)"/>
+    <arg name="state_lattice_instant_control_enabled" value="$(var state_lattice_instant_enabled)"/>
+    <arg name="input_state_lattice_control_cmd" value="/hybrid_control/state_lattice/control_cmd"/>
+    <arg name="input_pure_pursuit_tracking_status" value="/hybrid_control/pure_pursuit/tracking_status"/>
     <arg name="input_recovery_cmd" value="/hybrid_control/recovery/control_cmd"/>
     <arg name="input_recovery_status" value="/wall_recovery/status"/>
     <arg name="input_recovery_permit" value="/wall_recovery/permit"/>
@@ -111,5 +261,7 @@
     <arg name="input_overtake_plan" value="/overtake/plan"/>
     <arg name="input_mpc_health" value="/mpc/speed_profile_debug"/>
     <arg name="output_control_cmd" value="/control/command/control_cmd"/>
+    <arg name="output_debug" value="/hybrid_control_mux/debug"/>
+    <arg name="output_controller_tracking_status" value="/hybrid_control/controller_tracking_status"/>
   </include>
 </launch>

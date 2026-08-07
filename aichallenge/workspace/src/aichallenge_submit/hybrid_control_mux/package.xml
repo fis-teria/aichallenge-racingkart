@@ -15,6 +15,8 @@
   <depend>multi_purpose_mpc_ros_msgs</depend>
 
   <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>autoware_auto_planning_msgs</test_depend>
+  <test_depend>rosgraph_msgs</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

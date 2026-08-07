@@ -8,9 +8,9 @@
 namespace overtake_planner
 {
 
-// 参照線の各sに対応する、路面境界までのFrenet横位置。
-// d_min/d_maxは車体中心が取り得る物理境界であり、SafetyEvaluator側で
-// min_wall_margin_mをさらに差し引いて安全回廊にする。
+// 参照線の各sに対応する、lanelet路面端までのFrenet横位置。
+// d_min/d_maxは車体中心境界ではない。SafetyEvaluator側で中心点marginと
+// base_link基準の車体footprintをそれぞれ検査して安全回廊にする。
 struct FrenetCorridorPoint
 {
   double s{0.0};

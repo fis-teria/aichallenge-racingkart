@@ -10,11 +10,22 @@
       - /delay_aware_mpc/debug
       - /mpc/speed_profile_debug
       - /hybrid_control_mux/debug
+      - /hybrid_control/controller_tracking_status
+      - /hybrid_control/pure_pursuit/command_envelope
+      - /hybrid_control/pure_pursuit/execution_envelope
+      - /hybrid_control/pure_pursuit/free_run_execution_ack
+      - /hybrid_control/pure_pursuit/free_run_source_key
+      - /hybrid_control/motion_authority_grant
+      - /sensing/imu/imu_raw
+      - /sensing/imu/imu_data
       - /overtake/reference_override
       - /overtake/safety_constraint
       - /overtake/plan
       - /overtake/v2/shadow/plan
       - /overtake/v2/shadow/safety_constraint
+      - /control/overtake/base_trajectory_snapshot
+      - /debug/overtake/state_lattice/authorized_cartesian_trajectory
+      - /debug/overtake/state_lattice/source_binding
       - /debug/overtake/mode
       - /debug/overtake/metrics
       - /v2x/vehicle_positions

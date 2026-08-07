@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from evalwrap.analysis.overtake.event_extractor import extract_overtake_attempts
-from evalwrap.analysis.overtake.metrics import build_overtake_outputs
+from evalwrap.analysis.overtake.metrics import build_overtake_outputs, compute_overtake_metrics
 from evalwrap.analysis.overtake.opportunity_detector import detect_missed_overtake_chances
 from evalwrap.metrics.race_metrics import DomainMetrics
 from evalwrap.reports.overtake_report import generate_overtake_report
@@ -67,6 +67,105 @@ def test_extract_overtake_attempts_classifies_cbf_abort() -> None:
     assert attempts[0]["abort_reason"] == "cbf_too_close"
 
 
+def test_extract_overtake_attempts_uses_planner_contract_for_long_chain_pass() -> None:
+    rows = [
+        {
+            "timestamp_sec": 1.0,
+            "overtake_state": "OVERTAKING",
+            "selected": "PASS_RIGHT",
+            "maneuver_transaction_pass_type": "PASS_RIGHT",
+            "target_vehicle_id": "d2",
+            "maneuver_target_relative_s_m": 4.0,
+            "min_cbf_h": 0.7,
+        },
+        {
+            "timestamp_sec": 10.5,
+            "overtake_state": "OVERTAKING",
+            "attempt_id": 7,
+            "selected": "PASS_RIGHT",
+            "maneuver_transaction_pass_type": "PASS_RIGHT",
+            "target_vehicle_id": "d2",
+            "maneuver_target_relative_s_m": -6.1,
+            "maneuver_target_pass_complete": True,
+            "maneuver_target_pass_safety_approved": True,
+            "min_cbf_h": 0.6,
+        },
+        {
+            "timestamp_sec": 10.6,
+            "overtake_state": "OVERTAKING",
+            "attempt_id": 7,
+            "selected": "PASS_RIGHT",
+            "maneuver_transaction_pass_type": "PASS_RIGHT",
+            "target_vehicle_id": "d3",
+            "maneuver_target_previous_id": "d2",
+            "maneuver_target_new_id": "d3",
+            "maneuver_target_change_reason": "previous_target_passed",
+            "maneuver_target_relative_s_m": 2.0,
+            "min_cbf_h": 0.6,
+        },
+        {
+            "timestamp_sec": 19.999,
+            "overtake_state": "ABORT_RECOVERY",
+        },
+        {
+            "timestamp_sec": 20.0,
+            "overtake_state": "ABORT_RECOVERY",
+            "attempt_id": 7,
+            "selected": "RECOVERY",
+            "maneuver_transaction_pass_type": "PASS_RIGHT",
+            "target_vehicle_id": "d3",
+            "maneuver_target_relative_s_m": -6.1,
+            "maneuver_target_pass_complete": True,
+            "maneuver_target_pass_safety_approved": True,
+            "maneuver_transaction_incomplete": False,
+            "min_cbf_h": 0.8,
+        },
+    ]
+
+    attempts = extract_overtake_attempts(rows, CONFIG)
+
+    assert len(attempts) == 1
+    assert attempts[0]["result"] == "success"
+    assert attempts[0]["passed_target_ids"] == "d2,d3"
+    assert attempts[0]["passed_target_count"] == 2
+    assert attempts[0]["target_handoff_count"] == 1
+    assert attempts[0]["target_churn_count"] == 0
+    assert attempts[0]["pass_side"] == "PASS_RIGHT"
+    assert attempts[0]["pass_side_churn_count"] == 0
+    assert attempts[0]["premature_abort"] is False
+
+
+def test_extract_overtake_attempts_keeps_true_premature_abort_failed() -> None:
+    rows = [
+        {
+            "timestamp_sec": 1.0,
+            "overtake_state": "OVERTAKING",
+            "attempt_id": 3,
+            "selected": "PASS_LEFT",
+            "target_vehicle_id": "d2",
+            "maneuver_target_relative_s_m": 3.0,
+            "min_cbf_h": 0.7,
+        },
+        {
+            "timestamp_sec": 2.0,
+            "overtake_state": "ABORT_RECOVERY",
+            "attempt_id": 3,
+            "selected": "RECOVERY",
+            "target_vehicle_id": "d2",
+            "maneuver_target_relative_s_m": 1.0,
+            "maneuver_target_pass_complete": False,
+            "min_cbf_h": 0.1,
+        },
+    ]
+
+    attempts = extract_overtake_attempts(rows, CONFIG)
+
+    assert len(attempts) == 1
+    assert attempts[0]["result"] == "aborted"
+    assert attempts[0]["premature_abort"] is True
+    assert attempts[0]["abort_reason"] == "cbf_too_close"
+
+
 def test_detect_missed_overtake_chance_requires_blocked_speed_loss_and_safe_context() -> None:
     rows = [
         {
@@ -97,6 +196,25 @@ def test_detect_missed_overtake_chance_requires_blocked_speed_loss_and_safe_cont
 
     assert len(missed) == 1
     assert missed[0]["duration_sec"] == 1.2
+
+
+def test_overtake_metrics_separates_inactive_mpc_infeasible_samples() -> None:
+    metrics = compute_overtake_metrics(
+        [],
+        [
+            {"mpc_status": "infeasible", "active_override": False},
+            {"mpc_status": "infeasible", "active_override": True},
+            {"mpc_status": "solved", "active_override": True},
+        ],
+        [],
+        [],
+        domain_metrics=None,
+        config=CONFIG,
+    )
+
+    assert metrics["mpc_infeasible_count"] == 1
+    assert metrics["mpc_infeasible_count_total"] == 2
+    assert metrics["inactive_mpc_infeasible_count"] == 1
 
 
 def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
@@ -135,6 +253,7 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
                 "mode": "PREPARE_OVERTAKE_LEFT",
                 "selected": "PASS_LEFT",
                 "front_delta_s": 4.0,
+                "front_delta_d": 3.0,
                 "front_vehicle_id": "d2",
                 "attempt_id": 1,
                 "active_override": True,
@@ -153,6 +272,19 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
                 "pass_gap_reason": "ok",
                 "min_cbf_h": 0.7,
             },
+            {
+                # vehicle sampleの間に1周期だけ立つ完了契約も欠落させない。
+                "time_sec": 2.5,
+                "mode": "OVERTAKE_LEFT",
+                "selected": "PASS_LEFT",
+                "attempt_id": 1,
+                "target_vehicle_id": "d2",
+                "maneuver_target_pass_complete": True,
+                "maneuver_target_pass_safety_approved": True,
+                "maneuver_target_relative_s_m": -6.1,
+                "maneuver_transaction_pass_type": "PASS_LEFT",
+                "min_cbf_h": 0.8,
+            },
             {"time_sec": 3.0, "mode": "MERGE_BACK", "front_delta_s": 8.0, "front_vehicle_id": "d2", "attempt_id": 1, "min_cbf_h": 0.9},
             {"time_sec": 3.2, "mode": "FREE_RUN", "front_vehicle_id": "d2", "attempt_id": 1},
         ],
@@ -162,6 +294,7 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
 
     assert result["domains"]["d1"]["attempt_count"] == 1
     assert result["domains"]["d1"]["success_count"] == 1
+    assert result["domains"]["d1"]["passed_target_count"] == 1
     assert (tmp_path / "overtake_metrics.json").exists()
     with (tmp_path / "overtake_attempts.csv").open("r", encoding="utf-8", newline="") as handle:
         attempts = list(csv.DictReader(handle))
@@ -175,6 +308,7 @@ def test_build_overtake_outputs_writes_processed_files(tmp_path: Path) -> None:
     assert timeseries[1]["active_override"] == "True"
     assert timeseries[1]["pass_gap_reason"] == "ok"
     assert timeseries[1]["ego_wall_clearance_m"] == "0.22"
+    assert timeseries[1]["closest_vehicle_distance_m"] == "5.0"
     assert timeseries[0]["parallel_follow_candidate"] == "True"
     assert timeseries[0]["parallel_follow_feasible"] == "True"
     assert timeseries[0]["parallel_follow_vehicle_id"] == "d3"

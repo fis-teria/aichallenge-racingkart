@@ -23,6 +23,12 @@ source "/aichallenge/workspace/install/setup.bash"
 # Topics with data (excluding 0-message topics from original bag)
 TOPICS=(
     "/control/command/control_cmd"
+    "/hybrid_control/state_lattice/control_cmd"
+    "/hybrid_control_mux/debug"
+    "/debug/overtake/mode"
+    "/debug/overtake/metrics"
+    "/debug/overtake/selected_path"
+    "/v2x/vehicle_positions"
     "/clock"
     "/localization/acceleration"
     "/localization/kinematic_state"

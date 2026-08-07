@@ -27,10 +27,23 @@ Autostart オーケストレータは、車両状態を起点にデータ収集�
 - `initial_pose_service`（default: `/set_initial_pose`）: `std_srvs/srv/Trigger`
 - `capture_service`（default: `/debug/service/capture_screen`）: `std_srvs/srv/Trigger`
 
+## 提供サービス
+
+- `official_start_service`（default: `/autostart/official_start`）: `std_srvs/srv/SetBool`
+  - `true`: domain0の`/admin/awsim/state=Start`を確認した開始ヘルパーだけが呼ぶ
+  - 同一generationで`initialization_ready=true`かつ実`/awsim/state=Ready`観測済みの場合だけarm
+  - `false`: 複数車への開始通知が部分失敗した時に即時disarmし、そのgenerationを無効化
+  - topicではないためdurability cacheやrosbag replayから再armされない
+
 ## publish
 
 - `control_mode_request_topic`（default: `/awsim/control_mode_request_topic`）へ `std_msgs/Bool(True)`
   - `request_control_mode=true` のときに送信
+- `race_arm_topic`（default: `/overtake/race_armed`）へtransient-local `std_msgs/Bool`
+  - 通常レースでは初期姿勢・制御モード初期化の成功と、`Ready`後の公式Start serviceを同一generationで確認すると`true`
+  - `Ready`前のカウント開始側`Start`ではarmせず、`arm_state_before_neutral`として待機
+  - 明示した中立状態`Ready`では`true`をラッチし、`Finish`、`Spawned`、`Grounded`または未知状態で`false`
+  - reset中に完了した古い初期化結果は破棄し、再armしない
 
 ## ローカル処理
 
@@ -111,6 +124,7 @@ output/
 - `enable_capture`（required）
 - `enable_rosbag`（required）
 - `rosbag_topics`
+- `rosbag_required_nonempty_topics`（default: 空。指定したtopicがbag内で0件なら終了処理をERRORにする）
 - `rosbag_output`
 - `rosbag_storage_id`
 - `rosbag_compression_format`（default: 空。空なら非圧縮の `.mcap` を出力）
@@ -122,6 +136,7 @@ output/
 - `request_control_mode`
 - `initial_pose_service`
 - `control_mode_request_topic`
+- `official_start_service`（default: `/autostart/official_start`）
 - `capture_service`
 - `enable_debug_visualization`（任意: default false）
 
@@ -129,6 +144,9 @@ output/
 `rosbag_compression_mode=file` を両方指定してください。
 
 `motion_analytics` は rosbag 停止後に 1 回だけ実行されます。失敗時は WARN ログを出して継続します。
+標準設定では `/hybrid_control/controller_tracking_status` を
+`rosbag_required_nonempty_topics` に指定し、subscriber登録だけで実メッセージが0件の
+bagを成功扱いしません。
 
 rosbag のファイル名 `rosbag2_autoware_0.mcap` は、`ros2 bag record -o rosbag2_autoware` の
 標準命名（`<output>_0.mcap`）で自動生成されます。
@@ -147,4 +165,5 @@ rosbag のファイル名 `rosbag2_autoware_0.mcap` は、`ros2 bag record -o ro
 ## 責務境界
 
 - `autostart_orchestrator_node.py` は `/admin/awsim/start` の送受信を行わない
-- `/admin/awsim/start` による開始トリガは `awsim_state_manager_node.py` 側の責務
+- domain0の`request_awsim_start.bash`が現在runの全車Ready/initとadmin Startを確認し、各vehicle domainの`official_start_service`を呼ぶ
+- serviceの前処理・全車応答・`race_armed`確認が失敗した場合は全車disarmと`/admin/awsim/reset`を行い、部分armを残さない

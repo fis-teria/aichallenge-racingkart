@@ -65,7 +65,18 @@ launch_args=(
     "awsim_start_count_seconds:=${awsim_start_count_seconds}"
     "awsim_prime_render_offload:=${awsim_prime_render_offload}"
     "awsim_vk_layer_optimus:=${awsim_vk_layer_optimus}"
+    "race_arm_on_vehicle_state:=${RACE_ARM_ON_VEHICLE_STATE:-Start}"
+    "state_lattice_v2_live_proposal_publish_enabled:=${STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED:-false}"
+    "state_lattice_v2_live_proposal_accept_enabled:=${STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED:-false}"
+    "state_lattice_v2_producer_instance_id:=${STATE_LATTICE_V2_PRODUCER_INSTANCE_ID:-0}"
+    "state_lattice_v4_poc_command_activation_enabled:=${STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED:-false}"
 )
+if [[ -n "${STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID:-}" ]]; then
+    launch_args+=("state_lattice_v2_pp_producer_instance_id:=${STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID}")
+fi
+if [[ -n "${STATE_LATTICE_V2_SESSION_ID:-}" ]]; then
+    launch_args+=("state_lattice_v2_session_id:=${STATE_LATTICE_V2_SESSION_ID}")
+fi
 if [[ -n ${awsim_extra_args} ]]; then
     launch_args+=("awsim_extra_args:=${awsim_extra_args}")
 fi

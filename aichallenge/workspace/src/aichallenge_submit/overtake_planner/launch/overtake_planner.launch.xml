@@ -2,9 +2,19 @@
 <launch>
   <arg name="use_sim_time" default="true"/>
   <arg name="input_odom" default="/localization/kinematic_state"/>
+  <arg name="input_race_arm" default="/overtake/race_armed"/>
+  <arg name="input_controller_tracking_status" default="/hybrid_control/controller_tracking_status"/>
   <arg name="param_path" default="$(find-pkg-share overtake_planner)/config/overtake_planner.param.yaml"/>
   <arg name="horizon_points" default="20"/>
   <arg name="mpc_health_solve_time_warn_ms" default="80.0"/>
+  <arg name="c002ay1_prod_measure_enabled" default="false"/>
+  <arg name="c002ay1_prod_measure_socket_path" default=""/>
+  <arg name="c002ay1_prod_measure_run_id" default=""/>
+  <arg name="c002ay1_prod_measure_session_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_instance_id" default="0"/>
+  <arg name="c002ay1_prod_measure_selected_stream" default="legacy"/>
+  <arg name="trajectory_backend" default="current"/>
+  <arg name="pp_core_exact_snapshot_enabled" default="false"/>
 
   <node pkg="overtake_planner" exec="overtake_planner_node"
         name="overtake_planner_node" output="screen">
@@ -12,6 +22,16 @@
     <param from="$(var param_path)"/>
     <param name="horizon_points" value="$(var horizon_points)"/>
     <param name="mpc_health_solve_time_warn_ms" value="$(var mpc_health_solve_time_warn_ms)"/>
+    <param name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+    <param name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+    <param name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+    <param name="c002ay1_prod_measure_session_nonce" value="$(var c002ay1_prod_measure_session_nonce)"/>
+    <param name="c002ay1_prod_measure_instance_id" value="$(var c002ay1_prod_measure_instance_id)"/>
+    <param name="c002ay1_prod_measure_selected_stream" value="$(var c002ay1_prod_measure_selected_stream)"/>
+    <param name="trajectory_backend" value="$(var trajectory_backend)"/>
+    <param name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
     <remap from="/localization/kinematic_state" to="$(var input_odom)"/>
+    <remap from="/overtake/race_armed" to="$(var input_race_arm)"/>
+    <remap from="/hybrid_control/controller_tracking_status" to="$(var input_controller_tracking_status)"/>
   </node>
 </launch>

@@ -1,0 +1,200 @@
+state_lattice_overtake_planner_node:
+  ros__parameters:
+    enabled: true
+    instant_control_topic: "/hybrid_control/state_lattice/control_cmd"
+    instant_control_lookahead_min_m: 1.5
+    instant_control_lookahead_gain_sec: 0.35
+    instant_control_max_steering_angle_rad: 0.5236
+    instant_control_max_steering_rate_radps: 0.35
+    instant_control_speed_gain: 0.8
+    # live_control_output_enabled, instant_control_enabled and
+    # safety_evaluation_enabled are launch-owned. Keeping them out of this YAML
+    # prevents a debug default from overriding the selected live route.
+    # The exact-spatial FOLLOW shadow gate is launch-owned. The node fallback
+    # is also true, so direct starts remain shadow-only without duplicating the
+    # launch override in this node-scoped YAML.
+    cost_levels: [6, 9, 12, 15, 18, 60, 70, 80, 90, 100]
+    # The footprint already includes hard/tracking margins. Keep the highest
+    # wall band to one map cell so the static wall is not inflated twice.
+    wall_distance_thresholds_m: [0.1, 0.3, 0.5]
+    object_distance_thresholds_m: [0.8, 1.0, 1.3, 1.5, 1.7]
+    reference_distance_thresholds_m: [0.5, 0.8, 1.2, 1.5]
+    reference_extra_step_m: 0.2
+    opponent_position_sigma_multiplier: 3.0
+    opponent_position_min_margin_m: 0.15
+    opponent_position_max_margin_m: 1.0
+
+    # Candidate generation and all planner-side Frenet semantics use the
+    # occupancy-derived course center.  The controller output contract remains
+    # bound to the existing min-curvature reference below.
+    reference_package: "state_lattice_overtake_planner"
+    reference_csv: "data/course_centerline.csv"
+    output_reference_package: "multi_purpose_mpc_ros"
+    output_reference_csv: "env/final_ver3/traj_mincurv_manual.csv"
+    wall_map_package: "multi_purpose_mpc_ros"
+    wall_map_yaml_relative_path: "env/final_ver3/occupancy_grid_map.yaml"
+    map_frame_id: "map"
+    expected_map_resolution: 0.1
+
+    # Gate only the start of a new pass. An already active lateral maneuver is
+    # allowed to finish or merge back instead of being cut off at a boundary.
+    overtake_permission_profile_enabled: true
+    overtake_permission_package: "state_lattice_overtake_planner"
+    overtake_permission_csv: "config/course_centerline_overtake_permission.csv"
+    default_overtake_allowed: true
+    overtake_permission_lookahead_m: 8.0
+
+    wheel_base_m: 1.087
+    front_overhang_m: 0.467
+    rear_overhang_m: 0.510
+    left_extent_m: 0.650
+    right_extent_m: 0.650
+    wall_hard_margin_m: 0.25
+    opponent_hard_clearance_m: 0.25
+
+    lateral_target_offsets_m: [0.0, 1.0, -1.0, 2.4, -2.4]
+    tangent_scale_factors: [0.8, 1.0, 1.2]
+    num_sampling_points: 5
+    base_dist_param: 2.0
+    max_dist_param: 10.0
+    max_dist_speed_mps: 8.333333
+    minimum_lateral_transition_distance_m: 4.0
+    lateral_transition_distance_gain: 3.0
+    adaptive_pass_offset_enabled: true
+    pass_lateral_extra_margin_m: 0.05
+    max_adaptive_lateral_offset_m: 2.2
+    minimum_obstacle_transition_distance_m: 1.0
+    front_detection_radius_m: 2.0
+    frontmost_s_tolerance_m: 0.1
+    front_detection_enter_cycles: 1
+    front_detection_release_cycles: 5
+    initial_detection_sweep_enabled: true
+    early_aware_enabled: true
+    early_aware_base_distance_m: 4.0
+    early_aware_speed_horizon_sec: 0.25
+    early_aware_max_deceleration_mps2: 0.9
+    early_aware_min_distance_m: 8.0
+    early_aware_max_distance_m: 30.0
+    early_aware_min_tangent_speed_mps: 0.05
+    early_aware_reverse_tangent_tolerance_mps: 0.05
+    early_aware_max_track_heading_error_rad: 0.66
+    early_aware_min_forward_delta_s_m: 0.10
+    early_aware_required_fresh_stamps: 2
+    free_run_return_required_cycles: 5
+    passed_target_gap_m: 6.0
+    return_prediction_horizon_sec: 1.0
+    return_predicted_min_gap_m: 4.0
+    return_lateral_error_m: 0.20
+    return_heading_error_rad: 0.0872665
+    rear_safety_check_distance_m: 6.0
+    rear_terminal_distance: 1.5
+    rear_sampling_angle: 0.5
+    rear_safety_num_sampling_points: 5
+    rear_return_cost_threshold: 70
+    rear_prediction_horizon_sec: 1.5
+
+    target_missing_prediction_grace_sec: 0.5
+    target_missing_forget_sec: 2.0
+    target_missing_uncertainty_growth_mps: 0.25
+    target_missing_recovery_speed_mps: 2.0
+
+    # FOLLOW_BLOCKED regulates the free clearance remaining after the vehicle
+    # envelopes, uncertainty, and hard-clearance buffer have been subtracted.
+    follow_desired_extra_gap_m: 1.0
+    follow_gap_gain_per_s: 0.8
+    follow_closing_speed_gain: 0.5
+
+    # Geometry-based asymmetric side-role protocol. The 2 m clearance is only a bounded
+    # search envelope: entry also requires co-direction positive progress and
+    # a short constant-velocity rollout that reaches the immutable 0.25 m hard
+    # clearance. Cartesian longitudinal position elects leader/follower; IDs
+    # are used only to track peer identity.
+    preventive_side_role_trigger_clearance_m: 2.0
+    preventive_side_role_tie_band_m: 0.20
+    preventive_side_role_max_abs_delta_s_m: 3.0
+    preventive_side_role_min_lateral_separation_m: 0.50
+    preventive_side_role_min_tangent_progress_mps: 0.05
+    # Bounded from the v2 first-corner evidence: max observed track-heading
+    # error 0.6432 rad and relative-heading error 0.5599 rad.
+    preventive_side_role_max_track_heading_error_rad: 0.66
+    preventive_side_role_max_relative_heading_error_rad: 0.57
+    preventive_side_role_separation_epsilon_m: 0.001
+    preventive_side_role_follower_speed_reduction_mps: 0.50
+    preventive_side_role_follower_gap_gain_per_s: 0.80
+    preventive_side_role_follower_min_gap_m: 2.00
+    preventive_side_role_controller_response_sec: 0.30
+    preventive_side_role_deadline_response_margin_sec: 0.30
+    preventive_side_role_neutral_speed_reduction_mps: 0.35
+    preventive_side_role_role_confirm_samples: 3
+    preventive_side_role_prediction_horizon_sec: 3.0
+    preventive_side_role_prediction_step_sec: 0.05
+    preventive_side_role_yield_peer_speed_mps: 0.05
+    preventive_side_role_yield_min_samples: 3
+    preventive_side_role_yield_min_span_sec: 0.20
+    preventive_side_role_release_margin_m: 0.25
+    preventive_side_role_release_prediction_sec: 0.50
+    preventive_side_role_escape_crawl_speed_mps: 0.80
+    preventive_side_role_exit_clearance_m: 2.50
+    preventive_side_role_exit_samples: 3
+
+    # Pure Pursuit route trackability proxy. The separate instant-control
+    # command path keeps its own limits near the top of this file.
+    hard_max_steer_rad: 0.64
+    planner_max_steer_rad: 0.64
+    max_steer_rate_radps: 0.5
+    min_acceleration_mps2: -0.9
+    max_acceleration_mps2: 3.0
+    max_acceleration_jerk_mps3: 3.0
+    max_deceleration_jerk_mps3: 3.0
+    lateral_acceleration_limit_mps2: 30.0
+    collision_check_max_step_m: 0.05
+    collision_check_max_yaw_step_rad: 0.0174533
+    lateral_tracking_margin_m: 0.25
+    longitudinal_tracking_margin_m: 0.10
+    opponent_lateral_tracking_margin_m: 0.0
+    opponent_longitudinal_tracking_margin_m: 0.10
+    candidate_entry_speed_tolerance_mps: 0.15
+    allow_reverse: false
+    reference_speed_limit_enabled: true
+    reference_curvature_sanity_limit_radpm: 1.0
+
+    horizon_points: 20
+    mpc_wp_id_offset: 2
+    receiver_nearest_index_uncertainty: 1
+    projection_initial_search_half_width_m: 3.0
+    projection_follow_search_half_width_m: 2.0
+    projection_max_backward_step_m: 0.05
+    tie_break_epsilon: 1.0e-6
+
+    normal_speed_mps: 9.722222
+    free_run_return_cost: 70
+    stop_cost: 380
+    safe_stop_compat_speed_mps: 0.2
+    own_vehicle_id: "auto"
+    ego_state_topic: "/localization/kinematic_state"
+    opponent_topic: "/v2x/vehicle_positions"
+    mpc_health_topic: "/mpc/speed_profile_debug"
+    reference_override_topic: "/overtake/reference_override"
+    planner_rate_hz: 20.0
+    planning_warn_time_ms: 40.0
+    # Temporary race-evaluation budget. The planner still proposes at 20 Hz;
+    # runtime cadence and input age must be checked before making this permanent.
+    planning_deadline_ms: 80.0
+    ego_stale_time_sec: 0.5
+    opponent_stale_time_sec: 0.5
+    opponent_max_position_jump_m: 10.0
+    debug_costmap_publish_rate_hz: 5.0
+    normal_mode_min_hold_sec: 0.5
+    candidate_cost_hysteresis: 5
+    safe_stop_release_cost: 375
+    safe_stop_release_required_cycles: 5
+    overrun_last_trajectory_max_age_sec: 0.1
+    overrun_safe_stop_consecutive_cycles: 2
+
+    # mpc_health_speed_guard_enabled is launch-owned. MPC-backed profiles keep
+    # the launch default true; the MPC-free Pure Pursuit profile sets it false.
+    mpc_health_infeasible_count_threshold: 1
+    mpc_health_solve_time_warn_ms: 80.0
+    mpc_health_v_max_mps: 3.0
+    mpc_health_stale_time_sec: 0.60
+    mpc_health_release_samples: 3

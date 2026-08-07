@@ -1,0 +1,48 @@
+# Live exact FREE_RUN delivery evidence. This message is not motion authority.
+uint8 SCHEMA_INVALID=0
+uint8 SCHEMA_V1=1
+uint8 SCHEMA_V2=2
+
+uint8 EVIDENCE_COMPLETE=0
+uint8 EVIDENCE_MISSING_INPUT=1
+uint8 EVIDENCE_STALE_INPUT=2
+uint8 EVIDENCE_FUTURE_OR_REGRESSED_STAMP=3
+uint8 EVIDENCE_KEY_MISMATCH=4
+uint8 EVIDENCE_PAYLOAD_MUTATION=5
+uint8 EVIDENCE_GEOMETRY_INVALID=6
+uint8 EVIDENCE_HORIZON_INSUFFICIENT=7
+uint8 EVIDENCE_ACTUATOR_LIMIT_INVALID=8
+uint8 EVIDENCE_RESOURCE_LIMIT_EXCEEDED=9
+
+std_msgs/Header header
+uint8 schema_version
+# Proves delivery evidence only. Hybrid Control Mux remains the sole handover
+# decision owner and may use this only for zero-speed/braking continuation.
+bool ack_eligible
+uint8 evidence_state
+string<=256 evidence_reason
+
+multi_purpose_mpc_ros_msgs/FreeRunPlanKey plan_key
+multi_purpose_mpc_ros_msgs/FreeRunSourceKey source_key
+uint64 controller_sequence
+builtin_interfaces/Time controller_command_stamp
+
+multi_purpose_mpc_ros_msgs/ControllerGeometry base_geometry
+multi_purpose_mpc_ros_msgs/ControllerGeometry applied_geometry
+geometry_msgs/Pose control_pose
+builtin_interfaces/Time control_pose_stamp
+uint32 nearest_trajectory_index
+float64 trajectory_progress_m
+
+autoware_auto_control_msgs/AckermannControlCommand raw_controller_command
+autoware_auto_control_msgs/AckermannControlCommand output_controller_command
+uint8[32] raw_controller_command_sha256
+uint8[32] output_controller_command_sha256
+
+float64 raw_steering_tire_angle_rad
+float64 output_steering_tire_angle_rad
+float64 hard_steering_tire_angle_limit_rad
+float64 required_spatial_horizon_m
+float64 available_spatial_horizon_m
+
+uint8[32] ack_sha256

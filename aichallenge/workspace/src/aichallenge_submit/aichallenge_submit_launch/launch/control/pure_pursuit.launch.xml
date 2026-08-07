@@ -10,15 +10,25 @@
   <arg name="input_mpc_health" default="/mpc/speed_profile_debug"/>
   <arg name="input_steering_status" default="/vehicle/status/steering_status"/>
   <arg name="input_recovery_status" default="/wall_recovery/status"/>
+  <arg name="input_overtake_plan" default="/overtake/plan"/>
+  <arg name="input_race_armed" default="/overtake/race_armed"/>
   <arg name="output_control_cmd" default="/control/command/control_cmd"/>
   <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
   <arg name="output_recovery_control_cmd" default="/hybrid_control/recovery/control_cmd"/>
   <arg name="output_debug" default="/pure_pursuit/debug"/>
+  <arg name="output_controller_tracking_status" default="/hybrid_control/pure_pursuit/tracking_status"/>
+  <arg name="output_controller_command_envelope" default="/hybrid_control/pure_pursuit/command_envelope"/>
+  <arg name="output_controller_execution_envelope" default="/hybrid_control/pure_pursuit/execution_envelope"/>
+  <arg name="output_free_run_execution_ack" default="/hybrid_control/pure_pursuit/free_run_execution_ack"/>
+  <arg name="output_free_run_source_key" default="/hybrid_control/pure_pursuit/free_run_source_key"/>
   <arg name="output_lookahead_point" default="/control/debug/lookahead_point"/>
   <arg name="use_external_target_vel" default="false"/>
   <arg name="external_target_vel" default="9.5"/>
   <arg name="wheel_base" default="1.087"/>
   <arg name="use_overtake_reference_override" default="true"/>
+  <arg name="require_overtake_reference_override_fresh" default="false"/>
+  <arg name="state_lattice_v4_poc_identity_gate_enabled" default="false"/>
+  <arg name="state_lattice_v4_poc_command_activation_enabled" default="false"/>
   <arg name="input_overtake_reference_override" default="/overtake/reference_override"/>
   <arg name="overtake_override_timeout_sec" default="0.50"/>
   <arg name="max_odom_age_sec" default="0.20"/>
@@ -35,9 +45,35 @@
   <arg name="max_mpc_health_age_sec" default="0.30"/>
   <arg name="require_matching_overtake_horizon_contract" default="false"/>
   <arg name="recovery_mode" default="false"/>
+  <arg name="aw2_shadow_transport_enabled" default="true"/>
+  <arg name="c002ay1_prod_measure_enabled" default="false"/>
+  <arg name="c002ay1_prod_measure_socket_path" default=""/>
+  <arg name="c002ay1_prod_measure_run_id" default=""/>
+  <arg name="c002ay1_prod_measure_session_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_instance_id" default="0"/>
+  <arg name="c002ay0_shadow_capture_enabled" default="false"/>
+  <arg name="state_lattice_source_binding_shadow_enabled" default="false"/>
+  <arg name="c002ay0_shadow_worker_path" default=""/>
+  <arg name="c002ay0_shadow_session_generation" default="0"/>
+  <arg name="c002ay0_shadow_session_nonce" default="0"/>
+  <arg name="free_run_live_exact_ack_enabled" default="false"/>
+  <arg name="pp_core_exact_snapshot_enabled" default="false"/>
+  <arg name="state_lattice_v2_live_proposal_accept_enabled" default="false"/>
+  <arg name="state_lattice_v2_command_activation_enabled" default="false"/>
+  <arg name="state_lattice_v2_expected_producer_instance_id" default=""/>
+  <arg name="state_lattice_v2_base_attestation_publish_enabled" default="false"/>
+  <arg name="state_lattice_v2_base_attestation_producer_instance_id" default=""/>
+  <arg name="state_lattice_v2_base_attestation_session_id" default=""/>
+  <arg name="free_run_live_exact_hard_steering_limit_rad" default="0.64"/>
+  <arg name="free_run_live_exact_hard_steering_rate_limit_radps" default="0.5"/>
   <arg name="recovery_status_timeout_sec" default="0.20"/>
   <arg name="lookahead_gain" default="0.5"/>
   <arg name="lookahead_min_distance" default="1.5"/>
+  <arg name="overtake_short_spatial_horizon_v_max_mps" default="0.2"/>
+  <arg name="overtake_spatial_horizon_min_arc_m" default="0.5"/>
+  <arg name="overtake_spatial_horizon_min_time_sec" default="0.75"/>
+  <arg name="overtake_spatial_horizon_response_delay_sec" default="0.25"/>
+  <arg name="overtake_spatial_horizon_brake_decel_mps2" default="1.0"/>
   <arg name="curvature_adaptive_lookahead_enabled" default="true"/>
   <arg name="curvature_lookahead_min_distance" default="0.5"/>
   <arg name="curvature_lookahead_sensitivity" default="8.0"/>
@@ -54,8 +90,8 @@
   <arg name="horizon_curvature_feedforward_max_rad" default="0.08"/>
   <arg name="speed_proportional_gain" default="1.0"/>
 
-  <let name="steering_tire_angle_gain_var" value="1.639" if="$(var simulation)"/>
-  <let name="steering_tire_angle_gain_var" value="1.639" unless="$(var simulation)"/>
+  <let name="steering_tire_angle_gain_var" value="1.54" if="$(var simulation)"/>
+  <let name="steering_tire_angle_gain_var" value="1.54" unless="$(var simulation)"/>
 
   <node pkg="simple_pure_pursuit" exec="simple_pure_pursuit" name="$(var node_name)" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
@@ -63,6 +99,9 @@
     <param name="external_target_vel" value="$(var external_target_vel)"/>
     <param name="wheel_base" value="$(var wheel_base)"/>
     <param name="use_overtake_reference_override" value="$(var use_overtake_reference_override)"/>
+    <param name="require_overtake_reference_override_fresh" value="$(var require_overtake_reference_override_fresh)"/>
+    <param name="state_lattice_v4_poc_identity_gate_enabled" value="$(var state_lattice_v4_poc_identity_gate_enabled)"/>
+    <param name="state_lattice_v4_poc_command_activation_enabled" value="$(var state_lattice_v4_poc_command_activation_enabled)"/>
     <param name="overtake_override_timeout_sec" value="$(var overtake_override_timeout_sec)"/>
     <param name="max_odom_age_sec" value="$(var max_odom_age_sec)"/>
     <param name="max_trajectory_age_sec" value="$(var max_trajectory_age_sec)"/>
@@ -78,9 +117,35 @@
     <param name="max_mpc_health_age_sec" value="$(var max_mpc_health_age_sec)"/>
     <param name="require_matching_overtake_horizon_contract" value="$(var require_matching_overtake_horizon_contract)"/>
     <param name="recovery_mode" value="$(var recovery_mode)"/>
+    <param name="aw2_shadow_transport_enabled" value="$(var aw2_shadow_transport_enabled)"/>
+    <param name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+    <param name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+    <param name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+    <param name="c002ay1_prod_measure_session_nonce" value="$(var c002ay1_prod_measure_session_nonce)"/>
+    <param name="c002ay1_prod_measure_instance_id" value="$(var c002ay1_prod_measure_instance_id)"/>
+    <param name="c002ay0_shadow_capture_enabled" value="$(var c002ay0_shadow_capture_enabled)"/>
+    <param name="state_lattice_source_binding_shadow_enabled" value="$(var state_lattice_source_binding_shadow_enabled)"/>
+    <param name="c002ay0_shadow_worker_path" value="$(var c002ay0_shadow_worker_path)"/>
+    <param name="c002ay0_shadow_session_generation" value="$(var c002ay0_shadow_session_generation)"/>
+    <param name="c002ay0_shadow_session_nonce" value="$(var c002ay0_shadow_session_nonce)"/>
+    <param name="free_run_live_exact_ack_enabled" value="$(var free_run_live_exact_ack_enabled)"/>
+    <param name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+    <param name="state_lattice_v2_live_proposal_accept_enabled" value="$(var state_lattice_v2_live_proposal_accept_enabled)"/>
+    <param name="state_lattice_v2_command_activation_enabled" value="$(var state_lattice_v2_command_activation_enabled)"/>
+    <param name="state_lattice_v2_expected_producer_instance_id" value="$(var state_lattice_v2_expected_producer_instance_id)" type="str"/>
+    <param name="state_lattice_v2_base_attestation_publish_enabled" value="$(var state_lattice_v2_base_attestation_publish_enabled)"/>
+    <param name="state_lattice_v2_base_attestation_producer_instance_id" value="$(var state_lattice_v2_base_attestation_producer_instance_id)" type="str"/>
+    <param name="state_lattice_v2_base_attestation_session_id" value="$(var state_lattice_v2_base_attestation_session_id)" type="str"/>
+    <param name="free_run_live_exact_hard_steering_limit_rad" value="$(var free_run_live_exact_hard_steering_limit_rad)"/>
+    <param name="free_run_live_exact_hard_steering_rate_limit_radps" value="$(var free_run_live_exact_hard_steering_rate_limit_radps)"/>
     <param name="recovery_status_timeout_sec" value="$(var recovery_status_timeout_sec)"/>
     <param name="lookahead_gain" value="$(var lookahead_gain)"/>
     <param name="lookahead_min_distance" value="$(var lookahead_min_distance)"/>
+    <param name="overtake_short_spatial_horizon_v_max_mps" value="$(var overtake_short_spatial_horizon_v_max_mps)"/>
+    <param name="overtake_spatial_horizon_min_arc_m" value="$(var overtake_spatial_horizon_min_arc_m)"/>
+    <param name="overtake_spatial_horizon_min_time_sec" value="$(var overtake_spatial_horizon_min_time_sec)"/>
+    <param name="overtake_spatial_horizon_response_delay_sec" value="$(var overtake_spatial_horizon_response_delay_sec)"/>
+    <param name="overtake_spatial_horizon_brake_decel_mps2" value="$(var overtake_spatial_horizon_brake_decel_mps2)"/>
     <param name="curvature_adaptive_lookahead_enabled" value="$(var curvature_adaptive_lookahead_enabled)"/>
     <param name="curvature_lookahead_min_distance" value="$(var curvature_lookahead_min_distance)"/>
     <param name="curvature_lookahead_sensitivity" value="$(var curvature_lookahead_sensitivity)"/>
@@ -105,10 +170,17 @@
     <remap from="input/mpc_health" to="$(var input_mpc_health)"/>
     <remap from="input/steering_status" to="$(var input_steering_status)"/>
     <remap from="input/recovery_status" to="$(var input_recovery_status)"/>
+    <remap from="input/overtake_plan" to="$(var input_overtake_plan)"/>
+    <remap from="input/race_armed" to="$(var input_race_armed)"/>
     <remap from="input/overtake_reference_override" to="$(var input_overtake_reference_override)"/>
     <remap from="output/control_cmd" to="$(var output_control_cmd)"/>
     <remap from="output/raw_control_cmd" to="$(var output_raw_control_cmd)"/>
     <remap from="output/recovery_control_cmd" to="$(var output_recovery_control_cmd)"/>
+    <remap from="output/controller_tracking_status" to="$(var output_controller_tracking_status)"/>
+    <remap from="output/controller_command_envelope" to="$(var output_controller_command_envelope)"/>
+    <remap from="output/controller_execution_envelope" to="$(var output_controller_execution_envelope)"/>
+    <remap from="output/free_run_execution_ack" to="$(var output_free_run_execution_ack)"/>
+    <remap from="output/free_run_source_key" to="$(var output_free_run_source_key)"/>
     <remap from="/pure_pursuit/debug" to="$(var output_debug)"/>
     <remap from="/control/debug/lookahead_point" to="$(var output_lookahead_point)"/>
   </node>

@@ -15,11 +15,15 @@ public:
                             const std::vector<OpponentState> &opponents,
                             double now_sec) const;
 
-  BlockedInfo
-  evaluatePassGap(const BlockedInfo &blocked_info,
-                  const std::vector<OpponentState> &opponents,
-                  const std::vector<PredictedOpponent> &predictions,
-                  BehaviorMode mode) const;
+  BlockedInfo evaluatePassGap(const BlockedInfo &blocked_info,
+                              const std::vector<OpponentState> &opponents,
+                              const std::vector<PredictedOpponent> &predictions,
+                              BehaviorMode mode) const;
+
+  BlockedInfo evaluatePredictivePassTargetShadow(
+      const EgoState &ego, const BlockedInfo &blocked_info,
+      const std::vector<OpponentState> &opponents,
+      const std::vector<PredictedOpponent> &predictions, double now_sec) const;
 
   double wallClearance(double s, double d) const;
   double opponentSDot(const OpponentState &opponent) const;

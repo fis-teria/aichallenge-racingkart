@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Private offline replay graph. Every production algorithm endpoint is remapped
+  below a tokenized root; this launch never connects to AWSIM or live control.
+-->
+<launch>
+  <arg name="topic_token"/>
+  <arg name="regenerated_mode" default="false"/>
+  <arg name="use_sim_time" default="true"/>
+  <let name="root" value="/test_only/offline_replay/$(var topic_token)"/>
+
+  <group>
+    <set_remap from="/clock" to="$(var root)/input/clock"/>
+    <set_remap from="/tf" to="$(var root)/input/tf"/>
+    <set_remap from="/tf_static" to="$(var root)/input/tf_static"/>
+
+    <!-- Production State Lattice Planner, with every input/output private. -->
+    <node pkg="state_lattice_overtake_planner"
+          exec="state_lattice_overtake_planner_node"
+          name="test_only_offline_state_lattice_planner"
+          output="screen">
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <param from="$(find-pkg-share state_lattice_overtake_planner)/config/state_lattice_overtake_planner.param.yaml"/>
+      <param name="live_control_output_enabled" value="false"/>
+      <param name="experimental_spatial_reference_override_live_publish_enabled" value="true"/>
+      <param name="instant_control_enabled" value="false"/>
+      <param name="controller_trackability_profile" value="shadow_only"/>
+      <param name="safety_evaluation_enabled" value="true"/>
+      <param name="c002ay0_state_lattice_shadow_enabled" value="false"/>
+      <param name="state_lattice_v2_live_proposal_publish_enabled" value="false"/>
+      <param name="ego_state_topic" value="$(var root)/input/kinematics"/>
+      <param name="opponent_topic" value="$(var root)/input/v2x"/>
+      <param name="mpc_health_topic" value="$(var root)/input/mpc_health"/>
+      <param name="reference_override_topic" value="$(var root)/planner/reference_override"/>
+      <param name="instant_control_topic" value="$(var root)/unused/state_lattice_instant_control"/>
+      <remap from="/debug/overtake/mode" to="$(var root)/planner/debug/mode"/>
+      <remap from="/debug/overtake/metrics" to="$(var root)/planner/debug/metrics"/>
+      <remap from="/debug/overtake/wall_map" to="$(var root)/planner/debug/wall_map"/>
+      <remap from="/debug/overtake/wall_costmap" to="$(var root)/planner/debug/wall_costmap"/>
+      <remap from="/debug/overtake/opponent_costmap" to="$(var root)/planner/debug/opponent_costmap"/>
+      <remap from="/debug/overtake/costmap" to="$(var root)/planner/debug/costmap"/>
+      <remap from="/debug/overtake/trajectory_candidates" to="$(var root)/planner/debug/trajectory_candidates"/>
+      <remap from="/debug/overtake/selected_trajectory" to="$(var root)/planner/debug/selected_trajectory"/>
+      <remap from="/debug/overtake/target_states" to="$(var root)/planner/debug/target_states"/>
+      <remap from="/debug/overtake/rear_safety_paths" to="$(var root)/planner/debug/rear_safety_paths"/>
+      <remap from="/debug/overtake/planning_geometry" to="$(var root)/planner/debug/planning_geometry"/>
+    </node>
+
+    <!--
+      In regenerated mode, the unmodified production overtake Planner is the
+      sole Plan/Safety producer. Baseline mode deliberately omits it.
+    -->
+    <node if="$(var regenerated_mode)"
+          pkg="overtake_planner"
+          exec="overtake_planner_node"
+          name="test_only_offline_overtake_planner"
+          output="screen">
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <param from="$(find-pkg-share overtake_planner)/config/overtake_planner.param.yaml"/>
+      <param name="race_arm_topic" value="$(var root)/input/race_armed"/>
+      <param name="pp_core_exact_snapshot_enabled" value="false"/>
+      <remap from="/localization/kinematic_state" to="$(var root)/input/kinematics"/>
+      <remap from="/v2x/vehicle_positions" to="$(var root)/input/v2x"/>
+      <remap from="/mpc/speed_profile_debug" to="$(var root)/input/mpc_health"/>
+      <remap from="/overtake/race_armed" to="$(var root)/input/race_armed"/>
+      <remap from="/hybrid_control/controller_tracking_status" to="$(var root)/mux/tracking_status"/>
+      <remap from="/hybrid_control/pure_pursuit/execution_envelope" to="$(var root)/pp/execution_envelope"/>
+      <remap from="/hybrid_control/motion_authority_grant" to="$(var root)/mux/motion_authority_grant"/>
+      <remap from="/overtake/reference_override" to="$(var root)/planner/current_reference_override"/>
+      <remap from="/overtake/safety_constraint" to="$(var root)/planner/safety_constraint"/>
+      <remap from="/overtake/plan" to="$(var root)/planner/plan"/>
+      <remap from="/overtake/continuation/shadow/candidate_execution_request" to="$(var root)/planner/unused/candidate_execution_request"/>
+      <remap from="/overtake/v2/shadow/plan" to="$(var root)/planner/unused/v2_plan"/>
+      <remap from="/overtake/v2/shadow/safety_constraint" to="$(var root)/planner/unused/v2_safety_constraint"/>
+      <remap from="/debug/overtake/mode" to="$(var root)/planner/current_debug/mode"/>
+      <remap from="/debug/overtake/metrics" to="$(var root)/planner/current_debug/metrics"/>
+    </node>
+
+    <!-- Production Pure Pursuit consumes only private replay/Planner topics. -->
+    <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">
+      <arg name="simulation" value="true"/>
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="node_name" value="test_only_offline_pure_pursuit"/>
+      <arg name="input_kinematics" value="$(var root)/input/kinematics"/>
+      <arg name="input_trajectory" value="$(var root)/input/trajectory"/>
+      <arg name="input_mpc_predicted_horizon" value="$(var root)/unused/mpc_predicted_horizon"/>
+      <arg name="input_mpc_predicted_horizon_contract" value="$(var root)/unused/mpc_predicted_horizon_contract"/>
+      <arg name="input_mpc_health" value="$(var root)/input/mpc_health"/>
+      <arg name="input_steering_status" value="$(var root)/input/steering_status"/>
+      <arg name="input_recovery_status" value="$(var root)/unused/recovery_status"/>
+      <arg name="input_overtake_plan" value="$(var root)/planner/plan"/>
+      <arg name="input_race_armed" value="$(var root)/input/race_armed"/>
+      <arg name="input_overtake_reference_override" value="$(var root)/planner/reference_override"/>
+      <arg name="output_control_cmd" value="$(var root)/pp/control_cmd"/>
+      <arg name="output_raw_control_cmd" value="$(var root)/pp/raw_control_cmd"/>
+      <arg name="output_recovery_control_cmd" value="$(var root)/pp/recovery_control_cmd"/>
+      <arg name="output_debug" value="$(var root)/pp/debug"/>
+      <arg name="output_controller_tracking_status" value="$(var root)/pp/tracking_status"/>
+      <arg name="output_controller_command_envelope" value="$(var root)/pp/command_envelope"/>
+      <arg name="output_controller_execution_envelope" value="$(var root)/pp/execution_envelope"/>
+      <arg name="output_free_run_execution_ack" value="$(var root)/pp/free_run_execution_ack"/>
+      <arg name="output_free_run_source_key" value="$(var root)/pp/free_run_source_key"/>
+      <arg name="output_lookahead_point" value="$(var root)/pp/lookahead_point"/>
+      <arg name="use_external_target_vel" value="false"/>
+      <arg name="use_overtake_reference_override" value="true"/>
+      <arg name="require_overtake_reference_override_fresh" value="true"/>
+      <arg name="state_lattice_v4_poc_identity_gate_enabled" value="false"/>
+      <arg name="state_lattice_v4_poc_command_activation_enabled" value="true"/>
+      <arg name="free_run_live_exact_ack_enabled" value="true"/>
+      <!-- The AW2 sidecar publishes fixed live absolute topics and is outside
+           this no-authority baseline contract. Keep the PP algorithm active,
+           but do not start that external transport in the private graph. -->
+      <arg name="aw2_shadow_transport_enabled" value="false"/>
+      <arg name="pp_core_exact_snapshot_enabled" value="false"/>
+      <arg name="state_lattice_v2_live_proposal_accept_enabled" value="false"/>
+      <arg name="state_lattice_v2_command_activation_enabled" value="false"/>
+      <arg name="max_odom_age_sec" value="0.30"/>
+      <arg name="max_trajectory_age_sec" value="0.30"/>
+      <arg name="max_override_age_sec" value="0.30"/>
+      <arg name="overtake_override_timeout_sec" value="0.30"/>
+      <arg name="stop_on_stale_input" value="true"/>
+    </include>
+
+    <!-- Production Mux; its only output and Grant are private recorder topics. -->
+    <node pkg="hybrid_control_mux"
+          exec="hybrid_control_mux_node.py"
+          name="test_only_offline_hybrid_control_mux"
+          output="screen">
+      <param from="$(find-pkg-share hybrid_control_mux)/config/hybrid_control_mux.param.yaml"/>
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <param name="primary_source" value="pure_pursuit"/>
+      <param name="require_safety_constraint" value="true"/>
+      <param name="recovery_enabled" value="false"/>
+      <param name="state_lattice_instant_control_enabled" value="false"/>
+      <param name="free_run_live_exact_observe_enabled" value="true"/>
+      <param name="free_run_live_exact_pre_ack_hold_enabled" value="true"/>
+      <param name="race_arm_required" value="true"/>
+      <param name="pure_pursuit_cmd_timeout_sec" value="0.30"/>
+      <param name="pure_pursuit_tracking_status_timeout_sec" value="0.30"/>
+      <param name="pure_pursuit_envelope_timeout_sec" value="0.30"/>
+      <param name="safety_constraint_timeout_sec" value="0.30"/>
+      <param name="overtake_plan_timeout_sec" value="0.30"/>
+      <remap from="input/mpc_control_cmd" to="$(var root)/unused/mpc_control_cmd"/>
+      <remap from="input/pure_pursuit_control_cmd" to="$(var root)/pp/control_cmd"/>
+      <remap from="input/pure_pursuit_tracking_status" to="$(var root)/pp/tracking_status"/>
+      <remap from="input/pure_pursuit_command_envelope" to="$(var root)/pp/command_envelope"/>
+      <remap from="input/state_lattice_control_cmd" to="$(var root)/unused/state_lattice_control_cmd"/>
+      <remap from="input/free_run_execution_ack" to="$(var root)/pp/free_run_execution_ack"/>
+      <remap from="input/free_run_source_key" to="$(var root)/pp/free_run_source_key"/>
+      <remap from="input/recovery_control_cmd" to="$(var root)/unused/recovery_control_cmd"/>
+      <remap from="input/recovery_status" to="$(var root)/unused/recovery_status"/>
+      <remap from="input/recovery_permit" to="$(var root)/unused/recovery_permit"/>
+      <remap from="input/external_safety_status" to="$(var root)/unused/external_safety_status"/>
+      <remap from="input/safety_constraint" to="$(var root)/planner/safety_constraint"/>
+      <remap from="input/overtake_plan" to="$(var root)/planner/plan"/>
+      <remap from="input/mpc_health" to="$(var root)/input/mpc_health"/>
+      <remap from="input/race_armed" to="$(var root)/input/race_armed"/>
+      <remap from="input/awsim_state" to="$(var root)/input/awsim_state"/>
+      <remap from="output/control_cmd" to="$(var root)/output/control_cmd"/>
+      <remap from="output/debug" to="$(var root)/mux/debug"/>
+      <remap from="output/controller_tracking_status" to="$(var root)/mux/tracking_status"/>
+      <remap from="output/motion_authority_grant" to="$(var root)/mux/motion_authority_grant"/>
+    </node>
+  </group>
+</launch>

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="simulation" default="true"/>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="use_obstacle_avoidance" default="true"/>
+  <arg name="use_overtake_planner" default="true"/>
+  <arg name="fallback_speed_mps" default="10.0"/>
+  <arg name="wall_recovery_enabled" default="false"/>
+
+  <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/delay_aware_mpc.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
+    <arg name="use_overtake_planner" value="$(var use_overtake_planner)"/>
+    <arg name="output_control_cmd" value="/hybrid_control/mpc/control_cmd"/>
+    <arg name="output_raw_control_cmd" value="/hybrid_control/mpc/control_cmd_raw"/>
+    <arg name="output_mpc_predicted_horizon" value="/hybrid_control/mpc/predicted_horizon"/>
+    <arg name="output_mpc_predicted_horizon_contract" value="/hybrid_control/mpc/predicted_horizon_contract"/>
+    <arg name="input_control_cmd_raw" value="/hybrid_control/mpc/control_cmd_raw"/>
+  </include>
+
+  <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">
+    <arg name="simulation" value="$(var simulation)"/>
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
+    <arg name="input_mpc_predicted_horizon" value="/hybrid_control/mpc/predicted_horizon"/>
+    <arg name="input_mpc_predicted_horizon_contract" value="/hybrid_control/mpc/predicted_horizon_contract"/>
+    <arg name="input_steering_status" value="/vehicle/status/steering_status"/>
+    <arg name="output_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd"/>
+    <arg name="output_raw_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd_raw"/>
+    <arg name="output_controller_tracking_status" value="/hybrid_control/pure_pursuit/tracking_status"/>
+    <arg name="wheel_base" value="1.087"/>
+    <arg name="use_external_target_vel" value="true"/>
+    <arg name="external_target_vel" value="$(var fallback_speed_mps)"/>
+    <arg name="use_mpc_predicted_horizon" value="true"/>
+    <arg name="max_mpc_horizon_age_sec" value="0.15"/>
+    <arg name="min_mpc_horizon_points" value="5"/>
+    <arg name="max_mpc_horizon_start_distance_m" value="2.0"/>
+    <arg name="min_mpc_horizon_arc_length_m" value="2.0"/>
+    <arg name="require_matching_overtake_horizon_contract" value="true"/>
+    <arg name="use_overtake_reference_override" value="$(var use_overtake_planner)"/>
+    <arg name="input_overtake_reference_override" value="/overtake/reference_override"/>
+    <arg name="lookahead_gain" value="0.5"/>
+    <arg name="lookahead_min_distance" value="3.5"/>
+    <arg name="curvature_adaptive_lookahead_enabled" value="true"/>
+    <arg name="curvature_lookahead_min_distance" value="3.5"/>
+    <arg name="curvature_lookahead_sensitivity" value="8.0"/>
+    <arg name="curvature_lookahead_window_ratio" value="2.0"/>
+    <arg name="curvature_lookahead_max_window_distance" value="10.0"/>
+    <arg name="curvature_lookahead_min_arc_length" value="1.0"/>
+    <arg name="curvature_lookahead_smoothing_alpha" value="0.35"/>
+    <arg name="pp_control_delay_sec" value="0.0"/>
+    <arg name="pp_prediction_dt_sec" value="0.02"/>
+    <arg name="steering_time_constant_sec" value="0.30"/>
+    <arg name="steering_status_timeout_sec" value="0.20"/>
+    <arg name="min_velocity_for_delay_compensation_mps" value="0.20"/>
+    <arg name="horizon_curvature_feedforward_gain" value="0.0"/>
+    <arg name="horizon_curvature_feedforward_max_rad" value="0.08"/>
+    <arg name="speed_proportional_gain" value="0.8"/>
+  </include>
+
+  <include file="$(find-pkg-share wall_recovery_planner)/launch/wall_recovery_planner.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="wall_recovery_enabled" value="$(var wall_recovery_enabled)"/>
+    <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
+    <arg name="input_reference_trajectory" value="/planning/scenario_planning/trajectory"/>
+    <arg name="input_control_cmd" value="/control/command/control_cmd"/>
+  </include>
+
+  <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">
+    <arg name="simulation" value="$(var simulation)"/>
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="node_name" value="wall_recovery_pure_pursuit_node"/>
+    <arg name="input_kinematics" value="/delay_aware_mpc/localization/kinematic_state"/>
+    <arg name="input_trajectory" value="/wall_recovery/trajectory"/>
+    <arg name="input_recovery_status" value="/wall_recovery/status"/>
+    <arg name="input_steering_status" value="/vehicle/status/steering_status"/>
+    <arg name="output_control_cmd" value="/wall_recovery/pure_pursuit/unused_control_cmd"/>
+    <arg name="output_raw_control_cmd" value="/wall_recovery/pure_pursuit/unused_control_cmd_raw"/>
+    <arg name="output_recovery_control_cmd" value="/hybrid_control/recovery/control_cmd"/>
+    <arg name="output_controller_tracking_status" value="/wall_recovery/pure_pursuit/tracking_status"/>
+    <arg name="output_debug" value="/wall_recovery/pure_pursuit/debug"/>
+    <arg name="output_lookahead_point" value="/wall_recovery/pure_pursuit/lookahead_point"/>
+    <arg name="wheel_base" value="1.087"/>
+    <arg name="use_external_target_vel" value="false"/>
+    <arg name="use_mpc_predicted_horizon" value="false"/>
+    <arg name="use_overtake_reference_override" value="false"/>
+    <arg name="recovery_mode" value="true"/>
+    <arg name="max_trajectory_age_sec" value="0.50"/>
+    <arg name="lookahead_gain" value="0.5"/>
+    <arg name="lookahead_min_distance" value="0.8"/>
+    <arg name="curvature_adaptive_lookahead_enabled" value="false"/>
+    <arg name="speed_proportional_gain" value="0.8"/>
+  </include>
+
+  <include file="$(find-pkg-share hybrid_control_mux)/launch/hybrid_control_mux.launch.xml">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="recovery_enabled" value="$(var wall_recovery_enabled)"/>
+    <arg name="require_safety_constraint" value="$(var use_overtake_planner)"/>
+    <arg name="input_mpc_cmd" value="/hybrid_control/mpc/control_cmd"/>
+    <arg name="input_pure_pursuit_cmd" value="/hybrid_control/pure_pursuit/control_cmd"/>
+    <arg name="input_recovery_cmd" value="/hybrid_control/recovery/control_cmd"/>
+    <arg name="input_recovery_status" value="/wall_recovery/status"/>
+    <arg name="input_recovery_permit" value="/wall_recovery/permit"/>
+    <arg name="input_safety_constraint" value="/overtake/safety_constraint"/>
+    <arg name="input_overtake_plan" value="/overtake/plan"/>
+    <arg name="input_pure_pursuit_tracking_status" value="/hybrid_control/pure_pursuit/tracking_status"/>
+    <arg name="output_control_cmd" value="/control/command/control_cmd"/>
+    <arg name="output_debug" value="/hybrid_control_mux/debug"/>
+    <arg name="output_controller_tracking_status" value="/hybrid_control/controller_tracking_status"/>
+  </include>
+</launch>

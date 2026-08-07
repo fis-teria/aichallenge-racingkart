@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="live_control_output_enabled" default="false"/>
+  <arg name="safety_evaluation_enabled" default="false"/>
+  <arg name="input_odom" default="/localization/kinematic_state"/>
+  <arg name="output_control_cmd" default="/hybrid_control/state_lattice/control_cmd"/>
+  <node pkg="simple_state_lattice_planner"
+        exec="simple_state_lattice_planner_node"
+        name="simple_state_lattice_planner"
+        output="screen">
+    <param from="$(find-pkg-share simple_state_lattice_planner)/config/simple_state_lattice_planner.param.yaml"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="live_control_output_enabled" value="$(var live_control_output_enabled)"/>
+    <param name="safety_evaluation_enabled" value="$(var safety_evaluation_enabled)"/>
+    <param name="input_odom" value="$(var input_odom)"/>
+    <param name="output_control_cmd" value="$(var output_control_cmd)"/>
+  </node>
+</launch>

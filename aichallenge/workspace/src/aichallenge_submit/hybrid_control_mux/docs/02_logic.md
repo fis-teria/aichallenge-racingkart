@@ -121,6 +121,17 @@ abs(steering_tire_angle) <= max_steering_angle_rad
 abs(delta_steering) <= max_steering_rate_radps * dt
 ```
 
+ただしtracking proofはclamp後の角度ではなくraw Pure Pursuit指令を
+`tracking_usable_max_steering_angle_rad`と照合します。raw指令がこの上限を超えた周期は、
+clampで有限値に収まってもtracking usableには昇格させず、SafetyConstraintの必須設定に
+依存せずSTOPへ閉じます。通常はゼロ速度・ゼロ操舵です。唯一、exactかつfreshな
+`FREE_RUN` baselineで、現在値がactuator hard上限内にあり、同一generation・plan stamp・race epochの
+直前周期にtracking上限内の操舵を実publish済みの場合だけ、その過去値を
+`lateral_stop_steering_hold_timeout_sec`以内で保持し、ゼロ速度と制動を合成します。
+上限超過した現在値はpublishせず、tracking usable、motion authority、PASS/HOLD認可も
+falseのままです。NaN/Infまたはactuator hard上限超過は過去の保持値も即時失効させます。
+非選択のPP入力はMPCなど別の選択sourceを停止させません。
+
 デフォルトでは `reset_steering_limiter_on_mode_change=false` なので、MPC から Pure Pursuit に切り替わった瞬間も前周期の最終操舵角から連続するように制限します。これにより、fallback の入り口で急に大きく切る挙動を抑えます。
 
 `source=stop` の場合は例外です。停止意思を優先し、操舵 limiter の状態を `0.0 rad` にリセットして停止指令をそのまま出します。

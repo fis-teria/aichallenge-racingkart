@@ -25,6 +25,14 @@
   <arg name="output_mpc_predicted_horizon_contract" default="/mpc/predicted_horizon_contract"/>
   <arg name="overtake_horizon_points" default="50"/>
   <arg name="overtake_mpc_health_solve_time_warn_ms" default="80.0"/>
+  <arg name="c002ay1_prod_measure_enabled" default="false"/>
+  <arg name="c002ay1_prod_measure_socket_path" default=""/>
+  <arg name="c002ay1_prod_measure_run_id" default=""/>
+  <arg name="c002ay1_prod_measure_planner_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_planner_instance_id" default="0"/>
+  <arg name="c002ay1_prod_measure_selected_stream" default="legacy"/>
+  <arg name="pp_core_exact_snapshot_enabled" default="false"/>
+  <arg name="overtake_trajectory_backend" default="current"/>
 
   <!-- localization odomを遅れ補償して、既存MPCが読む代替odomトピックを作る。 -->
   <node pkg="delay_aware_mpc_ros" exec="delay_compensated_odometry_node"
@@ -69,6 +77,14 @@
       <arg name="input_odom" value="/delay_aware_mpc/localization/kinematic_state"/>
       <arg name="horizon_points" value="$(var overtake_horizon_points)"/>
       <arg name="mpc_health_solve_time_warn_ms" value="$(var overtake_mpc_health_solve_time_warn_ms)"/>
+      <arg name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+      <arg name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+      <arg name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+      <arg name="c002ay1_prod_measure_session_nonce" value="$(var c002ay1_prod_measure_planner_nonce)"/>
+      <arg name="c002ay1_prod_measure_instance_id" value="$(var c002ay1_prod_measure_planner_instance_id)"/>
+      <arg name="c002ay1_prod_measure_selected_stream" value="$(var c002ay1_prod_measure_selected_stream)"/>
+      <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+      <arg name="trajectory_backend" value="$(var overtake_trajectory_backend)"/>
     </include>
   </group>
 </launch>

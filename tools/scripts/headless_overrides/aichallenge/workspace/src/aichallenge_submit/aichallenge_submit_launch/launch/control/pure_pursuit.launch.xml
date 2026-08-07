@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="simulation" default="true"/>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="node_name" default="simple_pure_pursuit_node"/>
+  <arg name="input_kinematics" default="/localization/kinematic_state"/>
+  <arg name="input_trajectory" default="/planning/scenario_planning/trajectory"/>
+  <arg name="input_mpc_predicted_horizon" default="/mpc/predicted_horizon"/>
+  <arg name="input_mpc_predicted_horizon_contract" default="/mpc/predicted_horizon_contract"/>
+  <arg name="input_mpc_health" default="/mpc/speed_profile_debug"/>
+  <arg name="input_steering_status" default="/vehicle/status/steering_status"/>
+  <arg name="input_recovery_status" default="/wall_recovery/status"/>
+  <arg name="output_control_cmd" default="/control/command/control_cmd"/>
+  <arg name="output_raw_control_cmd" default="/control/command/control_cmd_raw"/>
+  <arg name="output_recovery_control_cmd" default="/hybrid_control/recovery/control_cmd"/>
+  <arg name="output_debug" default="/pure_pursuit/debug"/>
+  <arg name="output_controller_tracking_status" default="/hybrid_control/pure_pursuit/tracking_status"/>
+  <arg name="output_lookahead_point" default="/control/debug/lookahead_point"/>
+  <arg name="use_external_target_vel" default="false"/>
+  <arg name="external_target_vel" default="9.5"/>
+  <arg name="wheel_base" default="1.087"/>
+  <arg name="use_overtake_reference_override" default="true"/>
+  <arg name="input_overtake_reference_override" default="/overtake/reference_override"/>
+  <arg name="overtake_override_timeout_sec" default="0.50"/>
+  <arg name="max_odom_age_sec" default="0.20"/>
+  <arg name="max_trajectory_age_sec" default="1.5"/>
+  <arg name="max_override_age_sec" default="1.0"/>
+  <arg name="stop_on_stale_input" default="true"/>
+  <arg name="diagnostic_throttle_sec" default="1.0"/>
+  <arg name="use_mpc_predicted_horizon" default="false"/>
+  <arg name="max_mpc_horizon_age_sec" default="0.50"/>
+  <arg name="min_mpc_horizon_points" default="5"/>
+  <arg name="max_mpc_horizon_start_distance_m" default="2.0"/>
+  <arg name="min_mpc_horizon_arc_length_m" default="10.0"/>
+  <arg name="require_solved_mpc_health_for_horizon" default="false"/>
+  <arg name="max_mpc_health_age_sec" default="0.30"/>
+  <arg name="require_matching_overtake_horizon_contract" default="false"/>
+  <arg name="recovery_mode" default="false"/>
+  <arg name="recovery_status_timeout_sec" default="0.20"/>
+  <arg name="lookahead_gain" default="0.5"/>
+  <arg name="lookahead_min_distance" default="1.5"/>
+  <arg name="overtake_short_spatial_horizon_v_max_mps" default="0.2"/>
+  <arg name="overtake_spatial_horizon_min_arc_m" default="0.5"/>
+  <arg name="overtake_spatial_horizon_min_time_sec" default="0.75"/>
+  <arg name="overtake_spatial_horizon_response_delay_sec" default="0.25"/>
+  <arg name="overtake_spatial_horizon_brake_decel_mps2" default="1.0"/>
+  <arg name="curvature_adaptive_lookahead_enabled" default="true"/>
+  <arg name="curvature_lookahead_min_distance" default="0.5"/>
+  <arg name="curvature_lookahead_sensitivity" default="8.0"/>
+  <arg name="curvature_lookahead_window_ratio" default="2.0"/>
+  <arg name="curvature_lookahead_max_window_distance" default="10.0"/>
+  <arg name="curvature_lookahead_min_arc_length" default="1.0"/>
+  <arg name="curvature_lookahead_smoothing_alpha" default="0.35"/>
+  <arg name="pp_control_delay_sec" default="0.0"/>
+  <arg name="pp_prediction_dt_sec" default="0.02"/>
+  <arg name="steering_time_constant_sec" default="0.30"/>
+  <arg name="steering_status_timeout_sec" default="0.20"/>
+  <arg name="min_velocity_for_delay_compensation_mps" default="0.20"/>
+  <arg name="horizon_curvature_feedforward_gain" default="0.0"/>
+  <arg name="horizon_curvature_feedforward_max_rad" default="0.08"/>
+  <arg name="speed_proportional_gain" default="1.0"/>
+
+  <let name="steering_tire_angle_gain_var" value="1.639" if="$(var simulation)"/>
+  <let name="steering_tire_angle_gain_var" value="1.639" unless="$(var simulation)"/>
+
+  <node pkg="simple_pure_pursuit" exec="simple_pure_pursuit" name="$(var node_name)" output="screen">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="use_external_target_vel" value="$(var use_external_target_vel)"/>
+    <param name="external_target_vel" value="$(var external_target_vel)"/>
+    <param name="wheel_base" value="$(var wheel_base)"/>
+    <param name="use_overtake_reference_override" value="$(var use_overtake_reference_override)"/>
+    <param name="overtake_override_timeout_sec" value="$(var overtake_override_timeout_sec)"/>
+    <param name="max_odom_age_sec" value="$(var max_odom_age_sec)"/>
+    <param name="max_trajectory_age_sec" value="$(var max_trajectory_age_sec)"/>
+    <param name="max_override_age_sec" value="$(var max_override_age_sec)"/>
+    <param name="stop_on_stale_input" value="$(var stop_on_stale_input)"/>
+    <param name="diagnostic_throttle_sec" value="$(var diagnostic_throttle_sec)"/>
+    <param name="use_mpc_predicted_horizon" value="$(var use_mpc_predicted_horizon)"/>
+    <param name="max_mpc_horizon_age_sec" value="$(var max_mpc_horizon_age_sec)"/>
+    <param name="min_mpc_horizon_points" value="$(var min_mpc_horizon_points)"/>
+    <param name="max_mpc_horizon_start_distance_m" value="$(var max_mpc_horizon_start_distance_m)"/>
+    <param name="min_mpc_horizon_arc_length_m" value="$(var min_mpc_horizon_arc_length_m)"/>
+    <param name="require_solved_mpc_health_for_horizon" value="$(var require_solved_mpc_health_for_horizon)"/>
+    <param name="max_mpc_health_age_sec" value="$(var max_mpc_health_age_sec)"/>
+    <param name="require_matching_overtake_horizon_contract" value="$(var require_matching_overtake_horizon_contract)"/>
+    <param name="recovery_mode" value="$(var recovery_mode)"/>
+    <param name="recovery_status_timeout_sec" value="$(var recovery_status_timeout_sec)"/>
+    <param name="lookahead_gain" value="$(var lookahead_gain)"/>
+    <param name="lookahead_min_distance" value="$(var lookahead_min_distance)"/>
+    <param name="overtake_short_spatial_horizon_v_max_mps" value="$(var overtake_short_spatial_horizon_v_max_mps)"/>
+    <param name="overtake_spatial_horizon_min_arc_m" value="$(var overtake_spatial_horizon_min_arc_m)"/>
+    <param name="overtake_spatial_horizon_min_time_sec" value="$(var overtake_spatial_horizon_min_time_sec)"/>
+    <param name="overtake_spatial_horizon_response_delay_sec" value="$(var overtake_spatial_horizon_response_delay_sec)"/>
+    <param name="overtake_spatial_horizon_brake_decel_mps2" value="$(var overtake_spatial_horizon_brake_decel_mps2)"/>
+    <param name="curvature_adaptive_lookahead_enabled" value="$(var curvature_adaptive_lookahead_enabled)"/>
+    <param name="curvature_lookahead_min_distance" value="$(var curvature_lookahead_min_distance)"/>
+    <param name="curvature_lookahead_sensitivity" value="$(var curvature_lookahead_sensitivity)"/>
+    <param name="curvature_lookahead_window_ratio" value="$(var curvature_lookahead_window_ratio)"/>
+    <param name="curvature_lookahead_max_window_distance" value="$(var curvature_lookahead_max_window_distance)"/>
+    <param name="curvature_lookahead_min_arc_length" value="$(var curvature_lookahead_min_arc_length)"/>
+    <param name="curvature_lookahead_smoothing_alpha" value="$(var curvature_lookahead_smoothing_alpha)"/>
+    <param name="pp_control_delay_sec" value="$(var pp_control_delay_sec)"/>
+    <param name="pp_prediction_dt_sec" value="$(var pp_prediction_dt_sec)"/>
+    <param name="steering_time_constant_sec" value="$(var steering_time_constant_sec)"/>
+    <param name="steering_status_timeout_sec" value="$(var steering_status_timeout_sec)"/>
+    <param name="min_velocity_for_delay_compensation_mps" value="$(var min_velocity_for_delay_compensation_mps)"/>
+    <param name="horizon_curvature_feedforward_gain" value="$(var horizon_curvature_feedforward_gain)"/>
+    <param name="horizon_curvature_feedforward_max_rad" value="$(var horizon_curvature_feedforward_max_rad)"/>
+    <param name="speed_proportional_gain" value="$(var speed_proportional_gain)"/>
+    <param name="steering_tire_angle_gain" value="$(var steering_tire_angle_gain_var)"/>
+
+    <remap from="input/kinematics" to="$(var input_kinematics)"/>
+    <remap from="input/trajectory" to="$(var input_trajectory)"/>
+    <remap from="input/mpc_predicted_horizon" to="$(var input_mpc_predicted_horizon)"/>
+    <remap from="input/mpc_predicted_horizon_contract" to="$(var input_mpc_predicted_horizon_contract)"/>
+    <remap from="input/mpc_health" to="$(var input_mpc_health)"/>
+    <remap from="input/steering_status" to="$(var input_steering_status)"/>
+    <remap from="input/recovery_status" to="$(var input_recovery_status)"/>
+    <remap from="input/overtake_reference_override" to="$(var input_overtake_reference_override)"/>
+    <remap from="output/control_cmd" to="$(var output_control_cmd)"/>
+    <remap from="output/raw_control_cmd" to="$(var output_raw_control_cmd)"/>
+    <remap from="output/recovery_control_cmd" to="$(var output_recovery_control_cmd)"/>
+    <remap from="output/controller_tracking_status" to="$(var output_controller_tracking_status)"/>
+    <remap from="/pure_pursuit/debug" to="$(var output_debug)"/>
+    <remap from="/control/debug/lookahead_point" to="$(var output_lookahead_point)"/>
+  </node>
+</launch>

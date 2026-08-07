@@ -16,6 +16,7 @@
 
 #include "gnss_poser/convert.hpp"
 #include "gnss_poser/gnss_stat.hpp"
+#include "gnss_poser/position_covariance.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <tier4_autoware_utils/tier4_autoware_utils.hpp>
@@ -105,6 +106,7 @@ private:
   int plane_zone_;
   geometry_msgs::msg::Quaternion prev_orientation_;
   double gnss_change_threshold_;
+  double unknown_position_covariance_m2_;
 
   autoware_sensing_msgs::msg::GnssInsOrientationStamped::SharedPtr
     msg_gnss_ins_orientation_stamped_;

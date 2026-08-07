@@ -1,0 +1,15 @@
+/**:
+  ros__parameters:
+    live_control_output_enabled: false
+    safety_evaluation_enabled: false
+    producer_instance_id: 2026080301
+    own_vehicle_id: auto
+    maximum_input_age_sec: 0.20
+    maximum_future_offset_sec: 0.05
+    reference_package: multi_purpose_mpc_ros
+    reference_csv: env/final_ver3/traj_mincurv_manual.csv
+    wall_map_package: multi_purpose_mpc_ros
+    wall_map_yaml: env/final_ver3/occupancy_grid_map.yaml
+    input_odom: /localization/kinematic_state
+    input_v2x: /v2x/vehicle_positions
+    output_control_cmd: /hybrid_control/state_lattice/control_cmd

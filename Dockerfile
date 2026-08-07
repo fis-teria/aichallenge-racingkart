@@ -62,16 +62,37 @@ RUN git clone --depth 1 https://github.com/AutomotiveAIChallenge/aichallenge-rac
  && tar zxf /tmp/s.tgz -C /aichallenge/workspace/src \
  && rm /tmp/s.tgz
 COPY aichallenge/run_evaluation.bash /aichallenge/run_evaluation.bash
+COPY aichallenge/run_autoware.bash /aichallenge/run_autoware.bash
+COPY aichallenge/run_awsim_with_d1_watchdog.bash /aichallenge/run_awsim_with_d1_watchdog.bash
+COPY aichallenge/d1_start_progress_watchdog.py /aichallenge/d1_start_progress_watchdog.py
+COPY aichallenge/admin_state_observer.py /aichallenge/admin_state_observer.py
+COPY aichallenge/helper_process_reaper.py /aichallenge/helper_process_reaper.py
+COPY aichallenge/race_arm_observer.py /aichallenge/race_arm_observer.py
+COPY aichallenge/vehicle_readiness_observer.py /aichallenge/vehicle_readiness_observer.py
+COPY aichallenge/request_awsim_start.bash /aichallenge/request_awsim_start.bash
+COPY aichallenge/wait_for_typed_service.py /aichallenge/wait_for_typed_service.py
 COPY aichallenge/utils/fix_ownership.bash /tmp/fix_ownership.bash
 COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/evaluation.launch.xml
 COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/aichallenge_system.launch.xml
+COPY aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/mode/awsim_state_manager.launch.xml /aichallenge/workspace/src/aichallenge_system/aichallenge_system_launch/launch/mode/awsim_state_manager.launch.xml
+COPY aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/autostart_orchestrator_py/autostart_orchestrator_node.py /aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/autostart_orchestrator_py/autostart_orchestrator_node.py
 COPY aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/config/autostart_orchestrator.param.yaml /aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/config/autostart_orchestrator.param.yaml
 COPY aichallenge/workspace/src/aichallenge_tools/bag_manager_py/config/bag_manager.param.yaml /aichallenge/workspace/src/aichallenge_tools/bag_manager_py/config/bag_manager.param.yaml
 COPY aichallenge/simulator/ /aichallenge/simulator/
+COPY tools/aic_test/aic_test/observer.py /opt/aic_test/observer.py
+COPY tools/aic_test/aic_test/v2_uptake_observer.py /opt/aic_test/v2_uptake_observer.py
+COPY tools/aic_test/aic_test/v2_direct_input_driver.py /opt/aic_test/v2_direct_input_driver.py
 
 RUN mkdir -p /aichallenge/utils \
  && cp /tmp/fix_ownership.bash /aichallenge/utils/fix_ownership.bash \
  && chmod +x /aichallenge/utils/fix_ownership.bash \
+ && chmod +x /aichallenge/run_autoware.bash \
+ && chmod +x /aichallenge/run_awsim_with_d1_watchdog.bash \
+ && chmod +x /aichallenge/admin_state_observer.py \
+ && chmod +x /aichallenge/helper_process_reaper.py \
+ && chmod +x /aichallenge/race_arm_observer.py \
+ && chmod +x /aichallenge/vehicle_readiness_observer.py \
+ && chmod +x /aichallenge/request_awsim_start.bash \
  && rm /tmp/fix_ownership.bash
 
 

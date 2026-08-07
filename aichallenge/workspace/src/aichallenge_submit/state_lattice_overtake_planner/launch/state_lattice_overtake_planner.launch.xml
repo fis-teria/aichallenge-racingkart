@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="input_odom" default="/localization/kinematic_state"/>
+  <arg name="param_path" default="$(find-pkg-share state_lattice_overtake_planner)/config/state_lattice_overtake_planner.param.yaml"/>
+  <arg name="horizon_points" default="20"/>
+  <arg name="mpc_health_solve_time_warn_ms" default="80.0"/>
+  <arg name="mpc_health_speed_guard_enabled" default="true"/>
+  <arg name="live_control_output_enabled" default="false"/>
+  <arg name="experimental_exact_spatial_follow_shadow_enabled"
+       default="true"/>
+  <arg name="experimental_spatial_reference_override_live_publish_enabled"
+       default="false"/>
+  <arg name="instant_control_enabled" default="false"/>
+  <arg name="state_lattice_v2_live_proposal_publish_enabled" default="false"/>
+  <arg name="state_lattice_v2_producer_instance_id" default="0"/>
+  <arg name="state_lattice_v2_base_attestation_accept_enabled" default="false"/>
+  <arg name="state_lattice_v2_expected_pp_producer_instance_id" default=""/>
+  <arg name="state_lattice_v2_expected_pp_session_id" default=""/>
+  <arg name="state_lattice_v2_final_fence_enabled" default="false"/>
+  <arg name="state_lattice_v2_final_fence_execution_nonce" default=""/>
+  <arg name="state_lattice_v2_final_fence_expected_session_id" default=""/>
+  <arg name="state_lattice_v2_final_fence_sealed_epoch_id" default="0"/>
+  <arg name="controller_trackability_profile" default="shadow_only">
+    <choice value="shadow_only"/>
+    <choice value="pure_pursuit"/>
+    <choice value="instant"/>
+  </arg>
+  <arg name="output_instant_control_cmd" default="/hybrid_control/state_lattice/control_cmd"/>
+  <arg name="safety_evaluation_enabled" default="false"/>
+  <arg name="c002ay0_state_lattice_shadow_enabled" default="true"/>
+  <arg name="c002ay0_state_lattice_shadow_worker_path" default="$(find-pkg-prefix state_lattice_overtake_planner)/lib/state_lattice_overtake_planner/c002ay0_state_lattice_shadow_worker"/>
+  <arg name="c002ay0_state_lattice_shadow_session_generation" default="0"/>
+  <arg name="c002ay0_state_lattice_shadow_session_nonce" default="0"/>
+  <arg name="output_reference_override" default="/overtake/reference_override"/>
+
+  <node pkg="state_lattice_overtake_planner" exec="state_lattice_overtake_planner_node"
+        name="state_lattice_overtake_planner_node" output="screen">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param from="$(var param_path)"/>
+    <param name="experimental_exact_spatial_follow_shadow_enabled"
+           value="$(var experimental_exact_spatial_follow_shadow_enabled)"/>
+    <param name="experimental_spatial_reference_override_live_publish_enabled"
+           value="$(var experimental_spatial_reference_override_live_publish_enabled)"/>
+    <param name="horizon_points" value="$(var horizon_points)"/>
+    <param name="mpc_health_solve_time_warn_ms" value="$(var mpc_health_solve_time_warn_ms)"/>
+    <param name="mpc_health_speed_guard_enabled" value="$(var mpc_health_speed_guard_enabled)"/>
+    <param name="live_control_output_enabled" value="$(var live_control_output_enabled)"/>
+    <param name="instant_control_enabled" value="$(var instant_control_enabled)"/>
+    <param name="state_lattice_v2_live_proposal_publish_enabled" value="$(var state_lattice_v2_live_proposal_publish_enabled)"/>
+    <param name="state_lattice_v2_producer_instance_id" value="$(var state_lattice_v2_producer_instance_id)"/>
+    <param name="state_lattice_v2_base_attestation_accept_enabled" value="$(var state_lattice_v2_base_attestation_accept_enabled)"/>
+    <param name="state_lattice_v2_expected_pp_producer_instance_id" value="$(var state_lattice_v2_expected_pp_producer_instance_id)" type="str"/>
+    <param name="state_lattice_v2_expected_pp_session_id" value="$(var state_lattice_v2_expected_pp_session_id)" type="str"/>
+    <param name="state_lattice_v2_final_fence_enabled" value="$(var state_lattice_v2_final_fence_enabled)"/>
+    <param name="state_lattice_v2_final_fence_execution_nonce" value="$(var state_lattice_v2_final_fence_execution_nonce)" type="str"/>
+    <param name="state_lattice_v2_final_fence_expected_session_id" value="$(var state_lattice_v2_final_fence_expected_session_id)" type="str"/>
+    <param name="state_lattice_v2_final_fence_sealed_epoch_id" value="$(var state_lattice_v2_final_fence_sealed_epoch_id)"/>
+    <param name="controller_trackability_profile" value="$(var controller_trackability_profile)"/>
+    <param name="instant_control_topic" value="$(var output_instant_control_cmd)"/>
+    <param name="safety_evaluation_enabled" value="$(var safety_evaluation_enabled)"/>
+    <param name="c002ay0_state_lattice_shadow_enabled" value="$(var c002ay0_state_lattice_shadow_enabled)"/>
+    <param name="c002ay0_state_lattice_shadow_worker_path" value="$(var c002ay0_state_lattice_shadow_worker_path)"/>
+    <param name="c002ay0_state_lattice_shadow_session_generation" value="$(var c002ay0_state_lattice_shadow_session_generation)"/>
+    <param name="c002ay0_state_lattice_shadow_session_nonce" value="$(var c002ay0_state_lattice_shadow_session_nonce)"/>
+    <param name="reference_override_topic" value="$(var output_reference_override)"/>
+    <remap from="/localization/kinematic_state" to="$(var input_odom)"/>
+  </node>
+</launch>

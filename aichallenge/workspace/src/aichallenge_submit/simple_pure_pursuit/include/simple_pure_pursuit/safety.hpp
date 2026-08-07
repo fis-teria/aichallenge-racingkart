@@ -2,9 +2,9 @@
 #define SIMPLE_PURE_PURSUIT_SAFETY_HPP_
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cmath>
 #include <optional>
 #include <string>
 
@@ -90,8 +90,7 @@ inline HorizonContractResult evaluateMpcHorizonContract(
     result.reason = "mpc_horizon_contract_mode_mismatch";
     return result;
   }
-  if (override_generation == 0U ||
-      contract_generation != override_generation) {
+  if (override_generation == 0U || contract_generation != override_generation) {
     result.reason = "mpc_horizon_contract_generation_mismatch";
     return result;
   }
@@ -99,9 +98,8 @@ inline HorizonContractResult evaluateMpcHorizonContract(
     result.reason = "mpc_horizon_not_authorized";
     return result;
   }
-  if (override_mode_id == 7 &&
-      (!override_mandatory_lateral_avoidance ||
-       !contract_mandatory_lateral_avoidance)) {
+  if (override_mode_id == 7 && (!override_mandatory_lateral_avoidance ||
+                                !contract_mandatory_lateral_avoidance)) {
     result.reason = "mpc_horizon_abort_not_mandatory";
     return result;
   }
@@ -125,13 +123,26 @@ inline double applyOvertakeSpeedCap(double target_speed_mps,
   return std::min(target_speed_mps, std::max(0.0, speed_cap_mps.value()));
 }
 
+// External targets may lower the execution-profile request, but never raise it.
+// Invalid profile speed is fail-closed to a stop request.
+inline double applyExecutionProfileSpeedCap(double target_speed_mps,
+                                            double profile_speed_mps) {
+  constexpr double kCanonicalExecutionSpeedCeilingMps = 10.0;
+  if (!std::isfinite(target_speed_mps) || !std::isfinite(profile_speed_mps) ||
+      profile_speed_mps < 0.0) {
+    return 0.0;
+  }
+  return std::min({std::max(0.0, target_speed_mps), profile_speed_mps,
+                   kCanonicalExecutionSpeedCeilingMps});
+}
+
 // 入力: 目標速度、現在速度、既存Pゲイン。
 // 出力: Pure Pursuitが出す縦加速度要求[m/s^2]。
 // 処理概要: override capが現在速度より低ければ、同周期から負の加速度要求になる
 // ことを明示する。最終的なactuator/MPC制限は既存の下流safety clampが担う。
 inline double proportionalLongitudinalAcceleration(double target_speed_mps,
-                                                    double current_speed_mps,
-                                                    double gain) {
+                                                   double current_speed_mps,
+                                                   double gain) {
   return gain * (target_speed_mps - current_speed_mps);
 }
 
@@ -151,14 +162,14 @@ inline bool ageFresh(double age_sec, double max_age_sec) {
   return std::isfinite(age_sec) && age_sec >= 0.0 && age_sec <= max_age_sec;
 }
 
-inline FreshnessResult evaluateRequiredInputFreshness(
-    std::optional<double> odom_receive_sec,
-    std::optional<double> trajectory_receive_sec, double now_sec,
-    double max_odom_age_sec, double max_trajectory_age_sec) {
+inline FreshnessResult
+evaluateRequiredInputFreshness(std::optional<double> odom_receive_sec,
+                               std::optional<double> trajectory_receive_sec,
+                               double now_sec, double max_odom_age_sec,
+                               double max_trajectory_age_sec) {
   FreshnessResult result;
   result.ages.odom_age_sec = inputAgeSec(odom_receive_sec, now_sec);
-  result.ages.trajectory_age_sec =
-      inputAgeSec(trajectory_receive_sec, now_sec);
+  result.ages.trajectory_age_sec = inputAgeSec(trajectory_receive_sec, now_sec);
 
   if (!odom_receive_sec.has_value()) {
     result.reason = "missing_odom";

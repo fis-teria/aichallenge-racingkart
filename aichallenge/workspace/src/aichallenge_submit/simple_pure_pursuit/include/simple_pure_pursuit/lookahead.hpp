@@ -10,6 +10,63 @@
 
 namespace simple_pure_pursuit {
 
+struct BoundedSteeringCommand {
+  bool valid{false};
+  double requested_angle_rad{0.0};
+  double bounded_angle_rad{0.0};
+  double requested_rate_radps{0.0};
+  double bounded_rate_radps{0.0};
+  bool angle_limited{false};
+  bool rate_limited{false};
+};
+
+// PPの要求を実車両とMuxが共有するhard angle/rate内へ写像する純粋モデル。
+// 順序はMuxと同じく angle clamp -> rate clamp -> angle clamp とする。
+inline BoundedSteeringCommand boundSteeringCommand(
+    double requested_angle_rad, double reference_angle_rad, double dt_sec,
+    double hard_angle_limit_rad, double hard_rate_limit_radps) {
+  BoundedSteeringCommand result;
+  result.requested_angle_rad = requested_angle_rad;
+  if (!std::isfinite(requested_angle_rad) ||
+      !std::isfinite(reference_angle_rad) || !std::isfinite(dt_sec) ||
+      dt_sec <= 0.0 || !std::isfinite(hard_angle_limit_rad) ||
+      hard_angle_limit_rad <= 0.0 ||
+      !std::isfinite(hard_rate_limit_radps) ||
+      hard_rate_limit_radps <= 0.0) {
+    return result;
+  }
+
+  const double bounded_reference =
+      std::clamp(reference_angle_rad, -hard_angle_limit_rad,
+                 hard_angle_limit_rad);
+  const double angle_clamped_request =
+      std::clamp(requested_angle_rad, -hard_angle_limit_rad,
+                 hard_angle_limit_rad);
+  const double max_delta_rad = hard_rate_limit_radps * dt_sec;
+  if (!std::isfinite(max_delta_rad) || max_delta_rad <= 0.0) {
+    return result;
+  }
+  const double rate_clamped =
+      std::clamp(angle_clamped_request, bounded_reference - max_delta_rad,
+                 bounded_reference + max_delta_rad);
+  result.bounded_angle_rad =
+      std::clamp(rate_clamped, -hard_angle_limit_rad, hard_angle_limit_rad);
+  result.requested_rate_radps =
+      (requested_angle_rad - bounded_reference) / dt_sec;
+  result.bounded_rate_radps =
+      (result.bounded_angle_rad - bounded_reference) / dt_sec;
+  if (!std::isfinite(result.requested_rate_radps) ||
+      !std::isfinite(result.bounded_rate_radps)) {
+    return result;
+  }
+  result.angle_limited =
+      std::abs(requested_angle_rad - angle_clamped_request) > 1.0e-12;
+  result.rate_limited =
+      std::abs(angle_clamped_request - result.bounded_angle_rad) > 1.0e-12;
+  result.valid = true;
+  return result;
+}
+
 struct LookaheadParams {
   double lookahead_gain{1.0};
   double lookahead_min_distance{1.0};
@@ -215,8 +272,11 @@ inline std::size_t selectMpcHorizonVelocityCapIndex(
 
 inline double estimateTrajectoryCurvature(
     const autoware_auto_planning_msgs::msg::Trajectory &trajectory,
-    std::size_t start_index, double window_distance_m,
-    double min_arc_length_m) {
+    std::size_t start_index, double window_distance_m, double min_arc_length_m,
+    std::size_t *last_read_index = nullptr) {
+  if (last_read_index != nullptr) {
+    *last_read_index = start_index;
+  }
   if (trajectory.points.size() < 3 || start_index >= trajectory.points.size()) {
     return 0.0;
   }
@@ -234,6 +294,9 @@ inline double estimateTrajectoryCurvature(
     const auto &p0 = trajectory.points[i];
     const auto &p1 = trajectory.points[i + 1];
     const auto &p2 = trajectory.points[i + 2];
+    if (last_read_index != nullptr) {
+      *last_read_index = i + 2U;
+    }
     const double arc_length_m = distance2d(p0, p1) + distance2d(p1, p2);
     if (!std::isfinite(arc_length_m) || arc_length_m < min_arc) {
       continue;
@@ -259,8 +322,11 @@ inline double estimateTrajectoryCurvature(
 
 inline double estimateSignedTrajectoryCurvature(
     const autoware_auto_planning_msgs::msg::Trajectory &trajectory,
-    std::size_t start_index, double window_distance_m,
-    double min_arc_length_m) {
+    std::size_t start_index, double window_distance_m, double min_arc_length_m,
+    std::size_t *last_read_index = nullptr) {
+  if (last_read_index != nullptr) {
+    *last_read_index = start_index;
+  }
   if (trajectory.points.size() < 3 || start_index >= trajectory.points.size()) {
     return 0.0;
   }
@@ -278,6 +344,9 @@ inline double estimateSignedTrajectoryCurvature(
     const auto &p0 = trajectory.points[i];
     const auto &p1 = trajectory.points[i + 1];
     const auto &p2 = trajectory.points[i + 2];
+    if (last_read_index != nullptr) {
+      *last_read_index = i + 2U;
+    }
     const double arc_length_m = distance2d(p0, p1) + distance2d(p1, p2);
     if (!std::isfinite(arc_length_m) || arc_length_m < min_arc) {
       continue;

@@ -11,6 +11,8 @@
   <!-- Map -->
   <arg name="lanelet2_map_file" default="lanelet2_map.osm" description="lanelet2 map file name"/>
   <arg name="pointcloud_map_file" default="pointcloud_map.pcd" description="pointcloud map file name"/>
+  <arg name="reference_execution_speed_cap_mps" default="10.0"
+       description="Fail-closed reference execution speed ceiling in m/s"/>
 
   <!-- Vehicle -->
   <arg name="launch_vehicle_interface" default="$(eval &quot;'$(var simulation)' == 'false'&quot;)"/>
@@ -18,7 +20,38 @@
 
   <!-- Control method -->
   <arg name="control_method" default="pure_pursuit_mpc_horizon"
-       description="Select control: mpc, delay_aware_mpc, hybrid_delay_aware_mpc, pure_pursuit_mpc_horizon, pure_pursuit, tiny_lidar_net, pilot_net, joycon"/>
+       description="Select control: mpc, delay_aware_mpc, hybrid_delay_aware_mpc, pure_pursuit_mpc_horizon, state_lattice_pure_pursuit, pure_pursuit, tiny_lidar_net, pilot_net, joycon"/>
+  <arg name="c002ay1_prod_measure_enabled" default="false"/>
+  <arg name="c002ay1_prod_measure_socket_path" default=""/>
+  <arg name="c002ay1_prod_measure_run_id" default=""/>
+  <arg name="c002ay1_prod_measure_planner_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_planner_instance_id" default="0"/>
+  <arg name="c002ay1_prod_measure_pp_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_pp_instance_id" default="0"/>
+  <arg name="c002ay1_prod_measure_selected_stream" default="legacy"/>
+  <arg name="free_run_live_exact_observe_enabled" default="true"/>
+  <arg name="free_run_live_exact_pre_ack_hold_enabled" default="true"/>
+  <arg name="pp_core_exact_snapshot_enabled" default="false"/>
+  <arg name="overtake_trajectory_backend" default="current"/>
+  <!-- Only the explicit state_lattice_pure_pursuit profile consumes these. -->
+  <arg name="state_lattice_v2_live_proposal_publish_enabled" default="false"/>
+  <arg name="state_lattice_v2_live_proposal_accept_enabled" default="false"/>
+  <arg name="state_lattice_v2_producer_instance_id" default="0"/>
+  <arg name="state_lattice_v2_pp_producer_instance_id" default=""/>
+  <arg name="state_lattice_v2_session_id" default=""/>
+  <arg name="state_lattice_v4_poc_command_activation_enabled" default="false"/>
+  <let name="state_lattice_v4_awsim_poc_enabled"
+       value="$(eval &quot;'$(var state_lattice_v4_poc_command_activation_enabled)' == 'true' and '$(var simulation)' == 'true'&quot;)"/>
+  <log message="V4 LIVE PoC activation is AWSIM-only; request ignored for non-simulation launch"
+       if="$(eval &quot;'$(var state_lattice_v4_poc_command_activation_enabled)' == 'true' and '$(var simulation)' != 'true'&quot;)"/>
+  <let name="overtake_control_route_config"
+       value="$(find-pkg-share overtake_planner)/config/overtake_planner.param.yaml"/>
+  <let name="overtake_control_route_config"
+       value="$(find-pkg-share overtake_planner)/config/v4_live_poc_route.param.yaml"
+       if="$(var state_lattice_v4_awsim_poc_enabled)"/>
+  <let name="overtake_control_route"
+       value="$(command '$(exec-in-pkg resolve_overtake_control_route overtake_planner) $(var overtake_control_route_config)' 'warn')"/>
+  <log message=" - planner config overtake_control_route: $(var overtake_control_route)"/>
 
   <!-- Global parameters -->
   <group scoped="false">
@@ -61,6 +94,8 @@
         <arg name="output_topic_gnss_pose" value="pose"/>
         <arg name="output_topic_gnss_fixed" value="gnss_fixed"/>
         <arg name="output_topic_gnss_pose_cov" value="pose_with_covariance"/>
+        <arg name="unknown_position_covariance_m2"
+             value="$(eval &quot;0.1 if '$(var simulation)' == 'true' else 10.0&quot;)"/>
       </include>
     </group>
   </group>
@@ -127,6 +162,9 @@
       <node pkg="simple_trajectory_generator" exec="simple_trajectory_generator_node" name="simple_trajectory_generator" output="screen">
             <param name="csv_path" value="$(find-pkg-share multi_purpose_mpc_ros)/env/final_ver3/traj_mincurv_manual.csv"/>
             <param name="z" value="6.5"/>
+            <param name="execution_profile.max_speed_mps" value="$(var reference_execution_speed_cap_mps)"/>
+            <param name="execution_profile.max_arc_spacing_m" value="0.25"/>
+            <param name="execution_profile.max_yaw_step_rad" value="0.05"/>
       </node>
       
     </group>
@@ -156,6 +194,11 @@
     <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/hybrid_delay_aware_mpc.launch.xml">
       <arg name="simulation" value="$(var simulation)"/>
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="free_run_live_exact_observe_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
+      <arg name="free_run_live_exact_pre_ack_hold_enabled" value="$(var free_run_live_exact_pre_ack_hold_enabled)"/>
+      <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+      <arg name="overtake_trajectory_backend" value="$(var overtake_trajectory_backend)"/>
+      <arg name="overtake_control_route" value="$(var overtake_control_route)"/>
     </include>
   </group>
 
@@ -163,6 +206,47 @@
     <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit_mpc_horizon.launch.xml">
       <arg name="simulation" value="$(var simulation)"/>
       <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="pure_pursuit_speed_mps" value="$(var reference_execution_speed_cap_mps)"/>
+      <arg name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+      <arg name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+      <arg name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+      <arg name="c002ay1_prod_measure_planner_nonce" value="$(var c002ay1_prod_measure_planner_nonce)"/>
+      <arg name="c002ay1_prod_measure_planner_instance_id" value="$(var c002ay1_prod_measure_planner_instance_id)"/>
+      <arg name="c002ay1_prod_measure_pp_nonce" value="$(var c002ay1_prod_measure_pp_nonce)"/>
+      <arg name="c002ay1_prod_measure_pp_instance_id" value="$(var c002ay1_prod_measure_pp_instance_id)"/>
+      <arg name="c002ay1_prod_measure_selected_stream" value="$(var c002ay1_prod_measure_selected_stream)"/>
+      <arg name="free_run_live_exact_observe_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
+      <arg name="free_run_live_exact_pre_ack_hold_enabled" value="$(var free_run_live_exact_pre_ack_hold_enabled)"/>
+      <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+      <arg name="overtake_trajectory_backend" value="$(var overtake_trajectory_backend)"/>
+      <arg name="overtake_control_route" value="$(var overtake_control_route)"/>
+    </include>
+  </group>
+
+  <group if="$(eval &quot;'$(var control_method)' == 'state_lattice_pure_pursuit'&quot;)">
+    <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/state_lattice_pure_pursuit.launch.xml">
+      <arg name="simulation" value="$(var simulation)"/>
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="pure_pursuit_speed_mps" value="$(var reference_execution_speed_cap_mps)"/>
+      <arg name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+      <arg name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+      <arg name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+      <arg name="c002ay1_prod_measure_planner_nonce" value="$(var c002ay1_prod_measure_planner_nonce)"/>
+      <arg name="c002ay1_prod_measure_planner_instance_id" value="$(var c002ay1_prod_measure_planner_instance_id)"/>
+      <arg name="c002ay1_prod_measure_pp_nonce" value="$(var c002ay1_prod_measure_pp_nonce)"/>
+      <arg name="c002ay1_prod_measure_pp_instance_id" value="$(var c002ay1_prod_measure_pp_instance_id)"/>
+      <arg name="c002ay1_prod_measure_selected_stream" value="$(var c002ay1_prod_measure_selected_stream)"/>
+      <arg name="free_run_live_exact_observe_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
+      <arg name="free_run_live_exact_pre_ack_hold_enabled" value="$(var free_run_live_exact_pre_ack_hold_enabled)"/>
+      <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+      <arg name="overtake_trajectory_backend" value="$(var overtake_trajectory_backend)"/>
+      <arg name="overtake_control_route" value="$(var overtake_control_route)"/>
+      <arg name="state_lattice_v2_live_proposal_publish_enabled" value="$(var state_lattice_v2_live_proposal_publish_enabled)"/>
+      <arg name="state_lattice_v2_live_proposal_accept_enabled" value="$(var state_lattice_v2_live_proposal_accept_enabled)"/>
+      <arg name="state_lattice_v2_producer_instance_id" value="$(var state_lattice_v2_producer_instance_id)"/>
+      <arg name="state_lattice_v2_pp_producer_instance_id" value="$(var state_lattice_v2_pp_producer_instance_id)"/>
+      <arg name="state_lattice_v2_session_id" value="$(var state_lattice_v2_session_id)"/>
+      <arg name="state_lattice_v4_poc_command_activation_enabled" value="$(var state_lattice_v4_awsim_poc_enabled)"/>
     </include>
   </group>
 

@@ -1,8 +1,27 @@
 overtake_planner_node:
   ros__parameters:
     enabled: true
+    # Sole owner of the live overtake execution route. Launch resolves this
+    # allowlisted value before starting exactly one live planner/controller path.
+    control_route: state_lattice_instant_mux
+    # Diagnostic backend used only when control_route selects the current planner.
+    trajectory_backend: current
     supervisor_v2_shadow_enabled: true
     supervisor_v2_abort_release_cycles: 3
+    # Frenetで対象（chain時は末尾）を抜いた観測を連続確認してからhandoffする。
+    supervisor_v2_pass_completion_cycles: 2
+    # staleを無視して走らず、短い欠測中だけ同じtransactionを停止側で保持する。
+    supervisor_v2_target_missing_hold_cycles: 2
+    # plan/command非同期境界の短いtracking mismatchでは未認可current-d holdへ
+    # 閉じつつtransactionを保持し、連続不成立時だけABORTする。
+    supervisor_v2_tracking_unusable_hold_cycles: 2
+    # 1周期だけ成立するPASSでは停止warm-upへ入らない。前周期snapshotを次の
+    # fresh V2X観測へ張り直し、SafetyEvaluator/PP追従性が連続成立してから開始する。
+    start_grid_tracking_probe_required_cycles: 2
+    # planner停止中に同じPASS generationのPP proofを二段階確認する上限(20 Hz)。
+    start_grid_tracking_release_timeout_cycles: 60
+    # 認可済みPASS継続だけに許す、infeasible=0時の一過性solve-time上限。
+    start_grid_tracking_continuity_max_mpc_solve_time_ms: 120.0
     reference_package: "multi_purpose_mpc_ros"
     reference_csv: "env/final_ver3/traj_mincurv_manual.csv"
     # final_ver3参照とlanelet2実境界から生成したs依存の走行可能回廊。
@@ -12,7 +31,13 @@ overtake_planner_node:
     drivable_corridor_csv: "config/final_ver3_drivable_corridor.csv"
     # "auto" resolves to d${ROS_DOMAIN_ID}; set d1..d4 explicitly to override.
     own_vehicle_id: "auto"
+    # Grounded/Ready中は戦術FSMを更新せず、orchestratorがStartでarmするまで
+    # 有効な停止constraintを継続する。
+    race_arm_required: true
+    race_arm_topic: "/overtake/race_armed"
     ego_stale_time_sec: 0.50
+    input_future_stamp_tolerance_sec: 0.05
+    controller_tracking_status_timeout_sec: 0.30
     control_rate_hz: 20.0
     horizon_points: 50
     horizon_dt_sec: 0.025
@@ -64,8 +89,11 @@ overtake_planner_node:
     gentle_curve_safe_pass_enabled: true
     gentle_curve_safe_pass_max_curvature_m_inv: 0.090
     gentle_curve_safe_pass_v_max_mps: 10.0
-    # safety_ellipse_b=1.8, min_h=0.20, margin=0.10 の必要横gap 2.072 m以上。
-    # 実candidateは引き続きs依存回廊、wall margin、SafetyEvaluatorで絞る。
+    # 車幅1.30 m（wheel_tread 1.12 + 左右overhang 0.09）に対し、実接触回帰から
+    # safety_ellipse_b=1.80を使う。min_h=0.20, margin=0.10のPASS目標横gapは
+    # 約2.072 m。ここはtarget gapではなく開始dからの最大移動量であり、実際の
+    # 目標dへ届かない側は候補生成時にrejectする。成立候補も引き続きs依存回廊、
+    # footprint、wall margin、全時系列SafetyEvaluatorで絞る。
     gentle_curve_safe_pass_max_lateral_displacement_m: 2.20
     gentle_curve_safe_pass_max_lateral_accel_mps2: 4.0
     gentle_curve_safe_pass_max_cbf_slack: 0.0
@@ -87,6 +115,11 @@ overtake_planner_node:
     # lookahead禁止、壁/CBF、横並び/未来譲りは維持する。
     slow_front_exception_max_start_curvature_m_inv: 0.040
     slow_obstacle_chain_enabled: true
+    # Gate2の約8 m間隔の停止車まで1本の横profileへ束ねると、先頭D2を抜ける前に
+    # D4後の狭い回廊で候補全体が不成立になる。6 m以内の密な列だけを一取引にし、
+    # それ以上は先頭targetをGate 2認可・通過後に次IDとして再評価する。
+    # Gate2の約8 m間隔もmerge禁止chainとして先読みする。ただし全車の最外側dを
+    # 先頭手前から一括適用せず、各target_sのstaged waypointで段階的に外へ寄る。
     slow_obstacle_chain_distance_m: 12.0
     # 停止した前方parallel車だけを、同一走行コリドーへ入る前からPASS候補として
     # Gate 2へ載せる。全V2X fresh/included とMPC healthy、停止・同方向を満たす時だけで、
@@ -98,20 +131,55 @@ overtake_planner_node:
     early_stationary_parallel_permission_exception_enabled: true
     early_stationary_parallel_pass_distance_m: 8.0
     early_stationary_parallel_pass_lateral_width_m: 1.50
+    # arm直後の前方/隣接grid車を、通常の停止障害物確定より前からGate 2の
+    # 追越対象へ載せる。相手が先に動き始めても3 m/s以下なら5秒窓の攻めFOLLOWで
+    # 見失わず、停止確認が取れた時だけ禁止区間/曲率PASS例外へ昇格する。
+    start_grid_target_enabled: true
+    start_grid_target_window_sec: 5.0
+    start_grid_target_window_distance_m: 8.0
+    start_grid_target_max_ego_speed_mps: 3.0
+    start_grid_target_min_delta_s_m: -1.0
+    start_grid_target_max_delta_s_m: 8.0
+    start_grid_target_lateral_width_m: 1.50
+    start_grid_stationary_confirmation_sec: 1.0
+    start_grid_stationary_confirmation_distance_m: 3.0
+    start_grid_attack_follow_v_max_mps: 3.0
+    # Gate 2未認可・未commitかつfresh入力/回廊内に限り、初期anchorから
+    # 15 cm以内の実測driftを現在d保持として再評価する。超過時は、基準線が
+    # 安全回廊内にある同側の内向きdriftだけを継続し、大横断/外向きdriftは
+    # anchor補正とcontroller追従性検査へ戻す。
+    start_grid_uncommitted_hold_max_lateral_drift_m: 0.15
+    # 初期d保持を通常merge(12 m)で毎周期張り直すと実追従誤差に負けるため、
+    # 3 mを補正期限にする。操舵角/操舵速度が成立しない場合は自動延長し、
+    # 全区間回廊またはcontroller追従性が不成立なら候補自体を不許可にする。
+    start_grid_hold_correction_distance_m: 3.0
+    # grid車へ大きな横断を即要求すると、候補上は安全でも実MPCが追従不能に
+    # なる。停止の連続確認前は2.2 m以内だけPASS開始を許し、それ以外は現dの
+    # 攻めFOLLOWで縦位置を作る。停止確認は移動/欠測で必ず最初から取り直す。
+    start_grid_moving_pass_max_lateral_displacement_m: 2.20
     # 停止車(既存stationary_obstacle_speed_threshold_mps以下)だけを、禁止区間でも
     # Gate 2通過時に回避PASSへ入れる。通常のcurve/permission gateは緩めない。
-    # 0.350 1/mまででも、候補速度はsqrt(2.0/|kappa|)以下かつ3.0 m/s以下。
+    # レース速度を維持する候補を第一にするが、actual Cartesian横遷移を含む
+    # 全曲率で18.0 m/s^2、10.0 m/s、0.64 rad、wall/CBF/PPを全て満たす時だけ
+    # 認可する。不成立時は同一targetのcurrent-d FOLLOW/減速へ戻す。
     stationary_no_pass_safe_pass_enabled: true
     stationary_no_pass_safe_pass_max_curvature_m_inv: 0.350
-    stationary_no_pass_safe_pass_v_max_mps: 3.0
+    stationary_no_pass_safe_pass_v_max_mps: 10.0
     stationary_no_pass_safe_pass_max_lateral_displacement_m: 2.20
-    stationary_no_pass_safe_pass_max_lateral_accel_mps2: 2.0
+    stationary_no_pass_safe_pass_max_lateral_accel_mps2: 18.0
     stationary_no_pass_safe_pass_max_cbf_slack: 0.0
-    # 停止車への追従は固定距離で待たず、応答遅れ・制動能力・楕円余裕から
-    # 必要距離を計算して現d保持FOLLOWを早期に開始する。
+    # 低速前走車への追従は停止判定を待たず、応答遅れ・制動能力・相対速度・
+    # TTC包絡から必要距離を計算して現d保持FOLLOW/PASS評価を早期に開始する。
+    # 停止車専用の禁止区間例外はstationary閾値で分離したまま維持する。
     braking_follow_enabled: true
-    braking_follow_max_distance_m: 30.0
+    braking_follow_max_distance_m: 60.0
+    # 停止車だけでなく、レース速度で走る遅い前走車も相対速度/TTC/実制動距離が
+    # 危険な時は早期FOLLOW対象にする。分類後の横holdは通常どおりGate 2を通す。
+    braking_follow_max_target_speed_mps: 10.0
     braking_follow_trigger_margin_m: 2.0
+    # 遠距離のTTCだけでFOLLOWを早期発動しすぎないよう、3 sの包絡にする。
+    # 応答遅れ・最大制動・楕円・marginから得る物理必要距離は別途必ず残る。
+    braking_follow_ttc_threshold_sec: 3.0
     large_lateral_error_threshold_m: 0.60
     large_lateral_error_v_max_mps: 3.0
     min_pass_gap_m: 1.8
@@ -136,6 +204,8 @@ overtake_planner_node:
     reentry_min_safety_margin_h: 0.30
     reentry_evaluation_horizon_sec: 4.0
     reentry_v2x_snapshot_stale_time_sec: 0.50
+    reentry_completion_lateral_error_m: 0.20
+    reentry_completion_rearm_lateral_error_m: 0.30
     reentry_hold_v_max_mps: 0.50
     # solve timeだけの一過性劣化では、全相手に再評価した現d holdに限り
     # このcapで待機する。CBF/stale/infeasibleは常にreentry_hold_v_max_mps。
@@ -158,10 +228,47 @@ overtake_planner_node:
     pass_horizon_publish_mode: "overtake_only"  # prepare_and_overtake / overtake_only
     localized_avoidance_start_before_target_m: 6.0
     localized_avoidance_full_offset_before_target_m: 2.0
-    localized_avoidance_hold_after_target_m: 5.0
+    # target/chain tailを抜くまで横位置を保持し、2 mの通過余裕後に
+    # 8 mでmergeする。全点をSafetyEvaluatorへ通し、狭窄側が不成立なら
+    # Gate 2認可前に反対側候補を評価する。
+    localized_avoidance_hold_after_target_m: 2.0
     localized_avoidance_merge_distance_m: 8.0
+    # PASS/攻めFOLLOWの横profileをactive primary PurePursuitと最終Muxの
+    # 車両・操舵制約より急にしない。名前は既存parameter API互換のため維持する。
+    attack_follow_tracking_wheelbase_m: 1.087
+    # vehicle_infoと共通化したvirtual tire angle hard stop。
+    # Plannerもgain適用後・Mux clamp前に0.64 radを超える横trajectoryをpublishしない。
+    attack_follow_max_steering_angle_rad: 0.64
+    attack_follow_max_steering_rate_radps: 128.0
+    # Plannerの幾何操舵速度判定もcontrollerと同じraw command領域で検査する。
+    attack_follow_steering_tire_angle_gain: 1.54
+    attack_follow_steering_rate_reserve_ratio: 0.80
+    # PPのverified spatial horizon下限0.50 mに0.05 m余裕を持たせる。加速禁止時も
+    # 時間horizonを最大4秒まで伸ばし、同じ点列をSafetyEvaluatorへ通す。
+    attack_follow_min_spatial_horizon_m: 0.55
+    attack_follow_max_evaluation_horizon_sec: 4.0
+    # primary Pure Pursuitの実行lookahead契約。PASS/FOLLOWの横profileは、
+    # このlookahead・0.75秒前方・0.25秒応答遅れ付き停止距離の最大値まで
+    # Planner側で先にSafetyEvaluatorへ通す。
+    lateral_override_lookahead_gain: 0.5
+    lateral_override_lookahead_min_distance_m: 3.5
+    # moving/欠損相手のCartesian等速予測を長時間外挿しない上限。
+    moving_lateral_override_max_evaluation_horizon_sec: 6.0
+    # 0.2 m/sのcurrent-d攻めFOLLOWでも、PPの最小3.5 m previewを未評価の
+    # 空間点で補わず検証する。全観測相手が0.30 m/s以下の時だけ使う上限。
+    lateral_override_max_evaluation_horizon_sec: 20.0
+    lateral_override_execution_speed_reserve_sec: 0.10
     maneuver_latch_min_hold_sec: 1.0
-    maneuver_latch_target_update_alpha: 0.0
+    # 認可済みtarget ID/side/dは固定し、移動相手のfreshなsだけ前進追従する。
+    maneuver_latch_target_update_alpha: 1.0
+    # Gate 2認可済みでも、実車が選択側へ0.10 mを超えて進む前にfresh対象が
+    # 8 mより先へ1.0 m/s以上で離れ続けた時だけ、旧targetを解放する。
+    # 5周期連続を必須にし、横へコミット済みのPASSや一時的な観測揺れは保持する。
+    unstarted_pass_target_release_enabled: true
+    unstarted_pass_target_release_min_gap_m: 8.0
+    unstarted_pass_target_release_min_opening_speed_mps: 1.0
+    unstarted_pass_target_release_max_lateral_progress_m: 0.10
+    unstarted_pass_target_release_required_cycles: 5
     prepare_distance_m: 8.0
     merge_distance_m: 12.0
     follow_speed_margin_mps: 0.00
@@ -170,7 +277,7 @@ overtake_planner_node:
     # 3.0 m/s^2での最遠到達距離をSafetyEvaluatorへ渡す。
     follow_gap_closing_enabled: true
     follow_gap_closing_target_gap_m: 4.5
-    follow_gap_closing_engage_gap_m: 10.0
+    follow_gap_closing_engage_gap_m: 4.5
     follow_gap_closing_speed_gain_per_m: 0.15
     follow_gap_closing_max_speed_bonus_mps: 0.80
     follow_gap_closing_assumed_accel_mps2: 3.0
@@ -178,18 +285,52 @@ overtake_planner_node:
     # 3.0 m/s^2を仮定して評価し、stale時は現速度を超えるPASSを出さない。
     pass_speed_cap_mps: 10.0
     pass_assumed_accel_mps2: 3.0
+    # moving targetは最終の加減速profileで本当に抜き切れる場合だけPASSにする。
+    # 横分離後、20秒以内にmerge_front_gap_mだけ前へ出て、0.05 m/s以上の
+    # closing speedが2 sample連続することを要求する。停止対象は対象外。
+    moving_pass_reachability_enabled: true
+    moving_pass_max_completion_time_sec: 20.0
+    moving_pass_min_closing_speed_mps: 0.05
     pass_target_lateral_margin_m: 0.10
+    # 実横分離が安全楕円+marginへ届くまでは相手速度以下に縦速度を閉じる。
+    # 停止/極低速車だけは横profileを進めるため0.75 m/s以下のcreepを許すが、
+    # 同じ減速s(t)と全相手SafetyEvaluatorを通らない候補は認可しない。
+    pass_lateral_first_stationary_creep_v_max_mps: 0.75
+    # Gate2実走では停止対象へ向かうPASS中、固定wireに対するPP横追従遅れが
+    # 約0.68 mまで拡大し、1 m connectorがuntrackable/opponent_collisionに
+    # なった。停止・低速対象かつ実横分離未完了の間だけ、5 cmを超える
+    # PASS方向の遅れを0.35 m/sへ閉じ、通常走行や移動車追越へ波及させない。
+    pass_lateral_tracking_lag_threshold_m: 0.05
+    pass_lateral_tracking_lag_speed_cap_mps: 0.35
     recovery_v_max_mps: 3.0
     # MPC/PPが許容し得る最大加速でRecoveryの最遠到達s(t)を評価する。
     recovery_assumed_accel_mps2: 3.0
     wall_margin_recovery_v_max_mps: 0.5
+    # 互換用。横profileはSafetyEvaluatorと一致する物理距離基準のみで生成する。
     outside_corridor_recovery_centering_time_sec: 1.0
     v_passthrough_mps: 50.0
     d_min_m: -1.35
     d_max_m: 1.35
-    min_wall_margin_m: 0.50
+    min_wall_margin_m: 0.25
+    # corridor CSVは車体中心境界ではなくlanelet路面端。中心点の0.50 m判定とは
+    # 別に、vehicle_info由来のbase_link前後端/半幅を四隅へ展開して検査する。
+    wall_footprint_check_enabled: true
+    ego_front_extent_m: 1.554
+    ego_rear_extent_m: 0.510
+    ego_half_width_m: 0.650
+    # 静的GNSS lever arm(-0.26 m)はTFで既に補正済み。ここには走行中の
+    # localization/delay補正差に対する初期余裕だけを入れ、次bagで再同定する。
+    wall_localization_uncertainty_m: 0.250
+    # 延長horizonで点間隔が広がっても、車体cornerのswept pathを見落とさない。
+    wall_footprint_max_sample_distance_m: 0.250
+    wall_footprint_max_sample_yaw_rad: 0.050
     safety_ellipse_a_m: 3.0
-    safety_ellipse_b_m: 1.8
+    # Gate2実接触点はbody座標で前0.87 m・横1.66 mにあり、車幅だけを根拠にした
+    # b=1.30ではh=0.72として誤認可した。旋回中の車体角/前後オーバーハングを
+    # 含むswept bodyを覆う既定値1.80へ戻し、同じ点をh=-0.07でrejectする。
+    # min_ellipse_h=0.20時の純横方向中心間隔は約1.972 m、PASS目標はさらに
+    # pass_target_lateral_margin_m=0.10を加え約2.072 m。
+    safety_ellipse_b_m: 1.80
     min_ellipse_h: 0.20
     pass_safe_required_cycles: 5.0
     merge_front_gap_m: 6.0
@@ -201,6 +342,7 @@ overtake_planner_node:
     high_speed_curve_lateral_hold_min_speed_mps: 4.0
     high_speed_curve_lateral_hold_release_speed_mps: 2.5
     high_speed_curve_lateral_hold_release_curvature_m_inv: 0.025
+    preemptive_wall_recovery_min_curvature_m_inv: 0.50
     speed_only_fallback_enabled: true
     speed_only_fallback_v_max_mps: 0.5
     # 追越禁止区間でreentry gateが許可した通常復帰だけのレース上限。fail-safe capとは別。
@@ -216,6 +358,10 @@ overtake_planner_node:
     wall_soft_margin_m: 0.25
     wall_risk_v_max_mps: 0.5
     mpc_health_speed_guard_enabled: true
+    # typed mux statusでPP-primary/fresh/trackableを確認できたclean FREE_RUNだけ、
+    # 単発infeasibleとsolve-time警告を速度capから分離する。
+    mpc_health_clean_free_run_soft_guard_bypass_enabled: false
+    mpc_health_inactive_mpc_free_run_bypass_enabled: true
     # mpc_infeasible_countは連続回数。単発をhard failureにせず、3回連続から閉じる。
     mpc_health_infeasible_count_threshold: 3
     # 直近3台runの通常solve(約288--394 ms)を常時異常にしない上限。

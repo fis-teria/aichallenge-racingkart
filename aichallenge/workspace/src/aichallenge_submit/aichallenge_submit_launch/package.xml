@@ -36,6 +36,8 @@
   <exec_depend>wall_recovery_planner</exec_depend>
   <exec_depend>delay_aware_mpc_ros</exec_depend>
   <exec_depend>overtake_planner</exec_depend>
+  <exec_depend>state_lattice_overtake_planner</exec_depend>
+  <exec_depend>simple_state_lattice_planner</exec_depend>
 
   <exec_depend>tier4_planning_rviz_plugin</exec_depend>
   <exec_depend>tier4_localization_rviz_plugin</exec_depend>
@@ -46,7 +48,11 @@
   <exec_depend>topic_tools</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_index_python</test_depend>
+  <test_depend>autoware_auto_control_msgs</test_depend>
   <test_depend>autoware_lint_common</test_depend>
+  <test_depend>multi_purpose_mpc_ros_msgs</test_depend>
+  <test_depend>rclpy</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

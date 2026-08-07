@@ -32,6 +32,21 @@ def test_v3_override_contract_binds_solver_horizon_authorization_to_generation()
     assert override.mandatory_lateral_avoidance
 
 
+def test_v4_override_contract_preserves_spatial_axis_for_other_controllers() -> None:
+    override = parse_overtake_reference_override(
+        [1.0, 7.0, 3.0, 0.8, 0.6, 0.2, 1.0, 1.0, 1.0,
+         0.0, 0.4, 1.2, 4.0, 44.0, 2.0])
+
+    assert override is not None
+    assert override.mode_id == 7
+    assert override.generation == 44
+    assert override.lateral_offsets == pytest.approx((0.8, 0.6, 0.2))
+    assert override.speed_caps == pytest.approx((1.0, 1.0, 1.0))
+    assert override.longitudinal_offsets_m == pytest.approx((0.0, 0.4, 1.2))
+    assert override.solver_horizon_authorized
+    assert override.mandatory_lateral_avoidance
+
+
 def test_v2_speed_only_contract_has_no_lateral_points() -> None:
     override = parse_overtake_reference_override(
         [np.float32(1.0), 11.0, 0.0, 2.0, 42.0, 0.5])
@@ -102,6 +117,12 @@ def test_speed_only_latch_retains_cap_after_timeout_until_explicit_inactive() ->
         [1.0, 7.0, 1.0, 0.2, 3.0, 1.0, math.nan],
         [1.0, 7.0, 1.0, 0.2, 3.0, 3.0, 42.0, 3.0],
         [1.0, 7.0, 1.0, 0.2, 3.0, 3.0, 42.0, 2.5],
+        [1.0, 7.0, 2.0, 0.8, 0.2, 1.0, 1.0,
+         0.1, 1.0, 4.0, 44.0, 2.0],
+        [1.0, 7.0, 2.0, 0.8, 0.2, 1.0, 1.0,
+         0.0, -0.1, 4.0, 44.0, 2.0],
+        [1.0, 7.0, 2.0, 0.8, 0.2, 1.0, 1.0,
+         0.0, 1.0, 3.0, 44.0, 2.0],
         [1.0, 0.0, 0.0, 2.0, 42.0, 0.5],
         [1.0, 7.0, 0.0, 2.0, 0.0, 0.5],
         [1.0, 7.0, 0.0, 2.0, 42.0, 0.0],

@@ -1,0 +1,5 @@
+overtake_planner_node:
+  ros__parameters:
+    # AWSIM-only opt-in profile. The production/current route remains owned by
+    # overtake_planner.param.yaml and unchanged.
+    control_route: state_lattice_pure_pursuit

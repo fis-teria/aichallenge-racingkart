@@ -291,6 +291,77 @@ Visualization Manager:
           Width: 550
       Enabled: true
       Name: Utils
+    - Class: rviz_common/Group
+      Displays:
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Front Detection Sweep Corridor
+          Namespaces:
+            costmap_bounds: false
+            dynamic_cost_update_bounds: false
+            front_detection_area: true
+            front_detection_outline: true
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/overtake/planning_geometry
+          Value: true
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Lattice Candidates (green=feasible)
+          Namespaces:
+            state_lattice_candidates: true
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/overtake/trajectory_candidates
+          Value: true
+        - Buffer Length: 1
+          Class: rviz_default_plugins/Path
+          Color: 255; 0; 255
+          Enabled: true
+          Line Style: Lines
+          Line Width: 0.10000000149011612
+          Name: Costmap Selected Path (not authority)
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/overtake/selected_trajectory
+          Value: true
+        - Alpha: 0.6000000238418579
+          Class: rviz_default_plugins/Map
+          Color Scheme: costmap
+          Draw Behind: false
+          Enabled: true
+          Name: Current Opponent Cost Levels
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/overtake/opponent_costmap
+          Value: true
+        - Alpha: 0.3499999940395355
+          Class: rviz_default_plugins/Map
+          Color Scheme: costmap
+          Draw Behind: true
+          Enabled: true
+          Name: Static Wall Distance Cost
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/overtake/wall_costmap
+          Value: true
+      Enabled: true
+      Name: State Lattice Debug
   Enabled: true
   Global Options:
     Background Color: 10; 10; 10

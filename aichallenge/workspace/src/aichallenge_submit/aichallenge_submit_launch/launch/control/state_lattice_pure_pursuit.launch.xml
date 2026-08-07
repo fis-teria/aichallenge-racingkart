@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="simulation" default="true"/>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="pure_pursuit_speed_mps" default="10.0"/>
+  <arg name="wall_recovery_enabled" default="false"/>
+  <arg name="c002ay1_prod_measure_enabled" default="false"/>
+  <arg name="c002ay1_prod_measure_socket_path" default=""/>
+  <arg name="c002ay1_prod_measure_run_id" default=""/>
+  <arg name="c002ay1_prod_measure_planner_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_planner_instance_id" default="0"/>
+  <arg name="c002ay1_prod_measure_pp_nonce" default="0"/>
+  <arg name="c002ay1_prod_measure_pp_instance_id" default="0"/>
+  <arg name="c002ay1_prod_measure_selected_stream" default="legacy"/>
+  <arg name="free_run_live_exact_observe_enabled" default="true"/>
+  <arg name="free_run_live_exact_pre_ack_hold_enabled" default="true"/>
+  <arg name="pp_core_exact_snapshot_enabled" default="false"/>
+  <arg name="state_lattice_v2_live_proposal_publish_enabled" default="false"/>
+  <arg name="state_lattice_v2_live_proposal_accept_enabled" default="false"/>
+  <arg name="state_lattice_v2_producer_instance_id" default="0"/>
+  <arg name="state_lattice_v2_pp_producer_instance_id" default=""/>
+  <arg name="state_lattice_v2_session_id" default=""/>
+  <arg name="state_lattice_v4_poc_command_activation_enabled" default="false"/>
+  <!-- Shadow-only observation needs valid worker sessions. These values are
+       passed only to the primary PP and State Lattice workers below; recovery
+       PP remains explicitly unconfigured in the shared horizon launch. -->
+  <arg name="c002ay0_shadow_capture_enabled" default="true"/>
+  <arg name="state_lattice_source_binding_shadow_enabled" default="true"/>
+  <arg name="c002ay0_shadow_worker_path" default="$(find-pkg-prefix overtake_transport_contract)/lib/overtake_transport_contract/c002ay0_shadow_worker"/>
+  <arg name="c002ay0_shadow_session_generation" default="1"/>
+  <arg name="c002ay0_shadow_session_nonce" default="1"/>
+  <arg name="c002ay0_state_lattice_shadow_enabled" default="true"/>
+  <arg name="c002ay0_state_lattice_shadow_worker_path" default="$(find-pkg-prefix state_lattice_overtake_planner)/lib/state_lattice_overtake_planner/c002ay0_state_lattice_shadow_worker"/>
+  <arg name="c002ay0_state_lattice_shadow_session_generation" default="1"/>
+  <arg name="c002ay0_state_lattice_shadow_session_nonce" default="1"/>
+  <arg name="overtake_trajectory_backend" default="state_lattice_shadow"/>
+  <arg name="overtake_control_route" default="current">
+    <choice value="current"/>
+    <choice value="state_lattice_pure_pursuit"/>
+    <choice value="state_lattice_instant_mux"/>
+  </arg>
+
+  <!-- The route remains owned by overtake_planner.param.yaml. A mismatched
+       route starts no controller from this profile instead of silently
+       selecting a different live authority. -->
+  <let name="route_valid"
+       value="$(eval &quot;'$(var overtake_control_route)' == 'state_lattice_pure_pursuit'&quot;)"/>
+  <log message="state_lattice_pure_pursuit requires planner control_route=state_lattice_pure_pursuit"
+       unless="$(var route_valid)"/>
+
+  <group if="$(var route_valid)">
+    <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit_mpc_horizon.launch.xml">
+      <arg name="simulation" value="$(var simulation)"/>
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="use_overtake_planner" value="true"/>
+      <arg name="mpc_enabled" value="false"/>
+      <arg name="state_lattice_mpc_health_speed_guard_enabled" value="false"/>
+      <arg name="require_state_lattice_override_fresh" value="true"/>
+      <arg name="pure_pursuit_speed_mps" value="$(var pure_pursuit_speed_mps)"/>
+      <arg name="wall_recovery_enabled" value="$(var wall_recovery_enabled)"/>
+      <arg name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+      <arg name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+      <arg name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+      <arg name="c002ay1_prod_measure_planner_nonce" value="$(var c002ay1_prod_measure_planner_nonce)"/>
+      <arg name="c002ay1_prod_measure_planner_instance_id" value="$(var c002ay1_prod_measure_planner_instance_id)"/>
+      <arg name="c002ay1_prod_measure_pp_nonce" value="$(var c002ay1_prod_measure_pp_nonce)"/>
+      <arg name="c002ay1_prod_measure_pp_instance_id" value="$(var c002ay1_prod_measure_pp_instance_id)"/>
+      <arg name="c002ay1_prod_measure_selected_stream" value="$(var c002ay1_prod_measure_selected_stream)"/>
+      <arg name="free_run_live_exact_observe_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
+      <arg name="free_run_live_exact_pre_ack_hold_enabled" value="$(var free_run_live_exact_pre_ack_hold_enabled)"/>
+      <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+      <!-- Stage1 uses V4 as the only live trajectory payload. V2 proposal,
+           acceptance, and direct command activation remain disabled. -->
+      <arg name="state_lattice_v2_live_proposal_publish_enabled" value="false"/>
+      <arg name="state_lattice_v2_live_proposal_accept_enabled" value="false"/>
+      <arg name="state_lattice_v2_command_activation_enabled" value="false"/>
+      <arg name="state_lattice_v4_poc_identity_gate_enabled" value="false"/>
+      <arg name="state_lattice_v4_poc_command_activation_enabled" value="$(var state_lattice_v4_poc_command_activation_enabled)"/>
+      <!-- The V4 AWSIM PoC has no State-Lattice-owned typed plan/constraint
+           producer yet. Keep the Mux safety-constraint machinery enabled but
+           optional; watchdog, stale, race-arm, E-stop and clamps remain live. -->
+      <arg name="require_safety_constraint" value="false"/>
+      <arg name="state_lattice_v2_producer_instance_id" value="4101"/>
+      <arg name="state_lattice_v2_pp_producer_instance_id" value="4201"/>
+      <arg name="state_lattice_v2_session_id" value="1"/>
+      <arg name="c002ay0_shadow_capture_enabled" value="$(var c002ay0_shadow_capture_enabled)"/>
+      <arg name="state_lattice_source_binding_shadow_enabled" value="$(var state_lattice_source_binding_shadow_enabled)"/>
+      <arg name="c002ay0_shadow_worker_path" value="$(var c002ay0_shadow_worker_path)"/>
+      <arg name="c002ay0_shadow_session_generation" value="$(var c002ay0_shadow_session_generation)"/>
+      <arg name="c002ay0_shadow_session_nonce" value="$(var c002ay0_shadow_session_nonce)"/>
+      <arg name="c002ay0_state_lattice_shadow_enabled" value="$(var c002ay0_state_lattice_shadow_enabled)"/>
+      <arg name="c002ay0_state_lattice_shadow_worker_path" value="$(var c002ay0_state_lattice_shadow_worker_path)"/>
+      <arg name="c002ay0_state_lattice_shadow_session_generation" value="$(var c002ay0_state_lattice_shadow_session_generation)"/>
+      <arg name="c002ay0_state_lattice_shadow_session_nonce" value="$(var c002ay0_state_lattice_shadow_session_nonce)"/>
+      <arg name="overtake_trajectory_backend" value="$(var overtake_trajectory_backend)"/>
+      <arg name="overtake_control_route" value="$(var overtake_control_route)"/>
+    </include>
+  </group>
+</launch>

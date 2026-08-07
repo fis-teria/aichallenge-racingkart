@@ -39,12 +39,15 @@
 処理:
 
 1. 候補状態を初期化する。
-2. 各 `d` が安全コリドー内か確認する。
-3. 壁マージン外なら `reject_reason="wall_margin"` で即reject。
-4. 各他車予測と同じhorizon indexで楕円marginを計算する。
-5. `margin <= min_ellipse_h + 0.10` なら active constraintとして数える。
-6. `margin <= min_ellipse_h` なら `reject_reason="opponent_collision"` でreject。
-7. 全て通れば `feasible=true` のまま返る。
+2. 各中心 `d` が従来の安全コリドー内か確認する。
+3. 中心点の壁マージン外なら `reject_reason="wall_margin"` で即reject。
+4. Cartesian候補列の接線yawから、`base_link`基準の車体四隅を展開する。
+5. 各cornerをFrenetへ再投影し、自己位置余裕を残してlanelet路面端内か確認する。
+6. 車体cornerが外なら `reject_reason="wall_footprint_margin"` で即reject。
+7. 各他車予測と同じhorizon indexで楕円marginを計算する。
+8. `margin <= min_ellipse_h + 0.10` なら active constraintとして数える。
+9. `margin <= min_ellipse_h` なら `reject_reason="opponent_collision"` でreject。
+10. 全て通れば `feasible=true` のまま返る。
 
 出力として更新される値:
 
@@ -56,8 +59,8 @@
 
 ## 判定の意味
 
-壁判定は候補d列だけを見ます。
+回廊CSVは車体中心境界ではなくlanelet路面端です。壁判定は候補中心d列と、
+候補Cartesian列から求めた車体四隅の両方を見ます。
 他車判定は候補の `x/y/yaw` と他車予測の `x/y` を同じindexで突き合わせます。
 
 安全評価は「候補を作るかどうか」ではなく、「作った候補を採用してよいか」を決める層です。
-

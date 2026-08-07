@@ -78,7 +78,9 @@ mpc:
   ## Lap1: 53s, Lap2: 47s
 
   v_max: 35.0   # km/h
-  ay_max: 30  # m/s^2, maximum lateral acceleration in curves
+  # dev3 20260719-035155ではs5へ7.4 m/sで進入し、D2が壁際で187秒停止した。
+  # 既存の安定走行プロファイルへ戻し、曲率と前後加速度制約で入口から減速する。
+  ay_max: 9.5  # m/s^2, maximum lateral acceleration in curves
   Q: [10000000.0, 100000000.0, 100000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 

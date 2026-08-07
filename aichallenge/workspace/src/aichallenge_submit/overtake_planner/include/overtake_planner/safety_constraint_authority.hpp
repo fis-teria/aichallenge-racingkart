@@ -27,13 +27,16 @@ SafetyConstraintCommand makeSafetyConstraint(
 
 class SafetyConstraintReleaseGate {
 public:
-  explicit SafetyConstraintReleaseGate(int required_safe_cycles = 3);
+  explicit SafetyConstraintReleaseGate(
+      int required_safe_cycles = 3,
+      bool allow_conservative_target_progress = false);
 
   SafetyConstraintCommand filter(const SafetyConstraintCommand &candidate);
   int safeCycles() const { return safe_cycles_; }
 
 private:
   int required_safe_cycles_{3};
+  bool allow_conservative_target_progress_{false};
   int safe_cycles_{0};
   std::optional<SafetyConstraintCommand> pending_release_target_;
   std::optional<SafetyConstraintCommand> last_filtered_;

@@ -3,4 +3,36 @@ uint32 plan_generation
 bool mpc_horizon_usable
 bool pp_command_fresh
 bool trajectory_tracking_usable
+# final sourceがplannerの停止constraintだけでstop中でも、現在generationの
+# PP command・trajectory proofが揃い、外部停止/watchdog実故障が無い時だけtrue。
+bool safety_constraint_release_ready
+# trueは同一target/attemptのATTACK_FOLLOW STOPに限るN-1配送継続証明。
+# 縦走行やPASS認可には使用せず、PlannerのSTOP解除確認だけへ使用する。
+bool attack_follow_stop_transport_release_ready
+# 初回PASS tracking probe専用のplan/constraint配送状態。
+# NORMAL_DELIVERY_GAPはfreshかつ高々1世代のexact peer待ちだけを表し、
+# 速度・PASS・warm-up・tokenのauthorityには使用しない。
+uint8 PASS_PROBE_TRANSPORT_UNKNOWN=0
+uint8 PASS_PROBE_TRANSPORT_EXACT_CURRENT=1
+uint8 PASS_PROBE_TRANSPORT_NORMAL_DELIVERY_GAP=2
+uint8 PASS_PROBE_TRANSPORT_STALE=3
+uint8 PASS_PROBE_TRANSPORT_PAYLOAD_MUTATION=4
+uint8 PASS_PROBE_TRANSPORT_REGRESSION_OR_GAP=5
+uint8 pass_probe_transport_evidence
+# trueはMuxが現在generationのSTOP/PASS_WARMUP plan、constraint、
+# schema-2 command envelope、upstream tracking proof、typed tokenを
+# exact tupleで照合したdiagnostic ACK。motion authorityではない。
+bool pass_probe_exact_current_usable
+# 上のexact ACKで照合したPASS_WARMUP token。usable=false時は必ず0。
+uint64 pass_probe_lateral_stop_authority_token
+# Pure Pursuitがtracking proofを生成したcommandとのbinding。same stamp内で
+# plan_generationが変わる場合、Muxはこの値と受信commandの完全一致を要求する。
+bool pp_command_binding_valid
+uint8 lateral_stop_authority_kind
+int8 lateral_stop_transaction_pass_direction
+uint64 lateral_stop_authority_token
+float32 pp_command_speed_mps
+float32 pp_command_acceleration_mps2
+float32 pp_command_steering_tire_angle_rad
 float32 command_age_sec
+string reason

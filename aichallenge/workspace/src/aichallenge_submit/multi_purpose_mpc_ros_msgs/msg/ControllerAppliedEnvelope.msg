@@ -1,0 +1,89 @@
+# AW2-2 shadow-only atomic record. It is never motion authority.
+uint8 SCHEMA_INVALID=0
+uint8 SCHEMA_V1=1
+
+uint8 ROLE_UNKNOWN=0
+uint8 ROLE_PRIMARY=1
+uint8 ROLE_RECOVERY=2
+
+uint8 GEOMETRY_RELATION_UNKNOWN=0
+uint8 GEOMETRY_RELATION_DIRECT_APPLIED=1
+uint8 GEOMETRY_RELATION_DERIVED_REFERENCE_OVERRIDE=2
+uint8 GEOMETRY_RELATION_SOLVER_PREDICTION=3
+uint8 GEOMETRY_RELATION_TRAJECTORY_BRIDGE_OUTPUT=4
+
+uint8 ROLLOUT_UNKNOWN=0
+uint8 ROLLOUT_COMPLETE=1
+uint8 ROLLOUT_UNAVAILABLE=2
+uint8 ROLLOUT_LIMIT_EXCEEDED=3
+uint8 ROLLOUT_INVALID=4
+
+uint8 EVIDENCE_COMPLETE=0
+uint8 EVIDENCE_MISSING_INPUT=1
+uint8 EVIDENCE_STALE_INPUT=2
+uint8 EVIDENCE_FUTURE_STAMP=3
+uint8 EVIDENCE_CLOCK_OR_EPOCH_MISMATCH=4
+uint8 EVIDENCE_KEY_MISMATCH=5
+uint8 EVIDENCE_DUPLICATE_CONFLICT=6
+uint8 EVIDENCE_SAME_GENERATION_PAYLOAD_MUTATION=7
+uint8 EVIDENCE_PAYLOAD_DIGEST_MISMATCH=8
+uint8 EVIDENCE_FRAME_OR_MANIFEST_MISMATCH=9
+uint8 EVIDENCE_GEOMETRY_LIMIT_EXCEEDED=10
+uint8 EVIDENCE_GEOMETRY_INVALID=11
+uint8 EVIDENCE_GEOMETRY_RELATION_UNPROVEN=12
+uint8 EVIDENCE_HORIZON_INSUFFICIENT=13
+uint8 EVIDENCE_ACTUATOR_LIMIT_UNKNOWN=14
+uint8 EVIDENCE_ROLLOUT_UNAVAILABLE=15
+uint8 EVIDENCE_FEEDBACK_UNBOUND=16
+uint8 EVIDENCE_FEEDBACK_STALE=17
+uint8 EVIDENCE_OPPONENT_MISSING_OR_EXCLUDED=18
+uint8 EVIDENCE_WATCHDOG_OR_STOP_ACTIVE=19
+uint8 EVIDENCE_RESOURCE_LIMIT_EXCEEDED=20
+
+builtin_interfaces/Time record_stamp
+string<=128 record_frame_id
+uint8 schema_version
+bool authority_eligible
+multi_purpose_mpc_ros_msgs/ControllerSampleKey controller_sample_key
+uint32 candidate_revision
+uint8[32] candidate_content_sha256
+
+uint8 geometry_relation
+uint32 source_generation
+uint32 source_original_size_bytes
+bool source_wire_complete
+uint8[<=4096] canonical_source_wire
+uint8[32] canonical_source_sha256
+
+multi_purpose_mpc_ros_msgs/ControllerGeometry base_geometry
+multi_purpose_mpc_ros_msgs/ControllerGeometry applied_geometry
+geometry_msgs/Pose control_pose
+builtin_interfaces/Time control_pose_stamp
+uint32 nearest_trajectory_index
+float64 trajectory_progress_m
+
+uint8[32] controller_adapter_implementation_sha256
+uint8[32] controller_adapter_config_sha256
+
+autoware_auto_control_msgs/AckermannControlCommand raw_controller_command
+autoware_auto_control_msgs/AckermannControlCommand output_controller_command
+uint8[32] raw_controller_command_sha256
+uint8[32] output_controller_command_sha256
+
+float64 raw_steering_tire_angle_rad
+float64 output_steering_tire_angle_rad
+float64 raw_steering_tire_rotation_rate_radps
+float64 output_steering_tire_rotation_rate_radps
+bool hard_actuator_limits_present
+float64 hard_steering_tire_angle_limit_rad
+float64 hard_steering_tire_rotation_rate_limit_radps
+float64 available_spatial_horizon_m
+float64 required_spatial_horizon_m
+
+uint8 rollout_state
+uint32 rollout_original_sample_count
+multi_purpose_mpc_ros_msgs/ExecutionSweepSample[<=100] rollout_samples
+
+uint8 evidence_state
+string<=256 evidence_reason
+uint8[32] controller_applied_envelope_sha256

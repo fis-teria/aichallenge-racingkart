@@ -1,0 +1,85 @@
+# C-002AY-0 Phase 0 shadow-only exact authorized Cartesian proposal.
+uint8 SCHEMA_INVALID=0
+uint8 SCHEMA_V1_SHADOW=1
+
+uint8 SOURCE_UNKNOWN=0
+uint8 SOURCE_MPC_HORIZON=1
+uint8 SOURCE_REFERENCE_TRAJECTORY=2
+
+uint8 BASE_SOURCE_DIGEST_INDETERMINATE=0
+uint8 BASE_SOURCE_DIGEST_COMPLETE=1
+
+uint8 AUTHORIZATION_NOT_AUTHORIZED=0
+uint8 AUTHORIZATION_AUTHORIZED=1
+uint8 AUTHORIZATION_REJECTED=2
+
+uint8 SAFETY_NOT_EVALUATED=0
+uint8 SAFETY_REJECTED=1
+uint8 SAFETY_PASSED=2
+
+uint8 CANDIDATE_FASTEST=0
+uint8 CANDIDATE_FOLLOW=1
+uint8 CANDIDATE_PASS_LEFT=2
+uint8 CANDIDATE_PASS_RIGHT=3
+uint8 CANDIDATE_RECOVERY=4
+uint8 CANDIDATE_SIDE_BY_SIDE_KEEP=5
+uint8 CANDIDATE_YIELD_BEHIND=6
+uint8 CANDIDATE_SAFE_STOP=7
+
+uint8 PHASE_FREE_RUN=0
+uint8 PHASE_ATTACK_FOLLOW=1
+uint8 PHASE_PASSING=2
+uint8 PHASE_ABORT_HOLD=3
+
+uint8 schema_version
+bool authority_eligible
+
+builtin_interfaces/Time plan_stamp
+string<=128 frame_id
+multi_purpose_mpc_ros_msgs/PlanSampleKey plan_sample_key
+uint32 candidate_revision
+uint64 authority_token
+uint8 candidate_type
+uint8 phase
+uint8 authorization_state
+
+uint64 source_controller_instance_id
+uint64 source_controller_sequence
+uint64 base_lease_id
+builtin_interfaces/Time base_lease_valid_until
+uint8 base_source_kind
+builtin_interfaces/Time base_source_stamp
+uint32 base_source_generation
+uint32 base_original_point_count
+uint32 base_first_source_index
+uint32 base_last_source_index
+uint32 base_nearest_source_index
+uint8 base_source_digest_state
+uint8 canonical_algorithm_version
+uint8[32] base_geometry_sha256
+uint8[32] base_source_sha256
+uint8[32] base_snapshot_sha256
+
+multi_purpose_mpc_ros_msgs/CandidateExecutionPoint[<=256] points
+uint32 original_candidate_point_count
+float64 total_arc_length_m
+float64 required_spatial_horizon_m
+float64 join_end_arc_length_m
+float64 post_join_arc_length_m
+
+uint64 safety_snapshot_id
+uint8 safety_evaluation_result
+builtin_interfaces/Time safety_evaluation_stamp
+builtin_interfaces/Time safety_valid_until
+uint8[32] world_safety_snapshot_sha256
+uint8[32] safety_evaluator_implementation_sha256
+uint8[32] safety_evaluator_config_sha256
+uint8[32] safety_proof_sha256
+uint8[32] controller_implementation_sha256
+uint8[32] controller_config_sha256
+geometry_msgs/Pose candidate_start_control_pose
+builtin_interfaces/Time candidate_start_control_pose_stamp
+uint8[32] candidate_start_control_pose_sha256
+
+uint8[32] geometry_sha256
+uint8[32] payload_sha256

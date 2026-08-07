@@ -1,0 +1,22 @@
+std_msgs/Header header
+uint32 plan_generation
+bool mpc_horizon_usable
+bool pp_command_fresh
+bool trajectory_tracking_usable
+# final sourceがplannerの停止constraintだけでstop中でも、現在generationの
+# PP command・trajectory proofが揃い、外部停止/watchdog実故障が無い時だけtrue。
+bool safety_constraint_release_ready
+# trueは同一target/attemptのATTACK_FOLLOW STOPに限るN-1配送継続証明。
+# 縦走行やPASS認可には使用せず、PlannerのSTOP解除確認だけへ使用する。
+bool attack_follow_stop_transport_release_ready
+# Pure Pursuitがtracking proofを生成したcommandとのbinding。same stamp内で
+# plan_generationが変わる場合、Muxはこの値と受信commandの完全一致を要求する。
+bool pp_command_binding_valid
+uint8 lateral_stop_authority_kind
+int8 lateral_stop_transaction_pass_direction
+uint64 lateral_stop_authority_token
+float32 pp_command_speed_mps
+float32 pp_command_acceleration_mps2
+float32 pp_command_steering_tire_angle_rad
+float32 command_age_sec
+string reason

@@ -135,8 +135,15 @@ feed-forward は raw tire-angle rad に加算してから `steering_tire_angle_g
 | --- | --- | --- |
 | `use_overtake_reference_override` | `/overtake/reference_override` を PP 側にも適用するか。 | overtake planner と fallback PP の経路意図を揃えるため、hybrid では有効にします。 |
 | `overtake_override_timeout_sec` | override の有効期限。 | planner publish 周期より少し長くします。v1/v3 lateralはtimeoutでclearする一方、最後に受理したv2 speed-onlyは明示inactiveまで速度capだけを保持します。 |
+| `overtake_short_spatial_horizon_v_max_mps` | 空間profileが実行不能な場合の速度上限。 | `0.2 m/s`を上限とし、単独で引き上げません。 |
+| `overtake_spatial_horizon_min_arc_m` | 停止近傍でも横profileに要求する最小検証済みarc。 | D1の50点・0.025秒RECOVERY終端約0.571 mに対して`0.5 m`。基準trajectory点間なら終端点を補間します。 |
+| `overtake_spatial_horizon_min_time_sec` | 現在速度に対して要求する前方時間。 | `0.75 sec`。検証済みarcが`current_speed * time`未満なら横profileを使いません。 |
+| `overtake_spatial_horizon_response_delay_sec` | 短profile許可時の保守的な制動応答遅れ。 | Plannerの制動証明と同等以上にします。既定は`0.25 sec`。 |
+| `overtake_spatial_horizon_brake_decel_mps2` | 短profile許可時に証明済みとみなす減速度。 | 実ControllerとPlanner設定の共通上限`1.0 m/s^2`以下にします。既定は`1.0 m/s^2`。 |
 
-MPC horizon が usable な時は、horizon を優先するため通常 trajectory への overtake lateral override は適用しません。ただし overtake speed cap は PP の目標速度 cap として使われます。
+MPC horizon が usable な時は、horizon を優先するため通常 trajectory への overtake lateral override は適用しません。ただし overtake speed cap は PP の目標速度 cap として使われます。MPC horizonが使えずV4空間profileを直接適用する場合、通常lookaheadより短くても、検証済み終端までに0.2 m/sへ制動可能で最低arc/前方時間を満たす低速profileだけを許可します。終端は基準trajectory上へ補間し、trajectory自体をそこで切るため、曲率・lookahead・操舵は未評価suffixを参照しません。
+
+短profileの許可条件は設定で緩和できません。最小arc `0.5 m`、前方時間 `0.75 sec`、応答遅れ `0.25 sec` は下限として固定し、fail-safe速度は最大 `0.2 m/s` に制限します。検証減速度が `0 m/s^2` 以下または実行中Planner設定の `1.0 m/s^2` を超える設定は不正として横profileを拒否し、speed-only fail-safeへ移ります。
 
 `[1, mode_id!=0, 0, 2, generation, speed_cap_mps]` のv2 speed-onlyは横offsetを含みません。受理後にpayloadが不正になった、または `overtake_override_timeout_sec` を超えた場合も、PPはbaseline trajectoryを使い続けて最後の有効speed capだけを適用します。`[1, 0, 0, 1, generation]` のexplicit inactiveはこの保持を解除します。v1/v3 lateral overrideは不正payload/timeoutでclearします。
 
@@ -150,6 +157,8 @@ MPC horizon が usable な時は、horizon を優先するため通常 trajector
 - `mpc_horizon_age_sec`, `mpc_horizon_points`, `mpc_horizon_start_distance_m`, `mpc_horizon_arc_length_m`
 - `mpc_health_status`, `mpc_health_age_sec`, `mpc_infeasible_count`, `mpc_predicted_horizon_source`
 - `mpc_horizon_contract_*`, `overtake_override_generation`: horizonの出所とplanner requestが同じsolver解かを確認するための契約情報
+- `overtake_override_apply_reason`: `applied`, `insufficient_verified_spatial_horizon`, `spatial_endpoint_unavailable` など、横overrideを実際に採用/拒否した理由
+- `overtake_spatial_horizon_arc_m`, `overtake_spatial_horizon_required_arc_m`: 基準trajectory上で実際に覆えた検証済みarcと、その周期の速度・lookahead・制動契約から要求したarc。該当しない時は`-1.0`
 - `lookahead_distance_m`, `path_curvature_1pm`, `target_speed_mps`
 - `control_pose_shifted`, `control_pose_x/y/yaw_rad`, `steering_source`, `steering_age_sec`
 - `pure_pursuit_steering_tire_angle_rad`, `curvature_feedforward_steering_rad`, `signed_path_curvature_1pm`

@@ -22,6 +22,7 @@ class OvertakeReferenceOverride:
     speed_only: bool = False
     solver_horizon_authorized: bool = False
     mandatory_lateral_avoidance: bool = False
+    longitudinal_offsets_m: tuple[float, ...] = ()
 
 
 @dataclass
@@ -67,14 +68,16 @@ def _integer_float_in_range(value: object, minimum: int, maximum: int) -> int | 
 def parse_overtake_reference_override(
     data: Sequence[object],
 ) -> OvertakeReferenceOverride | None:
-    """Accept exact legacy/v1, v2 speed-only, or v3 lateral payloads.
+    """Accept exact legacy/v1, v2 speed-only, v3, or spatial v4 payloads.
 
     Malformed messages return ``None``. Callers keep a previously validated v2
     speed-only cap, if any, but clear v1 lateral overrides as before.
     v2 is deliberately narrow: it has no lateral points and exactly one positive
     speed cap, which must apply to every MPC horizon point. v3 appends a
-    generation-bound horizon intent to a lateral payload. Legacy v1 is accepted
-    for transport compatibility but never authorizes a solver horizon.
+    generation-bound horizon intent to a lateral payload. v4 additionally
+    carries the planner's physical-distance axis for Pure Pursuit; MPC keeps
+    consuming the original time-indexed lateral/speed arrays. Legacy v1 is
+    accepted for transport compatibility but never authorizes a solver horizon.
     """
     if len(data) < 3:
         return None
@@ -120,12 +123,15 @@ def parse_overtake_reference_override(
             speed_only=True,
         )
 
-    # v1/v3 lateral + speed override. The no-trailer v1 form remains accepted
-    # for old publishers, while the current Node emits v3.
+    # v1/v3/v4 lateral + speed override. The no-trailer v1 form remains accepted
+    # for old publishers, while the current Node emits v4 when a spatial axis is
+    # available and v3 otherwise.
     if mode_id == 0:
         return None
     expected = 3 + 2 * point_count
-    if len(data) not in {expected, expected + 2, expected + 3}:
+    spatial_expected = expected + point_count + 3
+    if len(data) not in {expected, expected + 2, expected + 3,
+                         spatial_expected}:
         return None
     payload = data[3:expected]
     if any(
@@ -157,6 +163,33 @@ def parse_overtake_reference_override(
         solver_horizon_authorized = horizon_intent in {1, 2}
         mandatory_lateral_avoidance = horizon_intent == 2
 
+    longitudinal_offsets_m: tuple[float, ...] = ()
+    if len(data) == spatial_expected:
+        distance_payload = data[expected:expected + point_count]
+        if any(
+                isinstance(value, bool) or not isinstance(value, Real) or
+                not math.isfinite(float(value)) or float(value) < 0.0
+                for value in distance_payload):
+            return None
+        longitudinal_offsets_m = tuple(float(value) for value in distance_payload)
+        if (abs(longitudinal_offsets_m[0]) > 1.0e-5 or
+                longitudinal_offsets_m[-1] <= 1.0e-6 or
+                any(next_distance + 1.0e-6 < previous_distance
+                    for previous_distance, next_distance in
+                    zip(longitudinal_offsets_m, longitudinal_offsets_m[1:]))):
+            return None
+        trailer_index = expected + point_count
+        contract_version = _integer_float_in_range(data[trailer_index], 4, 4)
+        generation = _integer_float_in_range(
+            data[trailer_index + 1], 1, MAX_OVERTAKE_OVERRIDE_GENERATION)
+        horizon_intent = _integer_float_in_range(
+            data[trailer_index + 2], 0, 2)
+        if (contract_version is None or generation is None or
+                horizon_intent is None):
+            return None
+        solver_horizon_authorized = horizon_intent in {1, 2}
+        mandatory_lateral_avoidance = horizon_intent == 2
+
     return OvertakeReferenceOverride(
         mode_id=mode_id,
         point_count=point_count,
@@ -165,4 +198,5 @@ def parse_overtake_reference_override(
         generation=generation,
         solver_horizon_authorized=solver_horizon_authorized,
         mandatory_lateral_avoidance=mandatory_lateral_avoidance,
+        longitudinal_offsets_m=longitudinal_offsets_m,
     )

@@ -6,11 +6,54 @@
   <arg name="use_overtake_planner" default="true"/>
   <arg name="fallback_speed_mps" default="10.0"/>
   <arg name="wall_recovery_enabled" default="false"/>
+  <arg name="free_run_live_exact_observe_enabled" default="true"/>
+  <arg name="free_run_live_exact_pre_ack_hold_enabled" default="true"/>
+  <arg name="pp_core_exact_snapshot_enabled" default="false"/>
+  <arg name="overtake_trajectory_backend" default="current"/>
+  <arg name="overtake_control_route" default="current"
+       description="Select overtake execution: current, state_lattice_pure_pursuit, state_lattice_instant_mux">
+    <choice value="current"/>
+    <choice value="state_lattice_pure_pursuit"/>
+    <choice value="state_lattice_instant_mux"/>
+  </arg>
+  <let name="current_overtake_planner_enabled"
+       value="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' == 'current'&quot;)"/>
+  <let name="state_lattice_pure_pursuit_enabled"
+       value="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' == 'state_lattice_pure_pursuit'&quot;)"/>
+  <let name="state_lattice_instant_enabled"
+       value="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' == 'state_lattice_instant_mux'&quot;)"/>
+  <let name="reference_override_enabled"
+       value="$(eval &quot;'$(var use_overtake_planner)' == 'true' and '$(var overtake_control_route)' in ('current', 'state_lattice_pure_pursuit')&quot;)"/>
+
+  <group if="$(var state_lattice_pure_pursuit_enabled)">
+    <include file="$(find-pkg-share state_lattice_overtake_planner)/launch/state_lattice_overtake_planner.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="input_odom" value="/delay_aware_mpc/localization/kinematic_state"/>
+      <arg name="live_control_output_enabled" value="true"/>
+      <arg name="instant_control_enabled" value="false"/>
+      <arg name="controller_trackability_profile" value="pure_pursuit"/>
+      <arg name="safety_evaluation_enabled" value="true"/>
+      <arg name="output_instant_control_cmd" value="/state_lattice/instant_control_unused"/>
+      <arg name="output_reference_override" value="/overtake/reference_override"/>
+    </include>
+  </group>
+
+  <group if="$(var state_lattice_instant_enabled)">
+    <include file="$(find-pkg-share simple_state_lattice_planner)/launch/simple_state_lattice_planner.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="input_odom" value="/delay_aware_mpc/localization/kinematic_state"/>
+      <arg name="live_control_output_enabled" value="true"/>
+      <arg name="safety_evaluation_enabled" value="true"/>
+      <arg name="output_control_cmd" value="/hybrid_control/state_lattice/control_cmd"/>
+    </include>
+  </group>
 
   <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/delay_aware_mpc.launch.xml">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
-    <arg name="use_overtake_planner" value="$(var use_overtake_planner)"/>
+    <arg name="use_overtake_planner" value="$(var current_overtake_planner_enabled)"/>
+    <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+    <arg name="overtake_trajectory_backend" value="$(var overtake_trajectory_backend)"/>
     <arg name="output_control_cmd" value="/hybrid_control/mpc/control_cmd"/>
     <arg name="output_raw_control_cmd" value="/hybrid_control/mpc/control_cmd_raw"/>
     <arg name="output_mpc_predicted_horizon" value="/hybrid_control/mpc/predicted_horizon"/>
@@ -27,6 +70,13 @@
     <arg name="input_steering_status" value="/vehicle/status/steering_status"/>
     <arg name="output_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd"/>
     <arg name="output_raw_control_cmd" value="/hybrid_control/pure_pursuit/control_cmd_raw"/>
+    <arg name="output_controller_tracking_status" value="/hybrid_control/pure_pursuit/tracking_status"/>
+    <arg name="output_controller_command_envelope" value="/hybrid_control/pure_pursuit/command_envelope"/>
+    <arg name="output_controller_execution_envelope" value="/hybrid_control/pure_pursuit/execution_envelope"/>
+    <arg name="output_free_run_execution_ack" value="/hybrid_control/pure_pursuit/free_run_execution_ack"/>
+    <arg name="free_run_live_exact_ack_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
+    <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+    <arg name="input_overtake_plan" value="/overtake/plan"/>
     <arg name="wheel_base" value="1.087"/>
     <arg name="use_external_target_vel" value="true"/>
     <arg name="external_target_vel" value="$(var fallback_speed_mps)"/>
@@ -36,7 +86,7 @@
     <arg name="max_mpc_horizon_start_distance_m" value="2.0"/>
     <arg name="min_mpc_horizon_arc_length_m" value="2.0"/>
     <arg name="require_matching_overtake_horizon_contract" value="true"/>
-    <arg name="use_overtake_reference_override" value="$(var use_overtake_planner)"/>
+    <arg name="use_overtake_reference_override" value="$(var reference_override_enabled)"/>
     <arg name="input_overtake_reference_override" value="/overtake/reference_override"/>
     <arg name="lookahead_gain" value="0.5"/>
     <arg name="lookahead_min_distance" value="3.5"/>
@@ -76,6 +126,10 @@
     <arg name="output_control_cmd" value="/wall_recovery/pure_pursuit/unused_control_cmd"/>
     <arg name="output_raw_control_cmd" value="/wall_recovery/pure_pursuit/unused_control_cmd_raw"/>
     <arg name="output_recovery_control_cmd" value="/hybrid_control/recovery/control_cmd"/>
+    <arg name="output_controller_tracking_status" value="/wall_recovery/pure_pursuit/tracking_status"/>
+    <arg name="output_controller_command_envelope" value="/wall_recovery/pure_pursuit/command_envelope"/>
+    <arg name="output_controller_execution_envelope" value="/wall_recovery/pure_pursuit/execution_envelope"/>
+    <arg name="input_overtake_plan" value="/overtake/plan"/>
     <arg name="output_debug" value="/wall_recovery/pure_pursuit/debug"/>
     <arg name="output_lookahead_point" value="/wall_recovery/pure_pursuit/lookahead_point"/>
     <arg name="wheel_base" value="1.087"/>
@@ -93,14 +147,23 @@
   <include file="$(find-pkg-share hybrid_control_mux)/launch/hybrid_control_mux.launch.xml">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="recovery_enabled" value="$(var wall_recovery_enabled)"/>
-    <arg name="require_safety_constraint" value="$(var use_overtake_planner)"/>
+    <arg name="require_safety_constraint" value="$(var current_overtake_planner_enabled)"/>
     <arg name="input_mpc_cmd" value="/hybrid_control/mpc/control_cmd"/>
     <arg name="input_pure_pursuit_cmd" value="/hybrid_control/pure_pursuit/control_cmd"/>
+    <arg name="input_pure_pursuit_command_envelope" value="/hybrid_control/pure_pursuit/command_envelope"/>
+    <arg name="input_free_run_execution_ack" value="/hybrid_control/pure_pursuit/free_run_execution_ack"/>
+    <arg name="free_run_live_exact_observe_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
+    <arg name="free_run_live_exact_pre_ack_hold_enabled" value="$(var free_run_live_exact_pre_ack_hold_enabled)"/>
+    <arg name="state_lattice_instant_control_enabled" value="$(var state_lattice_instant_enabled)"/>
+    <arg name="input_state_lattice_control_cmd" value="/hybrid_control/state_lattice/control_cmd"/>
     <arg name="input_recovery_cmd" value="/hybrid_control/recovery/control_cmd"/>
     <arg name="input_recovery_status" value="/wall_recovery/status"/>
     <arg name="input_recovery_permit" value="/wall_recovery/permit"/>
     <arg name="input_safety_constraint" value="/overtake/safety_constraint"/>
     <arg name="input_overtake_plan" value="/overtake/plan"/>
+    <arg name="input_pure_pursuit_tracking_status" value="/hybrid_control/pure_pursuit/tracking_status"/>
     <arg name="output_control_cmd" value="/control/command/control_cmd"/>
+    <arg name="output_debug" value="/hybrid_control_mux/debug"/>
+    <arg name="output_controller_tracking_status" value="/hybrid_control/controller_tracking_status"/>
   </include>
 </launch>

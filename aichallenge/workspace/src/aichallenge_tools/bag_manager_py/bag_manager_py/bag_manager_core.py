@@ -112,7 +112,7 @@ class BagRecorderCore:
             Optional[List[str]]: The list of command arguments, or None if
             configuration is invalid (e.g., no topics specified).
         """
-        cmd = ['ros2', 'bag', 'record']
+        cmd = ['ros2', 'bag', 'record', '--include-unpublished-topics']
         if self.all_topics:
             cmd.append('-a')
         elif self.topics:

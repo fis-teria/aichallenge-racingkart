@@ -1,4 +1,5 @@
 #include "overtake_planner/safety_constraint_authority.hpp"
+#include "overtake_planner/reference_override_contract.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +16,10 @@ double minimumPositiveSpeedCap(const PlannerOutput &output,
       output.applied_speed_cap_mps > 0.0) {
     cap_mps = std::min(cap_mps, output.applied_speed_cap_mps);
   }
-  if (output.active_override || output.longitudinal_speed_cap_active) {
+  if (output.longitudinal_speed_cap_active) {
+    // lateral/spatial overrideのspeed_capsは各軌道点の目標速度列で、先頭は
+    // 現在速度へ連続接続される。これを全体の最小上限へ畳むと停止発進時に
+    // 0 m/sへ自己拘束する。global safety capとして明示された時だけ集約する。
     for (const double candidate_cap_mps : output.speed_caps) {
       if (std::isfinite(candidate_cap_mps) && candidate_cap_mps > 0.0) {
         cap_mps = std::min(cap_mps, candidate_cap_mps);
@@ -29,8 +33,7 @@ constexpr double kConstraintTolerance = 1.0e-6;
 
 bool sameReleaseTarget(const SafetyConstraintCommand &lhs,
                        const SafetyConstraintCommand &rhs) {
-  return lhs.valid == rhs.valid &&
-         lhs.stop_requested == rhs.stop_requested &&
+  return lhs.valid == rhs.valid && lhs.stop_requested == rhs.stop_requested &&
          std::abs(lhs.speed_limit_mps - rhs.speed_limit_mps) <=
              kConstraintTolerance &&
          std::abs(lhs.required_brake_decel_mps2 -
@@ -47,18 +50,16 @@ bool relaxesConstraint(const SafetyConstraintCommand &candidate,
              previous.required_brake_decel_mps2;
 }
 
-SafetyConstraintCommand holdPreviousRelaxations(
-    const SafetyConstraintCommand &candidate,
-    const SafetyConstraintCommand &previous) {
+SafetyConstraintCommand
+holdPreviousRelaxations(const SafetyConstraintCommand &candidate,
+                        const SafetyConstraintCommand &previous) {
   SafetyConstraintCommand filtered = candidate;
   filtered.valid = candidate.valid && previous.valid;
-  filtered.stop_requested =
-      candidate.stop_requested || previous.stop_requested;
+  filtered.stop_requested = candidate.stop_requested || previous.stop_requested;
   filtered.speed_limit_mps =
       std::min(candidate.speed_limit_mps, previous.speed_limit_mps);
-  filtered.required_brake_decel_mps2 =
-      std::max(candidate.required_brake_decel_mps2,
-               previous.required_brake_decel_mps2);
+  filtered.required_brake_decel_mps2 = std::max(
+      candidate.required_brake_decel_mps2, previous.required_brake_decel_mps2);
   filtered.release_authorized = false;
   filtered.reason = "release_pending_safe_cycles";
   return filtered;
@@ -68,8 +69,7 @@ SafetyConstraintCommand holdPreviousRelaxations(
 
 bool safetyConstraintSemanticallyEqual(const SafetyConstraintCommand &lhs,
                                        const SafetyConstraintCommand &rhs) {
-  return lhs.valid == rhs.valid &&
-         lhs.stop_requested == rhs.stop_requested &&
+  return lhs.valid == rhs.valid && lhs.stop_requested == rhs.stop_requested &&
          lhs.release_authorized == rhs.release_authorized &&
          std::abs(lhs.speed_limit_mps - rhs.speed_limit_mps) <=
              kConstraintTolerance &&
@@ -78,18 +78,18 @@ bool safetyConstraintSemanticallyEqual(const SafetyConstraintCommand &lhs,
          lhs.reason == rhs.reason;
 }
 
-SafetyConstraintCommand makeSafetyConstraint(
-    const PlannerOutput &output, const EgoState &ego,
-    const ReentryInputStatus &inputs, double normal_speed_limit_mps,
-    double maximum_brake_decel_mps2) {
+SafetyConstraintCommand makeSafetyConstraint(const PlannerOutput &output,
+                                             const EgoState &ego,
+                                             const ReentryInputStatus &inputs,
+                                             double normal_speed_limit_mps,
+                                             double maximum_brake_decel_mps2) {
   SafetyConstraintCommand command;
   const double normal_limit_mps =
       std::isfinite(normal_speed_limit_mps) && normal_speed_limit_mps > 0.0
           ? normal_speed_limit_mps
           : 1.0e-3;
   const double brake_decel_mps2 =
-      std::isfinite(maximum_brake_decel_mps2) &&
-              maximum_brake_decel_mps2 > 0.0
+      std::isfinite(maximum_brake_decel_mps2) && maximum_brake_decel_mps2 > 0.0
           ? maximum_brake_decel_mps2
           : 0.0;
   const bool safety_inputs_complete =
@@ -97,10 +97,14 @@ SafetyConstraintCommand makeSafetyConstraint(
       inputs.all_observed_opponents_fresh &&
       inputs.all_observed_opponents_included && inputs.reference_valid;
   command.valid = true;
-  command.speed_limit_mps = minimumPositiveSpeedCap(output, normal_limit_mps);
-  command.stop_requested = !safety_inputs_complete || !ego.valid ||
-                           output.safe_stop_triggered ||
-                           output.mode == BehaviorMode::SAFE_STOP;
+  command.speed_limit_mps =
+      isTrackingStopBootstrapOutput(output)
+          ? trackingStopBootstrapSpeedCapMps(output)
+          : minimumPositiveSpeedCap(output, normal_limit_mps);
+  command.stop_requested =
+      !safety_inputs_complete || !ego.valid || output.safe_stop_triggered ||
+      output.mode == BehaviorMode::SAFE_STOP ||
+      output.blocked_info.maneuver_transaction_tracking_stop_active;
   if (!std::isfinite(command.speed_limit_mps) ||
       command.speed_limit_mps <= 0.0) {
     command.valid = false;
@@ -111,8 +115,10 @@ SafetyConstraintCommand makeSafetyConstraint(
     command.reason = "safety_input_incomplete";
   } else if (output.safe_stop_triggered ||
              output.mode == BehaviorMode::SAFE_STOP) {
-    command.reason = output.safe_stop_reason.empty() ? "safe_stop"
-                                                     : output.safe_stop_reason;
+    command.reason =
+        output.safe_stop_reason.empty() ? "safe_stop" : output.safe_stop_reason;
+  } else if (output.blocked_info.maneuver_transaction_tracking_stop_active) {
+    command.reason = "maneuver_transaction_tracking_stop";
   } else if (!output.speed_cap_reason.empty()) {
     command.reason = output.speed_cap_reason;
   } else if (!output.reason.empty()) {
@@ -122,17 +128,16 @@ SafetyConstraintCommand makeSafetyConstraint(
   }
 
   const bool braking_required =
-      command.stop_requested ||
-      (ego.valid && std::isfinite(ego.v) &&
-       ego.v > command.speed_limit_mps + 1.0e-3);
-  command.required_brake_decel_mps2 =
-      braking_required ? brake_decel_mps2 : 0.0;
+      command.stop_requested || (ego.valid && std::isfinite(ego.v) &&
+                                 ego.v > command.speed_limit_mps + 1.0e-3);
+  command.required_brake_decel_mps2 = braking_required ? brake_decel_mps2 : 0.0;
 
-  const bool guard_active =
-      output.speed_only_fallback_active || output.wall_risk_speed_guard_active ||
-      output.mpc_health_speed_guard_active ||
-      output.recovery_speed_guard_active || output.reentry_gate.requested ||
-      output.published_lateral_safety_rejected;
+  const bool guard_active = output.speed_only_fallback_active ||
+                            output.wall_risk_speed_guard_active ||
+                            output.mpc_health_speed_guard_active ||
+                            output.recovery_speed_guard_active ||
+                            output.reentry_gate.requested ||
+                            output.published_lateral_safety_rejected;
   // MPC health alone does not prove that the mux-selected PP/recovery tracker
   // is unusable.  The final mux independently stops on source timeout.  Until
   // ControllerTrackingStatus is wired in Phase 3, this transitional authority
@@ -146,11 +151,12 @@ SafetyConstraintCommand makeSafetyConstraint(
 }
 
 SafetyConstraintReleaseGate::SafetyConstraintReleaseGate(
-    int required_safe_cycles)
-    : required_safe_cycles_(std::max(1, required_safe_cycles)) {}
+    int required_safe_cycles, bool allow_conservative_target_progress)
+    : required_safe_cycles_(std::max(1, required_safe_cycles)),
+      allow_conservative_target_progress_(allow_conservative_target_progress) {}
 
-SafetyConstraintCommand SafetyConstraintReleaseGate::filter(
-    const SafetyConstraintCommand &candidate) {
+SafetyConstraintCommand
+SafetyConstraintReleaseGate::filter(const SafetyConstraintCommand &candidate) {
   const auto reset_pending_release = [this]() {
     safe_cycles_ = 0;
     pending_release_target_.reset();
@@ -165,6 +171,12 @@ SafetyConstraintCommand SafetyConstraintReleaseGate::filter(
       if (safe_cycles_ >= required_safe_cycles_) {
         filtered.release_authorized = true;
       } else {
+        // V2 shadow gateはreset/arm直後にも、連続確認が完了するまで停止を
+        // 解除しない。targetの速度capはpending側に保持し、確認完了時だけ
+        // まとめて適用する。
+        if (allow_conservative_target_progress_) {
+          filtered.stop_requested = true;
+        }
         filtered.reason = "release_pending_safe_cycles";
       }
     }
@@ -180,6 +192,43 @@ SafetyConstraintCommand SafetyConstraintReleaseGate::filter(
     if (relaxesConstraint(candidate, previous)) {
       filtered = holdPreviousRelaxations(candidate, previous);
     }
+    last_filtered_ = filtered;
+    return filtered;
+  }
+
+  if (allow_conservative_target_progress_ && previous.release_authorized &&
+      !relaxesConstraint(candidate, previous)) {
+    reset_pending_release();
+    last_filtered_ = candidate;
+    return candidate;
+  }
+
+  if (allow_conservative_target_progress_) {
+    if (!pending_release_target_.has_value()) {
+      pending_release_target_ = candidate;
+      safe_cycles_ = 0;
+    } else {
+      auto conservative = *pending_release_target_;
+      conservative.valid = conservative.valid && candidate.valid;
+      conservative.stop_requested =
+          conservative.stop_requested || candidate.stop_requested;
+      conservative.speed_limit_mps =
+          std::min(conservative.speed_limit_mps, candidate.speed_limit_mps);
+      conservative.required_brake_decel_mps2 =
+          std::max(conservative.required_brake_decel_mps2,
+                   candidate.required_brake_decel_mps2);
+      conservative.release_authorized = true;
+      pending_release_target_ = conservative;
+    }
+    safe_cycles_ = std::min(required_safe_cycles_, safe_cycles_ + 1);
+    if (safe_cycles_ < required_safe_cycles_) {
+      auto filtered = holdPreviousRelaxations(candidate, previous);
+      last_filtered_ = filtered;
+      return filtered;
+    }
+    auto filtered = *pending_release_target_;
+    filtered.release_authorized = true;
+    reset_pending_release();
     last_filtered_ = filtered;
     return filtered;
   }

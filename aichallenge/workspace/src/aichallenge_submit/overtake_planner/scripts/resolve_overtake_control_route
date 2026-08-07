@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Resolve the live overtake control route from the planner-owned config."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import yaml
+
+
+ALLOWED_ROUTES = {
+    "current",
+    "state_lattice_pure_pursuit",
+    "state_lattice_instant_mux",
+}
+DEFAULT_ROUTE = "current"
+
+
+def resolve_control_route(config_path: Path) -> str:
+    """Return an allowlisted route, falling back to the fail-closed default."""
+    try:
+        document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        parameters = document["overtake_planner_node"]["ros__parameters"]
+        route = parameters["control_route"]
+    except (OSError, KeyError, TypeError, yaml.YAMLError) as error:
+        print(
+            f"[overtake_route] cannot read control_route from {config_path}: "
+            f"{error}; using {DEFAULT_ROUTE}",
+            file=sys.stderr,
+        )
+        return DEFAULT_ROUTE
+
+    if not isinstance(route, str) or route not in ALLOWED_ROUTES:
+        print(
+            f"[overtake_route] invalid control_route={route!r} in {config_path}; "
+            f"using {DEFAULT_ROUTE}",
+            file=sys.stderr,
+        )
+        return DEFAULT_ROUTE
+    return route
+
+
+def main() -> int:
+    if len(sys.argv) > 1:
+        config_path = Path(sys.argv[1])
+    else:
+        from ament_index_python.packages import get_package_share_directory
+
+        config_path = (
+            Path(get_package_share_directory("overtake_planner"))
+            / "config"
+            / "overtake_planner.param.yaml"
+        )
+    sys.stdout.write(resolve_control_route(config_path))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

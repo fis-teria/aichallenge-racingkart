@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace overtake_planner {
 
@@ -25,7 +26,8 @@ bool isRightPassMode(BehaviorMode mode) {
 
 // 入力: 自車s、相手s、コース長。
 // 出力: 周回を考慮した符号付きs差分。正は相手が前方、負は後方。
-// 処理概要: 1周の半分を超える差分を逆向きに折り返し、横並び判定で前後関係を保つ。
+// 処理概要:
+// 1周の半分を超える差分を逆向きに折り返し、横並び判定で前後関係を保つ。
 double signedDeltaS(double ego_s, double other_s, double track_length) {
   double signed_delta_s = other_s - ego_s;
   if (track_length > 0.0) {
@@ -43,25 +45,31 @@ double signedDeltaS(double ego_s, double other_s, double track_length) {
 
 // 入力: Frenet変換器とplanner設定。
 // 出力: 閉塞/並走リスク解析器のインスタンス。
-// 処理概要: 相手車のs/d分類とpass gap判定を、同じ参照線/設定で実行できるようにする。
+// 処理概要: 相手車のs/d分類とpass
+// gap判定を、同じ参照線/設定で実行できるようにする。
 BlockedRiskAnalyzer::BlockedRiskAnalyzer(const FrenetFrame &frame,
                                          const PlannerConfig &config)
     : frame_(frame), config_(config) {}
 
 // 入力: 自車状態、相手車一覧、現在時刻。
 // 出力: 前方閉塞、横並び、並走候補、同方向判定を詰めたBlockedInfo。
-// 処理概要: V2Xで見えた相手車をFrenet上で分類し、plannerが候補生成に使うリスク情報へ変換する。
-BlockedInfo BlockedRiskAnalyzer::detectBlocked(
-    const EgoState &ego, const std::vector<OpponentState> &opponents,
-    double now_sec) const {
+// 処理概要:
+// V2Xで見えた相手車をFrenet上で分類し、plannerが候補生成に使うリスク情報へ変換する。
+BlockedInfo
+BlockedRiskAnalyzer::detectBlocked(const EgoState &ego,
+                                   const std::vector<OpponentState> &opponents,
+                                   double now_sec) const {
   BlockedInfo info;
   bool nearest_front_is_side_by_side = false;
   // 処理ブロック: 各相手車を鮮度、進行方向、相対s/dで分類する。
-  // 設計意図: 逆走や古い点を早めに除外し、前方閉塞と横並びを別々の状態として保持する。
+  // 設計意図:
+  // 逆走や古い点を早めに除外し、前方閉塞と横並びを別々の状態として保持する。
   for (std::size_t i = 0; i < opponents.size(); ++i) {
     const auto &opp = opponents[i];
     if (!opp.valid ||
-        now_sec - opp.stamp_sec > config_.opponent_stale_time_sec) {
+        !inputTimestampFresh(now_sec, opp.stamp_sec,
+                             config_.opponent_stale_time_sec,
+                             config_.input_future_stamp_tolerance_sec)) {
       continue;
     }
     const double delta_s = frame_.deltaS(ego.frenet.s, opp.frenet.s);
@@ -91,7 +99,8 @@ BlockedInfo BlockedRiskAnalyzer::detectBlocked(
         std::abs(delta_d) < config_.parallel_side_margin_m;
     if (side_by_side) {
       // 処理ブロック: 現在ほぼ横にいる車両を記録する。
-      // 設計意図: 前方閉塞ではなくても壁側へ押し出されるリスクがあるため、独立したフラグにする。
+      // 設計意図:
+      // 前方閉塞ではなくても壁側へ押し出されるリスクがあるため、独立したフラグにする。
       info.side_by_side = true;
       if (info.side_index < 0 ||
           std::abs(signed_delta_s) < std::abs(info.side_delta_s)) {
@@ -107,7 +116,8 @@ BlockedInfo BlockedRiskAnalyzer::detectBlocked(
     }
     if (parallel_side_candidate) {
       // 処理ブロック: 少し前後にずれている並走車両を記録する。
-      // 設計意図: コーナー進入前のサイドバイサイド化を早めに検出し、譲り判断へつなげる。
+      // 設計意図:
+      // コーナー進入前のサイドバイサイド化を早めに検出し、譲り判断へつなげる。
       info.parallel_side_candidate = true;
       if (info.parallel_side_index < 0 ||
           std::abs(signed_delta_s) < std::abs(info.parallel_side_delta_s)) {
@@ -156,7 +166,8 @@ BlockedInfo BlockedRiskAnalyzer::detectBlocked(
 
 // 入力: 閉塞情報、相手車一覧、相手予測、現在mode。
 // 出力: 左右追い越し可否とpass gap理由を更新したBlockedInfo。
-// 処理概要: 対象車両の現在/予測dと壁マージンから、左右どちらに抜ける空間が残るかを評価する。
+// 処理概要:
+// 対象車両の現在/予測dと壁マージンから、左右どちらに抜ける空間が残るかを評価する。
 BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
     const BlockedInfo &blocked_info,
     const std::vector<OpponentState> &opponents,
@@ -168,7 +179,8 @@ BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
   out.pass_gap_required_m = std::max(config_.min_pass_gap_m, ellipse_gap);
 
   // 処理ブロック: PASS/YIELDの対象車両を決める。
-  // 設計意図: 前方車両がいればそれを優先し、いない場合は横並びリスクを基準にする。
+  // 設計意図:
+  // 前方車両がいればそれを優先し、いない場合は横並びリスクを基準にする。
   const int target_index = yieldTargetIndex(out);
   if (target_index < 0 ||
       static_cast<std::size_t>(target_index) >= opponents.size()) {
@@ -181,28 +193,29 @@ BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
   }
 
   const auto &target = opponents[static_cast<std::size_t>(target_index)];
-  const auto target_bounds = frame_.corridorBounds(
-      target.frenet.s, config_.d_min_m, config_.d_max_m);
+  const auto target_bounds =
+      frame_.corridorBounds(target.frenet.s, config_.d_min_m, config_.d_max_m);
   double min_left_gap =
       target_bounds.d_max - config_.min_wall_margin_m - target.frenet.d;
   double min_right_gap =
       target.frenet.d - (target_bounds.d_min + config_.min_wall_margin_m);
 
   // 処理ブロック: 現在位置だけでなく予測dも含めて最小隙間を見る。
-  // 設計意図: 相手が将来壁側へ寄る場合、現在は空いて見える追い越しラインも不許可にする。
+  // 設計意図:
+  // 相手が将来壁側へ寄る場合、現在は空いて見える追い越しラインも不許可にする。
   for (const auto &pred : predictions) {
     if (pred.id != target.id) {
       continue;
     }
     const std::size_t count = std::min(pred.s.size(), pred.d.size());
     for (std::size_t i = 0; i < count; ++i) {
-      const auto bounds = frame_.corridorBounds(pred.s[i], config_.d_min_m,
-                                                 config_.d_max_m);
+      const auto bounds =
+          frame_.corridorBounds(pred.s[i], config_.d_min_m, config_.d_max_m);
       min_left_gap = std::min(
           min_left_gap, bounds.d_max - config_.min_wall_margin_m - pred.d[i]);
-      min_right_gap = std::min(
-          min_right_gap, pred.d[i] -
-                             (bounds.d_min + config_.min_wall_margin_m));
+      min_right_gap =
+          std::min(min_right_gap,
+                   pred.d[i] - (bounds.d_min + config_.min_wall_margin_m));
     }
     break;
   }
@@ -230,6 +243,239 @@ BlockedInfo BlockedRiskAnalyzer::evaluatePassGap(
   return out;
 }
 
+// 入力:
+// 現在自車/閉塞情報、fresh相手一覧、既存planner時刻列の全相手予測、現在時刻。
+// 出力: 現在または既存prediction horizon内のPASS対象を示すshadow診断。
+// 処理概要: 現在front、現在parallel、将来front/parallelの順に決定論的に選ぶ。
+// この結果は走行authority、既存target、候補生成を変更せず、観測専用とする。
+BlockedInfo BlockedRiskAnalyzer::evaluatePredictivePassTargetShadow(
+    const EgoState &ego, const BlockedInfo &blocked_info,
+    const std::vector<OpponentState> &opponents,
+    const std::vector<PredictedOpponent> &predictions, double now_sec) const {
+  BlockedInfo out = blocked_info;
+  auto &diagnostic = out.predictive_pass_target_shadow;
+  diagnostic = PredictivePassTargetShadowDiagnostic{};
+  diagnostic.evaluated = true;
+
+  const auto fail = [&diagnostic](const std::string &reason) {
+    diagnostic.inputs_complete = false;
+    diagnostic.valid = false;
+    diagnostic.reason = reason;
+  };
+  if (!blocked_info.opponent_prediction_inputs_complete) {
+    fail("upstream_inputs_incomplete");
+    return out;
+  }
+  if (!ego.valid || !std::isfinite(ego.frenet.s) ||
+      !std::isfinite(ego.frenet.d) || !std::isfinite(ego.v) ||
+      !std::isfinite(now_sec)) {
+    fail("invalid_ego");
+    return out;
+  }
+  if (opponents.empty()) {
+    diagnostic.inputs_complete = true;
+    diagnostic.reason = "no_opponents";
+    return out;
+  }
+  if (config_.horizon_points == 0U || !std::isfinite(config_.horizon_dt_sec) ||
+      config_.horizon_dt_sec <= 0.0 || predictions.size() != opponents.size()) {
+    fail("prediction_set_incomplete");
+    return out;
+  }
+
+  std::vector<const PredictedOpponent *> prediction_by_opponent(
+      opponents.size(), nullptr);
+  std::set<std::string> prediction_ids;
+  for (const auto &prediction : predictions) {
+    if (prediction.id.empty()) {
+      fail("invalid_prediction_id");
+      return out;
+    }
+    if (!prediction_ids.insert(prediction.id).second) {
+      fail("duplicate_prediction_id");
+      return out;
+    }
+  }
+  std::set<std::string> opponent_ids;
+  for (std::size_t opponent_index = 0; opponent_index < opponents.size();
+       ++opponent_index) {
+    const auto &opponent = opponents[opponent_index];
+    if (!opponent.valid || opponent.id.empty() ||
+        !inputTimestampFresh(now_sec, opponent.stamp_sec,
+                             config_.opponent_stale_time_sec,
+                             config_.input_future_stamp_tolerance_sec) ||
+        !std::isfinite(opponent.frenet.s) ||
+        !std::isfinite(opponent.frenet.d) || !std::isfinite(opponent.v) ||
+        !std::isfinite(opponent.vx) || !std::isfinite(opponent.vy)) {
+      fail("invalid_or_stale_opponent");
+      return out;
+    }
+    if (!opponent_ids.insert(opponent.id).second) {
+      fail("duplicate_opponent_id");
+      return out;
+    }
+    for (const auto &prediction : predictions) {
+      if (prediction.id != opponent.id) {
+        continue;
+      }
+      if (prediction_by_opponent[opponent_index] != nullptr) {
+        fail("duplicate_prediction_id");
+        return out;
+      }
+      prediction_by_opponent[opponent_index] = &prediction;
+    }
+    const auto *prediction = prediction_by_opponent[opponent_index];
+    if (prediction == nullptr ||
+        prediction->t.size() != config_.horizon_points ||
+        prediction->x.size() != config_.horizon_points ||
+        prediction->y.size() != config_.horizon_points ||
+        prediction->s.size() != config_.horizon_points ||
+        prediction->d.size() != config_.horizon_points) {
+      fail("prediction_axis_incomplete");
+      return out;
+    }
+    for (std::size_t point_index = 0; point_index < config_.horizon_points;
+         ++point_index) {
+      const double expected_time_sec =
+          static_cast<double>(point_index) * config_.horizon_dt_sec;
+      if (!std::isfinite(prediction->t[point_index]) ||
+          !std::isfinite(prediction->x[point_index]) ||
+          !std::isfinite(prediction->y[point_index]) ||
+          !std::isfinite(prediction->s[point_index]) ||
+          !std::isfinite(prediction->d[point_index]) ||
+          std::abs(prediction->t[point_index] - expected_time_sec) > 1.0e-9) {
+        fail("prediction_axis_invalid");
+        return out;
+      }
+    }
+  }
+  diagnostic.inputs_complete = true;
+
+  struct Selection {
+    int priority{4};
+    std::size_t index{0U};
+    std::size_t point_index{0U};
+    double time_sec{std::numeric_limits<double>::infinity()};
+    double current_delta_s_m{std::numeric_limits<double>::infinity()};
+    double current_delta_d_m{std::numeric_limits<double>::quiet_NaN()};
+    double relative_speed_mps{std::numeric_limits<double>::quiet_NaN()};
+    std::string source{};
+  };
+  Selection selected;
+
+  const auto is_better = [&selected, &opponents](const Selection &candidate) {
+    constexpr double kTieEpsilon = 1.0e-9;
+    if (candidate.priority != selected.priority) {
+      return candidate.priority < selected.priority;
+    }
+    if (std::abs(candidate.time_sec - selected.time_sec) > kTieEpsilon) {
+      return candidate.time_sec < selected.time_sec;
+    }
+    if (std::abs(candidate.current_delta_s_m - selected.current_delta_s_m) >
+        kTieEpsilon) {
+      return candidate.current_delta_s_m < selected.current_delta_s_m;
+    }
+    return opponents[candidate.index].id < opponents[selected.index].id;
+  };
+
+  for (std::size_t opponent_index = 0; opponent_index < opponents.size();
+       ++opponent_index) {
+    const auto &opponent = opponents[opponent_index];
+    const double opponent_s_dot_mps = opponentSDot(opponent);
+    const bool direction_known =
+        opponent.v >= config_.same_direction_min_speed_mps;
+    const bool same_direction =
+        !direction_known ||
+        opponent_s_dot_mps >= config_.same_direction_min_s_dot_mps;
+    if (config_.same_direction_filter_enabled && direction_known &&
+        !same_direction) {
+      continue;
+    }
+    const double current_delta_s_m =
+        signedDeltaS(ego.frenet.s, opponent.frenet.s, frame_.length());
+    const double current_delta_d_m = opponent.frenet.d - ego.frenet.d;
+    if (current_delta_s_m < 0.0) {
+      continue;
+    }
+
+    Selection candidate;
+    candidate.index = opponent_index;
+    candidate.current_delta_s_m = current_delta_s_m;
+    candidate.current_delta_d_m = current_delta_d_m;
+    candidate.relative_speed_mps = ego.v - opponent_s_dot_mps;
+    if (blocked_info.nearest_index == static_cast<int>(opponent_index)) {
+      candidate.priority = 0;
+      candidate.point_index = 0U;
+      candidate.time_sec = 0.0;
+      candidate.source = "current_front";
+    } else if (blocked_info.side_index == static_cast<int>(opponent_index) ||
+               blocked_info.parallel_side_index ==
+                   static_cast<int>(opponent_index)) {
+      candidate.priority = 1;
+      candidate.point_index = 0U;
+      candidate.time_sec = 0.0;
+      candidate.source = "current_parallel";
+    } else {
+      const auto &prediction = *prediction_by_opponent[opponent_index];
+      bool found_future = false;
+      for (std::size_t point_index = 1U; point_index < config_.horizon_points;
+           ++point_index) {
+        const double time_sec = prediction.t[point_index];
+        const double predicted_ego_s_m = ego.frenet.s + ego.v * time_sec;
+        const double future_delta_s_m = signedDeltaS(
+            predicted_ego_s_m, prediction.s[point_index], frame_.length());
+        const double future_delta_d_m =
+            prediction.d[point_index] - ego.frenet.d;
+        const bool future_front =
+            future_delta_s_m >= 0.0 &&
+            future_delta_s_m <= std::max(0.0, config_.follow_trigger_s_m) &&
+            std::abs(future_delta_d_m) <
+                std::max(0.0, config_.same_corridor_width_m);
+        const bool future_parallel =
+            config_.parallel_side_detection_enabled &&
+            future_delta_s_m >= 0.0 &&
+            future_delta_s_m < std::max(0.0, config_.parallel_side_s_m) &&
+            std::abs(future_delta_d_m) <
+                std::max(0.0, config_.parallel_side_margin_m);
+        if (!future_front && !future_parallel) {
+          continue;
+        }
+        candidate.priority = future_front ? 2 : 3;
+        candidate.point_index = point_index;
+        candidate.time_sec = time_sec;
+        candidate.source = future_front ? "future_front" : "future_parallel";
+        found_future = true;
+        break;
+      }
+      if (!found_future) {
+        continue;
+      }
+    }
+    if (selected.priority == 4 || is_better(candidate)) {
+      selected = candidate;
+    }
+  }
+
+  if (selected.priority == 4) {
+    diagnostic.reason = "no_predictive_target";
+    return out;
+  }
+  const auto &target = opponents[selected.index];
+  const auto &prediction = *prediction_by_opponent[selected.index];
+  diagnostic.valid = true;
+  diagnostic.target_index = static_cast<int>(selected.index);
+  diagnostic.target_id = target.id;
+  diagnostic.source = selected.source;
+  diagnostic.reason = "selected";
+  diagnostic.current_delta_s_m = selected.current_delta_s_m;
+  diagnostic.current_delta_d_m = selected.current_delta_d_m;
+  diagnostic.relative_speed_mps = selected.relative_speed_mps;
+  diagnostic.earliest_blocking_time_sec = selected.time_sec;
+  diagnostic.predicted_opponent_s_m = prediction.s[selected.point_index];
+  diagnostic.predicted_opponent_d_m = prediction.d[selected.point_index];
+  return out;
+}
+
 // 入力: Frenet横位置d。
 // 出力: 左右壁マージンのうち小さい方の余裕[m]。
 // 処理概要: 負値なら安全コリドー外として、譲り/復帰/速度ガードの判断に使う。
@@ -243,9 +489,9 @@ double BlockedRiskAnalyzer::wallClearance(double s, double d) const {
 
 // 入力: 相手車状態。
 // 出力: 参照線接線方向の速度成分[m/s]。
-// 処理概要: vx/vyを相手のFrenet s位置のyawへ射影し、同方向フィルタや予測に使う。
-double
-BlockedRiskAnalyzer::opponentSDot(const OpponentState &opponent) const {
+// 処理概要: vx/vyを相手のFrenet
+// s位置のyawへ射影し、同方向フィルタや予測に使う。
+double BlockedRiskAnalyzer::opponentSDot(const OpponentState &opponent) const {
   const auto ref = frame_.interpolate(opponent.frenet.s);
   return opponent.vx * std::cos(ref.yaw) + opponent.vy * std::sin(ref.yaw);
 }

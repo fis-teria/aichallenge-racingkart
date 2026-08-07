@@ -20,6 +20,13 @@
     <arg name="awsim_vk_layer_optimus" default="NVIDIA_only"/>
     <arg name="awsim_vk_icd_filenames" default="/etc/vulkan/icd.d/nvidia_icd.json"/>
     <arg name="control_method" default="pure_pursuit_mpc_horizon"/>
+    <arg name="race_arm_on_vehicle_state" default="Start"/>
+    <arg name="state_lattice_v2_live_proposal_publish_enabled" default="false"/>
+    <arg name="state_lattice_v2_live_proposal_accept_enabled" default="false"/>
+    <arg name="state_lattice_v2_producer_instance_id" default="0"/>
+    <arg name="state_lattice_v2_pp_producer_instance_id" default=""/>
+    <arg name="state_lattice_v2_session_id" default=""/>
+    <arg name="state_lattice_v4_poc_command_activation_enabled" default="false"/>
 
     <log message="Launching evaluation bundle (simulator + autoware)."/>
     <log message=" - domain_id: $(var domain_id)"/>
@@ -42,6 +49,7 @@
     <log message=" - awsim_vk_layer_optimus: $(var awsim_vk_layer_optimus)"/>
     <log message=" - awsim_vk_icd_filenames: $(var awsim_vk_icd_filenames)"/>
     <log message=" - control_method: $(var control_method)"/>
+    <log message=" - race_arm_on_vehicle_state: $(var race_arm_on_vehicle_state)"/>
 
     <group if="$(var launch_awsim)">
         <set_env name="ROS_DOMAIN_ID" value="0"/>
@@ -54,7 +62,13 @@
 
     <group if="$(var launch_awsim_state_manager)">
         <set_env name="ROS_DOMAIN_ID" value="0"/>
-        <include file="$(find-pkg-share aichallenge_system_launch)/launch/mode/awsim_state_manager.launch.xml"/>
+        <include file="$(find-pkg-share aichallenge_system_launch)/launch/mode/awsim_state_manager.launch.xml">
+            <arg name="admin_start_enabled" value="false"/>
+        </include>
+        <executable
+            name="request_awsim_start"
+            output="both"
+            cmd="env ROS_DOMAIN_ID=0 AWSIM_READY_DOMAINS=$(var domain_id) AWSIM_START_MODE=$(var awsim_start_mode) AWSIM_START_TIMEOUT_SEC=$(var awsim_timeout) /aichallenge/request_awsim_start.bash"/>
     </group>
 
     <group>
@@ -67,6 +81,13 @@
             <arg name="rosbag" value="$(var rosbag)"/>
             <arg name="domain_id" value="$(var domain_id)"/>
             <arg name="control_method" value="$(var control_method)"/>
+            <arg name="race_arm_on_vehicle_state" value="$(var race_arm_on_vehicle_state)"/>
+            <arg name="state_lattice_v2_live_proposal_publish_enabled" value="$(var state_lattice_v2_live_proposal_publish_enabled)"/>
+            <arg name="state_lattice_v2_live_proposal_accept_enabled" value="$(var state_lattice_v2_live_proposal_accept_enabled)"/>
+            <arg name="state_lattice_v2_producer_instance_id" value="$(var state_lattice_v2_producer_instance_id)"/>
+            <arg name="state_lattice_v2_pp_producer_instance_id" value="$(var state_lattice_v2_pp_producer_instance_id)"/>
+            <arg name="state_lattice_v2_session_id" value="$(var state_lattice_v2_session_id)"/>
+            <arg name="state_lattice_v4_poc_command_activation_enabled" value="$(var state_lattice_v4_poc_command_activation_enabled)"/>
         </include>
     </group>
 

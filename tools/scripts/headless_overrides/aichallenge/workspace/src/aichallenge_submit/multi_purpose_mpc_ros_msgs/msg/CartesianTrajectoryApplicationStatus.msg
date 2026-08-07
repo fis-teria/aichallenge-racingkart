@@ -1,0 +1,77 @@
+# C-002AY-0 Phase 0 shadow-only controller application evidence.
+uint8 SCHEMA_INVALID=0
+uint8 SCHEMA_V1_SHADOW=1
+
+uint8 APPLICATION_RECEIVED=0
+uint8 APPLICATION_REJECTED=1
+uint8 APPLICATION_WARMED=2
+uint8 APPLICATION_APPLIED=3
+uint8 APPLICATION_INVALIDATED=4
+
+uint8 REJECT_NONE=0
+uint8 REJECT_SCHEMA_UNSUPPORTED=1
+uint8 REJECT_AUTHORITY_FLAG_INVALID=2
+uint8 REJECT_FRAME_MISMATCH=3
+uint8 REJECT_CLOCK_OR_EPOCH_MISMATCH=4
+uint8 REJECT_STALE_BASE_SNAPSHOT=5
+uint8 REJECT_FUTURE_BASE_SNAPSHOT=6
+uint8 REJECT_BASE_BINDING_MISMATCH=7
+uint8 REJECT_BASE_LEASE_UNKNOWN=8
+uint8 REJECT_BASE_LEASE_EXPIRED=9
+uint8 REJECT_DIGEST_MISMATCH=10
+uint8 REJECT_PLAN_TUPLE_MISMATCH=11
+uint8 REJECT_GENERATION_REGRESSION=12
+uint8 REJECT_SAME_GENERATION_PAYLOAD_MUTATION=13
+uint8 REJECT_GEOMETRY_LIMIT_EXCEEDED=14
+uint8 REJECT_GEOMETRY_INVALID=15
+uint8 REJECT_SPATIAL_HORIZON_INSUFFICIENT=16
+uint8 REJECT_ENDPOINT_FALLBACK=17
+uint8 REJECT_TRACKING_UNUSABLE=18
+uint8 REJECT_CURRENT_POSE_HANDOFF_UNTRACKABLE=19
+uint8 REJECT_WORLD_SAFETY_STALE=20
+uint8 REJECT_EXISTING_AUTHORITY_INCOMPLETE=21
+
+uint8 schema_version
+bool authority_eligible
+builtin_interfaces/Time status_stamp
+string<=128 frame_id
+uint8 application_state
+uint8 reject_reason
+
+multi_purpose_mpc_ros_msgs/PlanSampleKey plan_sample_key
+uint32 candidate_revision
+uint64 authority_token
+uint64 controller_instance_id
+uint64 controller_sequence
+uint64 base_lease_id
+uint8 base_source_kind
+builtin_interfaces/Time base_source_stamp
+uint32 base_source_generation
+
+uint8[32] expected_base_source_sha256
+uint8[32] observed_base_source_sha256
+uint8[32] expected_base_geometry_sha256
+uint8[32] observed_base_geometry_sha256
+uint8[32] expected_base_snapshot_sha256
+uint8[32] observed_base_snapshot_sha256
+uint8[32] expected_geometry_sha256
+uint8[32] applied_geometry_sha256
+uint8[32] expected_payload_sha256
+uint8[32] observed_payload_sha256
+uint8[32] expected_controller_implementation_sha256
+uint8[32] observed_controller_implementation_sha256
+uint8[32] expected_controller_config_sha256
+uint8[32] observed_controller_config_sha256
+
+uint32 nearest_index
+uint32 lookahead_index
+bool endpoint_fallback
+float64 available_spatial_horizon_m
+float64 required_spatial_horizon_m
+float64 handoff_position_error_m
+float64 handoff_yaw_error_rad
+geometry_msgs/Pose applied_control_pose
+builtin_interfaces/Time applied_control_pose_stamp
+uint8[32] applied_control_pose_sha256
+builtin_interfaces/Time controller_command_stamp
+uint64 command_sequence

@@ -91,15 +91,8 @@ MPC本体の最適化は別で、このplannerは横方向オフセット列と�
 
 低速/停止中の注意:
 
-通常の横補間は `ds = ego.v * t` に依存します。
-そのため停止中は横目標がほぼ進みません。
-現在の実装では、次の場合に `outside_corridor_recovery_centering_time_sec` を使って時間ベースでも中央寄せを進めます。
-
-- 安全コリドー外にいる。
-- または `recovery_release_lateral_error_m` を超える横誤差が残っている。
-- かつ `side_by_side` ではない。
-
-これにより、停止中でも `ABORT_RECOVERY` の参照が境界付近に残り続けるのを避けます。
+通常の横補間は、制動モデルを含む物理前進距離 `ds` に依存します。
+停止近傍では横目標を無理に進めず、現在位置付近を低速で保持します。前進距離が得られた周期から、評価済みの空間profileに沿って中央寄せを進めます。`outside_corridor_recovery_centering_time_sec` は設定互換用です。
 
 ### `SIDE_BY_SIDE_KEEP`
 
@@ -172,18 +165,29 @@ d = start_d + (target_d - start_d) * ratio
 
 `predicted_speed_mps` と `s(t)` は同じ保守的な遅れ・制動モデルです。対して `v_ref[0]` は下流MPC/PPが毎周期すぐ読む速度capなので、予測上の遅れを入れず即時に目標を要求します。これにより減速要求を毎周期リセットせず、安全評価だけは保守的に保ちます。
 
+PASSとラッチ済み攻めFOLLOWでは、固定時間horizonの空間長がPure Pursuitの実行条件より短い場合があります。その時は次の最大値を必要arcとして、同じ `LongitudinalProfile::distanceAt(t)` が届く時刻まで `evaluation_dt_sec` を広げます。
+
+- `0.5 m` の固定下限
+- `ego.v * 0.75 sec`
+- `lateral_override_lookahead_gain * max(ego.v, speed_cap) + lateral_override_lookahead_min_distance_m`
+- `0.25 sec`以上の応答遅れ後、`1.0 m/s^2`以下で`0.2 m/s`まで落とす制動距離
+
+時刻軸を広げた後も点数は固定し、相手予測と同じ各時刻でSafetyEvaluatorへ渡します。PASSとPASS側を保持する攻めFOLLOWでは、`lateral_override_execution_speed_reserve_sec` 中の最大残留加速分をtarget capにかかわらず初期速度へ加え、停止可能距離だけでなく `s(t)` と予測速度にも反映します。全観測相手が静止閾値以下の時だけ`lateral_override_max_evaluation_horizon_sec`を使い、moving/欠損相手を含む時は`moving_lateral_override_max_evaluation_horizon_sec`へ閉じます。各上限でも必要arcへ届かない場合は `controller_tracking_profile_valid=false` とし、横profileを認可しません。RECOVERY・YIELD・SAFE_STOPは停止可能距離と応答遅れの既存契約が異なるため、同じ変更を未検証で広げません。
+
+`localized_latched` の固定targetをrear-clearanceまで抜き切っていない間は、延長したhorizonの末尾にも中心方向のmerge点を生成しません。対象IDとPASS側を維持し、同側保持またはslow chainに必要な外向き遷移だけをSafetyEvaluatorへ渡します。抜き切り確認後の中心復帰は、過去のmarkerを流用せず、Coreが現在のego状態からRECOVERYを再生成して同周期に再評価します。
+
 `max_brake_decel_mps2` はplannerの保守上限 `1.5 m/s^2` 以下だけを許可します。active launchで使う実制御器がこの想定減速を出せることは、別途ログと設定で確認します。設定が不正なら候補を安全扱いにせず、node起動時にoverride自体を無効化します。
 
 `RECOVERY`, `YIELD_BEHIND`, `SAFE_STOP` では `start_d` を安全コリドー内へclampします。
 MPCへ壁外d列を渡さないためです。
 
-`RECOVERY` と中心寄せが必要な `SAFE_STOP` では、必要に応じて次も使います。
+`RECOVERY` と中心寄せが必要な `SAFE_STOP` も同じ距離比率を使います。
 
 ```text
-ratio = max(ratio, smoothstep(t / outside_corridor_recovery_centering_time_sec))
+ratio = smoothstep(ds / shift_distance)
 ```
 
-つまり低速でも時間経過で中心方向へ進ませます。
+つまり、時間経過だけでは横参照を進めず、実際に評価できた前進距離の範囲で中心方向へ進ませます。
 
 ## Cartesianへの変換
 

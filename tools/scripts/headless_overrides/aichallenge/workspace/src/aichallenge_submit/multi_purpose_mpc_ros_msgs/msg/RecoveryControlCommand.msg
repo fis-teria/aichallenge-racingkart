@@ -1,0 +1,5 @@
+std_msgs/Header header
+uint32 attempt_id
+uint32 trajectory_generation
+std_msgs/Header trajectory_header
+autoware_auto_control_msgs/AckermannControlCommand command

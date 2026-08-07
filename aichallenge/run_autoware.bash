@@ -28,6 +28,24 @@ export ROS_DOMAIN_ID=$id
 if [[ -n "${CONTROL_METHOD:-}" ]]; then
     opts+=("control_method:=${CONTROL_METHOD}")
 fi
+if [[ -n "${RACE_ARM_ON_VEHICLE_STATE:-}" ]]; then
+    opts+=("race_arm_on_vehicle_state:=${RACE_ARM_ON_VEHICLE_STATE}")
+fi
+opts+=("autostart_debug_visualization:=${AUTOSTART_DEBUG_VISUALIZATION:-true}")
+opts+=(
+    "pp_core_exact_snapshot_enabled:=${PP_CORE_EXACT_SNAPSHOT_ENABLED:-false}"
+    "overtake_trajectory_backend:=${OVERTAKE_TRAJECTORY_BACKEND:-current}"
+    "state_lattice_v2_live_proposal_publish_enabled:=${STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED:-false}"
+    "state_lattice_v2_live_proposal_accept_enabled:=${STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED:-false}"
+    "state_lattice_v2_producer_instance_id:=${STATE_LATTICE_V2_PRODUCER_INSTANCE_ID:-0}"
+    "state_lattice_v4_poc_command_activation_enabled:=${STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED:-false}"
+)
+if [[ -n "${STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID:-}" ]]; then
+    opts+=("state_lattice_v2_pp_producer_instance_id:=${STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID}")
+fi
+if [[ -n "${STATE_LATTICE_V2_SESSION_ID:-}" ]]; then
+    opts+=("state_lattice_v2_session_id:=${STATE_LATTICE_V2_SESSION_ID}")
+fi
 capture="${CAPTURE:-false}"
 rosbag="${ROSBAG:-false}"
 opts+=("capture:=${capture}" "rosbag:=${rosbag}")
@@ -42,4 +60,56 @@ export ROS_HOME="${out_dir}/ros"
 export ROS_LOG_DIR="${ROS_HOME}/log"
 mkdir -p "${ROS_LOG_DIR}"
 
-ros2 launch aichallenge_system_launch aichallenge_system.launch.xml "${opts[@]}" "domain_id:=$id"
+launch_pid=""
+shutdown_requested=false
+
+forward_shutdown_to_launch() {
+    shutdown_requested=true
+    if [[ -n "${launch_pid}" ]] && kill -0 "${launch_pid}" 2>/dev/null; then
+        # ros2 launch performs the coordinated node shutdown on SIGINT.  In
+        # particular this lets autostart_orchestrator finalize rosbag metadata
+        # before the container exits.
+        echo "[run_autoware] forwarding SIGINT to ros2 launch pid=${launch_pid}"
+        kill -INT "${launch_pid}" 2>/dev/null || true
+    fi
+}
+
+trap forward_shutdown_to_launch INT TERM
+
+launch_sigterm_timeout_sec="${AUTOWARE_LAUNCH_SIGTERM_TIMEOUT_SEC:-120}"
+launch_sigkill_timeout_sec="${AUTOWARE_LAUNCH_SIGKILL_TIMEOUT_SEC:-30}"
+
+(
+    # Non-interactive bash normally starts asynchronous commands with SIGINT
+    # ignored.  Reset it in the child so the forwarded SIGINT reaches the ROS
+    # launch shutdown handler.
+    trap - INT TERM
+    exec ros2 launch --noninteractive \
+        aichallenge_system_launch \
+        aichallenge_system.launch.xml \
+        "${opts[@]}" \
+        "domain_id:=$id" \
+        "sigterm_timeout:=${launch_sigterm_timeout_sec}" \
+        "sigkill_timeout:=${launch_sigkill_timeout_sec}"
+) &
+launch_pid=$!
+
+# Preserve a shutdown request received in the narrow interval before the child
+# PID was assigned.
+if [[ "${shutdown_requested}" == true ]]; then
+    forward_shutdown_to_launch
+fi
+
+# A signal interrupts bash's wait before ros2 launch necessarily exits.  Keep
+# waiting after forwarding it so Docker's grace period applies to the actual
+# ROS shutdown instead of terminating this wrapper early.
+while true; do
+    wait "${launch_pid}"
+    launch_status=$?
+    if ! kill -0 "${launch_pid}" 2>/dev/null; then
+        break
+    fi
+done
+
+launch_pid=""
+exit "${launch_status}"

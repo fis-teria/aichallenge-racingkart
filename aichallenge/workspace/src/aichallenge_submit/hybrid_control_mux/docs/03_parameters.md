@@ -37,6 +37,8 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/co
 | `control_rate_hz` | `50.0` | mux が出力判定を行う周期 |
 | `mpc_cmd_timeout_sec` | `0.12` | MPC 指令を fresh とみなす最大時間 |
 | `pure_pursuit_cmd_timeout_sec` | `0.20` | Pure Pursuit 指令を fresh とみなす最大時間 |
+| `lateral_stop_steering_hold_timeout_sec` | `0.12` | 認可済み横軌道のplan/status到着差中に、最後の検証済み操舵を保持できる上限時間 [s] |
+| `planner_stop_release_bootstrap_max_speed_mps` | `0.20` | current-d STOPのPP処理証明を次のPASS warm-up発行へ使える最大速度上限 [m/s] |
 | `mpc_health_timeout_sec` | `0.75` | MPC health を有効とみなす最大時間 |
 | `fallback_trigger_infeasible_count` | `1` | Pure Pursuit へ切り替えるために必要な連続 infeasible 回数 |
 | `fallback_release_solved_cycles` | `3` | MPC へ復帰するために必要な連続 solved 回数 |
@@ -50,8 +52,9 @@ aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/co
 | `use_mpc_on_pure_pursuit_cmd_timeout` | `false` | `primary_source=pure_pursuit` でPP指令がtimeoutした時、MPCがhealthyなら一時的にMPC指令へ退避する |
 | `debug_publish_period_sec` | `0.25` | debug JSON を publish する周期 |
 | `enable_steering_rate_limit` | `true` | 最終出力の操舵角レート制限を有効にする |
-| `max_steering_angle_rad` | `1.708` | 最終出力の操舵角上限 [rad] |
-| `max_steering_rate_radps` | `8.0` | 最終出力の操舵角変化率上限 [rad/s] |
+| `max_steering_angle_rad` | `0.64` | `vehicle_info`と共通化した最終出力のhard操舵角上限 [rad] |
+| `tracking_usable_max_steering_angle_rad` | `0.64` | `ControllerTrackingStatus`をusableにできるraw PP操舵角上限 [rad] |
+| `max_steering_rate_radps` | `128.0` | 最終出力の有限な操舵角変化率上限 [rad/s] |
 | `max_steering_delta_per_cycle` | `0.0` | 1周期あたりの追加操舵変化量上限 [rad]。0以下なら無効 |
 | `steering_limiter_reset_dt_sec` | `0.50` | 前回出力からこの時間を超えたら操舵レート制限をリセットする |
 | `reset_steering_limiter_on_mode_change` | `false` | true なら MPC/Pure Pursuit/stop の source 切替時に操舵レート制限をリセットする |
@@ -136,19 +139,53 @@ hybrid 起動では Pure Pursuit も `/overtake/reference_override` の速度 ca
 
 ## 操舵連続性に関係するパラメータ
 
+### `planner_stop_release_bootstrap_max_speed_mps`
+
+停止中のPASS再認可は、current-dのSAFE_STOPまたは停止中ATTACK_FOLLOWを同一generationの
+Pure Pursuitが処理できたことを確認してから、新tokenのPASS軌道を停止constraint下でwarm-up
+する二段階契約です。この値を超えるSTOP constraintやPP指令、`release_authorized=true`、
+契約外reason、targetなし、世代・stamp不一致は一段目proofへ使いません。
+`maneuver_transaction_tracking_stop`をrelease gateが連続確認中の
+`release_pending_safe_cycles`へ置換した場合も、停止要求・identityが厳密一致し、constraintと
+PP指令がそれぞれこの上限以下の時だけ同じ一段目proofとして扱います。停止中のconstraint
+上限は現在速度へ連続接続するため`0.20 m/s`未満へ縮むことがありますが、PP warm-up指令まで
+その瞬間値以下である必要はありません。両者はこの専用上限で独立に拘束され、最終出力は
+STOPのまま`0 m/s`に合成されます。既定値`0.20 m/s`はOvertake Plannerの
+`safe_stop_v_mps`と一致します。このproof自体は停止を解除せず、新PASSの発行後に別途その
+PASS自身のexact tracking proofが必要です。
+
+### `lateral_stop_steering_hold_timeout_sec`
+
+認可済み横軌道の停止constraintへ切り替わる際、planとPP command/statusの配送が1周期だけ
+前後しても操舵を0へresetしないための上限時間です。保持できるのは最後に同一stamp・同一
+generationで検証済みの操舵だけです。最新typed statusがusableで、現在または直前のplan
+generationである配送差に限定します。同一generationの横STOP再送におけるplan/constraint
+peer差は、stamp差がこの時間内で、直前の現在または直前generationをexact tracking済みの
+場合だけ対象です。明示unusable、2世代以上の遅れ、外部停止、watchdog、control faultでは
+適用しません。通常`FREE_RUN`のtracking reserve微小超過時は、同一generation・race epochで
+直前に実publish済みのreserve内baseline操舵だけをこの時間内で保持できます。超過した現在値、
+PASS、ATTACK_FOLLOW、ABORT_HOLD、横overrideには使いません。保持中も縦速度は常に0です。
+
 ### `enable_steering_rate_limit`
 
 最終的に `/control/command/control_cmd` へ出す操舵角の急変を抑えます。MPC から Pure Pursuit へ切り替わる瞬間や、stop へ落ちる瞬間にも同じ limiter が効きます。
 
 ### `max_steering_angle_rad`
 
-最終出力の絶対操舵角上限です。大きくすると大舵角を許しますが、Pure Pursuit fallback 中の急旋回リスクも上がります。
+最終出力の絶対操舵角hard上限です。`vehicle_info`の
+`max_steer_angle=0.64 rad`と共通化し、最後段のclampとして残します。
+
+### `tracking_usable_max_steering_angle_rad`
+
+raw Pure Pursuit指令を`trajectory_tracking_usable=true`にできる絶対操舵角上限です。hard上限以下の有限正値でなければfail-closedにします。境界値はusableですが、次の表現可能値を含め上限を超えた選択中PP指令はtracking usableへ昇格させず、通常motion、PASS/HOLD横追従、release-readyを認可しません。通常はゼロ速度・ゼロ操舵です。exactな`FREE_RUN` baselineだけは、現在値がhard上限内で、同一generation・plan stamp・race epochの直前にreserve内の操舵を実publish済みなら、その過去値を短時間保持して縦STOPへ合成し、reasonを`baseline_tracking_reserve_longitudinal_stop`にします。超過した現在値、stale/fault、PASS/HOLDには従来どおり`steering_command_exceeds_actuator_limit`のzero-steer STOPを適用します。NaN/Infまたはhard超過は保持値も即時失効させ、新しいreserve内commandの検証・publish前には再利用しません。非選択のPP入力は別sourceを停止させません。絶対角判定とrate limitは別契約です。
 
 ### `max_steering_rate_radps`
 
 1秒あたりに許す操舵角変化量です。小さくすると切替時の急操作を抑えますが、低すぎると必要な旋回に追従できません。
 
-デフォルトは `8.0 rad/s` です。50 Hz 出力では1周期あたり約 `0.16 rad` の変化を許し、fallback 切替時の段差を抑えつつ、コーナーでの追従遅れが大きくなりすぎない値にしています。
+デフォルトは `128.0 rad/s` です。100 HzのPPでは、許容範囲の端
+`-0.64 rad`から反対端`+0.64 rad`までを1周期で許します。limiter構造は
+維持しているため、実車・路面・天候に応じて設定値を下げられます。
 
 ### `reset_steering_limiter_on_mode_change`
 

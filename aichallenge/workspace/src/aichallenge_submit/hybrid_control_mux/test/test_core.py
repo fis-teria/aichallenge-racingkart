@@ -5,14 +5,116 @@ from hybrid_control_mux.core import (
     HybridMuxConfig,
     HybridMuxCore,
     MpcHealth,
+    RaceFinishStopLatch,
     RecoveryMuxState,
     RosClockProgressWatchdog,
     SafetyConstraintAuthority,
     SafetyConstraintState,
+    StateLatticeMuxState,
     SteeringLimiter,
     SteeringLimiterConfig,
     apply_safety_constraint,
 )
+
+
+def test_finish_stop_latches_only_after_current_armed_race_sequence():
+    latch = RaceFinishStopLatch()
+
+    latch.observe_vehicle_state("Finish")
+    assert not latch.latched
+
+    latch.observe_race_armed(True)
+    latch.observe_vehicle_state("Start")
+    latch.observe_vehicle_state("Finish")
+    assert not latch.latched
+
+    latch.observe_vehicle_state("Ready")
+    latch.observe_vehicle_state("Start")
+    latch.observe_vehicle_state("Finish")
+    assert latch.latched
+    assert latch.phase == "finished"
+
+
+def test_finish_stop_accepts_ready_state_arriving_immediately_before_arm():
+    latch = RaceFinishStopLatch()
+
+    # 20260718-182746の実bag順序。Readyがrace_armed=trueより約0.45 ms先行する。
+    latch.observe_vehicle_state("Ready")
+    latch.observe_race_armed(True)
+    assert latch.ready_seen
+    assert latch.phase == "ready"
+
+    latch.observe_vehicle_state("Start")
+    latch.observe_vehicle_state("Finish")
+    assert latch.latched
+    assert latch.phase == "finished"
+
+
+def test_finish_stop_accepts_ready_and_start_arriving_before_arm():
+    latch = RaceFinishStopLatch()
+
+    # 通常レースはplannerのarmをStartまで待つ。mux側でstate callbacksが先行しても
+    # Ready->Startの公式順序を同じepochとして復元できなければならない。
+    latch.observe_vehicle_state("Ready")
+    latch.observe_vehicle_state("Start")
+    assert not latch.race_started
+
+    latch.observe_race_armed(True)
+    assert latch.ready_seen
+    assert latch.race_started
+    assert latch.phase == "racing"
+
+    latch.observe_vehicle_state("Finish")
+    assert latch.latched
+    assert latch.phase == "finished"
+
+
+def test_finish_stop_does_not_accept_start_before_arm_without_current_ready():
+    latch = RaceFinishStopLatch()
+
+    latch.observe_vehicle_state("Grounded")
+    latch.observe_vehicle_state("Start")
+    latch.observe_race_armed(True)
+
+    assert not latch.ready_seen
+    assert not latch.race_started
+    latch.observe_vehicle_state("Finish")
+    assert not latch.latched
+
+
+def test_finish_stop_accepts_finish_callback_immediately_after_terminal_disarm():
+    latch = RaceFinishStopLatch()
+    latch.observe_vehicle_state("Ready")
+    latch.observe_race_armed(True)
+    latch.observe_vehicle_state("Start")
+
+    # 20260718-183802ではbag stampがFinish先行でもcallbackはdisarmが先行した。
+    latch.observe_race_armed(False)
+    assert not latch.latched
+    latch.observe_vehicle_state("Finish")
+
+    assert latch.latched
+    assert latch.phase == "finished"
+
+
+def test_finish_stop_survives_terminal_disarm_and_resets_on_new_arm_epoch():
+    latch = RaceFinishStopLatch()
+    latch.observe_race_armed(True)
+    latch.observe_vehicle_state("Ready")
+    latch.observe_vehicle_state("Start")
+    latch.observe_vehicle_state("Finish")
+    assert latch.latched
+    first_epoch = latch.epoch
+
+    # 実bagではFinishの約1 ms後にrace_armed=falseが来る。停止を解除しない。
+    latch.observe_race_armed(False)
+    assert latch.latched
+    assert latch.epoch == first_epoch
+
+    latch.observe_race_armed(True)
+    assert not latch.latched
+    assert latch.phase == "armed"
+    assert latch.epoch == first_epoch + 1
 
 
 def safety_constraint(
@@ -286,6 +388,19 @@ def test_ros_clock_progress_watchdog_detects_stall_and_regression():
     assert not watchdog.update(101, 1.23).stalled
 
 
+def test_ros_clock_progress_watchdog_reset_requires_a_new_progress_sample():
+    watchdog = RosClockProgressWatchdog(maximum_stall_sec=0.2)
+
+    assert watchdog.update(100, 1.0).reason == "ros_clock_initial"
+    assert watchdog.update(100, 1.21).stalled
+
+    watchdog.reset()
+
+    assert watchdog.update(100, 2.0).reason == "ros_clock_initial"
+    assert watchdog.update(101, 2.01).reason == "ros_clock_progressing"
+    assert watchdog.update(101, 2.22).stalled
+
+
 def test_uses_mpc_when_healthy():
     core = HybridMuxCore(HybridMuxConfig())
     decision = core.update(
@@ -344,6 +459,148 @@ def test_pure_pursuit_primary_can_use_mpc_when_pure_pursuit_command_times_out():
     assert decision.source == "mpc"
     assert decision.fallback_active
     assert decision.reason == "pure_pursuit_cmd_timeout"
+
+
+def test_state_lattice_instant_source_is_default_off_parity():
+    core = HybridMuxCore(HybridMuxConfig(primary_source="pure_pursuit"))
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        state_lattice=StateLatticeMuxState(
+            enabled=True,
+            active=True,
+            command_fresh=True,
+            authority_valid=True,
+            command_valid=True,
+            command_forward_only=True,
+        ),
+    )
+
+    assert decision.source == "pure_pursuit"
+    assert not core.state_lattice_episode_latched
+
+
+def test_state_lattice_instant_source_latches_until_explicit_handoff():
+    core = HybridMuxCore(
+        HybridMuxConfig(
+            primary_source="pure_pursuit",
+            state_lattice_instant_control_enabled=True,
+        )
+    )
+    active = StateLatticeMuxState(
+        enabled=True,
+        active=True,
+        command_fresh=True,
+        authority_valid=True,
+        command_valid=True,
+        command_forward_only=True,
+    )
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        state_lattice=active,
+    )
+    assert decision.source == "state_lattice"
+    assert core.state_lattice_episode_latched
+
+    stale = StateLatticeMuxState(enabled=True, active=True)
+    decision = core.update(
+        1.2,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        state_lattice=stale,
+    )
+    assert decision.source == "stop"
+    assert decision.reason == "state_lattice_command_timeout"
+
+    handoff = StateLatticeMuxState(
+        enabled=True,
+        active=False,
+        command_fresh=True,
+        authority_valid=False,
+        command_valid=True,
+        command_forward_only=True,
+    )
+    decision = core.update(
+        1.21,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        state_lattice=handoff,
+    )
+    assert decision.source == "pure_pursuit"
+    assert not core.state_lattice_episode_latched
+
+
+def test_state_lattice_active_invalid_authority_stops_without_fallback():
+    core = HybridMuxCore(
+        HybridMuxConfig(state_lattice_instant_control_enabled=True)
+    )
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        state_lattice=StateLatticeMuxState(
+            enabled=True,
+            active=True,
+            command_fresh=True,
+            authority_valid=False,
+            command_valid=True,
+            command_forward_only=True,
+        ),
+    )
+    assert decision.source == "stop"
+    assert decision.reason == "state_lattice_gate_not_satisfied"
+
+
+def test_state_lattice_invalid_inactive_sample_cannot_release_episode():
+    core = HybridMuxCore(
+        HybridMuxConfig(
+            primary_source="pure_pursuit",
+            state_lattice_instant_control_enabled=True,
+        )
+    )
+    active = StateLatticeMuxState(
+        enabled=True,
+        active=True,
+        command_fresh=True,
+        authority_valid=True,
+        command_valid=True,
+        command_forward_only=True,
+    )
+    decision = core.update(
+        1.0,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        state_lattice=active,
+    )
+    assert decision.source == "state_lattice"
+
+    invalid_handoff = StateLatticeMuxState(
+        enabled=True,
+        active=False,
+        command_fresh=True,
+        authority_valid=False,
+        command_valid=False,
+        command_forward_only=False,
+    )
+    decision = core.update(
+        1.01,
+        mpc_cmd_fresh=True,
+        pure_pursuit_cmd_fresh=True,
+        mpc_health=MpcHealth(True, "solved", 0, 0.1),
+        state_lattice=invalid_handoff,
+    )
+    assert decision.source == "stop"
+    assert decision.reason == "state_lattice_invalid_handoff"
+    assert core.state_lattice_episode_latched
 
 
 def test_switches_to_pure_pursuit_after_infeasible_threshold():
@@ -554,6 +811,20 @@ def test_steering_limiter_clamps_absolute_angle():
     assert not result.rate_limited
 
 
+def test_default_steering_limiter_allows_full_range_in_one_100hz_cycle():
+    config = SteeringLimiterConfig()
+    assert config.max_steering_angle_rad == pytest.approx(0.64)
+    assert config.max_steering_rate_radps == pytest.approx(128.0)
+
+    limiter = SteeringLimiter(config)
+    limiter.update(-0.64, 1.00, "pure_pursuit")
+    result = limiter.update(0.64, 1.01, "pure_pursuit")
+
+    assert result.limited_steering_rad == pytest.approx(0.64)
+    assert not result.angle_limited
+    assert not result.rate_limited
+
+
 def test_steering_limiter_rate_limits_across_source_switch_by_default():
     limiter = SteeringLimiter(
         SteeringLimiterConfig(
@@ -619,3 +890,57 @@ def test_steering_limiter_reset_bypasses_rate_limit_for_stop():
     assert result.limited_steering_rad == pytest.approx(0.0)
     assert not result.rate_limited
     assert result.limiter_reset
+
+
+def test_state_lattice_shadow_record_cannot_change_final_mux_command():
+    """A diagnostic-only planner record is not an input to final authority."""
+
+    def run_final_command(*, shadow_record_present: bool):
+        # The boolean models the Planner debug-only record.  It is deliberately
+        # not consumed below: current/shadow Planner parity fixes the wire and
+        # SafetyConstraint inputs, so Mux must produce the same final command.
+        assert isinstance(shadow_record_present, bool)
+        mux = HybridMuxCore(HybridMuxConfig(primary_source="pure_pursuit"))
+        decision = mux.update(
+            1.0,
+            mpc_cmd_fresh=True,
+            pure_pursuit_cmd_fresh=True,
+            mpc_health=MpcHealth(
+                valid=True,
+                status="solved",
+                infeasible_count=0,
+                age_sec=0.0,
+            ),
+        )
+        authority = safety_authority()
+        constraint_decision = authority.evaluate(
+            safety_constraint(
+                19,
+                plan_generation=41,
+                release_authorized=True,
+                speed_limit_mps=6.0,
+            ),
+            received_time_sec=1.0,
+            now_sec=1.0,
+            active_plan_generation=41,
+        )
+        speed_mps, acceleration_mps2 = apply_safety_constraint(
+            5.0, 0.4, constraint_decision
+        )
+        steering = SteeringLimiter(SteeringLimiterConfig()).update(
+            0.31, 1.0, decision.source
+        )
+        return (
+            decision.source,
+            decision.fallback_active,
+            decision.reason,
+            speed_mps,
+            acceleration_mps2,
+            steering.limited_steering_rad,
+            steering.angle_limited,
+            steering.rate_limited,
+        )
+
+    assert run_final_command(shadow_record_present=False) == run_final_command(
+        shadow_record_present=True
+    )

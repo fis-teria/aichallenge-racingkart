@@ -1,14 +1,28 @@
 /**:
   ros__parameters:
     vehicle_state_topic: /awsim/state
-    start_on_vehicle_state: "Grounded,Ready,Start" # start initialization/recording when either Ready or Start is observed.
+    # sync起動はGrounded中にinitial-pose/control requestを完了するとReadyへ進む。
+    # 有界retryをStart前に済ませ、レース開始後へ初期化遅延を持ち越さない。
+    start_on_vehicle_state: "Grounded,Ready"
     stop_on_vehicle_state: "Finish"
+    # 初期化はGrounded/Ready中に完了させる。通常レースのplanner armは、Ready後に
+    # domain0が確認した公式Startを専用SetBool serviceで受けた時だけ成立させる。
+    # 車両側のカウント開始StartはReady前なのでarmしない。計測がsync Startより先に
+    # 始まるSafetyGateだけlaunch引数で"Ready,Start"を明示し、Readyでarmする。
+    race_arm_topic: /overtake/race_armed
+    initialization_ready_topic: /autostart/initialization_ready
+    official_start_service: /autostart/official_start
+    race_arm_on_vehicle_state: "Start"
+    race_arm_neutral_vehicle_states: "Ready"
+    race_disarm_on_vehicle_state: "Spawned,Grounded,Finish"
     enable_capture: false
     enable_rosbag: false
     call_initial_pose: true
     request_control_mode: true
     initial_pose_service: /set_initial_pose
+    # /set_initial_poseがGNSS待ちの場合のみ、Start前かつこの総時間内で再試行する。
     initial_pose_service_timeout_sec: 120.0
+    initial_pose_retry_interval_sec: 1.0
     control_mode_request_topic: /awsim/control_mode_request_topic
     capture_service: /debug/service/capture_screen
     capture_stop_timeout_sec: 60.0
@@ -17,12 +31,27 @@
       - /control/command/control_cmd
       - /control/command/actuation_cmd
       - /awsim/status
+      - /awsim/state
+      # AWSIMの物理接触と、plannerが実際に消費するdelay補正後自己位置を
+      # 同じbagで比較する。raw GNSS/localization/TFも残し、静的lever armと
+      # 走行中の動的な位置ずれを分離して解析できるようにする。
+      - /awsim/ground_truth/on_collision
+      # これは診断証跡専用であり、controlへ入力してはならない。
+      - /awsim/ground_truth/vehicle/pose
+      - /overtake/race_armed
+      - /autostart/initialization_ready
       - /delay_aware_mpc/debug
+      - /delay_aware_mpc/localization/kinematic_state
       - /mpc/speed_profile_debug
       - /pure_pursuit/debug
       # planner request, exact MPC horizon provenance, and mux choice are all
       # needed to prove planner/MPC trajectory agreement after a run.
       - /overtake/reference_override
+      - /overtake/safety_constraint
+      - /overtake/plan
+      - /overtake/v2/shadow/plan
+      - /overtake/v2/shadow/safety_constraint
+      - /overtake/continuation/shadow/candidate_execution_request
       - /mpc/predicted_horizon
       - /mpc/predicted_horizon_contract
       - /hybrid_control/mpc/predicted_horizon
@@ -30,18 +59,41 @@
       - /pure_pursuit_mpc_horizon/mpc/predicted_horizon
       - /pure_pursuit_mpc_horizon/mpc/predicted_horizon_contract
       - /hybrid_control_mux/debug
+      - /hybrid_control/pure_pursuit/tracking_status
+      - /hybrid_control/pure_pursuit/command_envelope
+      - /hybrid_control/pure_pursuit/execution_envelope
+      - /hybrid_control/pure_pursuit/controller_applied_envelope
+      - /hybrid_control/pure_pursuit/controller_applied_transport_status
+      - /hybrid_control/pure_pursuit/free_run_execution_ack
+      - /hybrid_control/pure_pursuit/free_run_source_key
+      - /hybrid_control/controller_tracking_status
+      - /hybrid_control/motion_authority_grant
       - /debug/overtake/mode
       - /debug/overtake/metrics
       - /v2x/vehicle_positions
       - /clock
       - /localization/acceleration
       - /localization/kinematic_state
+      - /localization/pose_with_covariance
+      - /sensing/gnss/pose
+      - /sensing/gnss/pose_with_covariance
+      - /sensing/gnss/nav_sat_fix
+      - /localization/imu_gnss_poser/pose_with_covariance
+      - /tf
+      - /tf_static
       - /planning/scenario_planning/trajectory
       - /vehicle/status/velocity_status
       - /vehicle/status/steering_status
       - /sensing/camera/image_raw
       - /sensing/camera/camera_info
       - /sensing/lidar/scan
+    # 実走後の解析契約。record対象に含まれるだけでなく、1件以上の格納を要求する。
+    rosbag_required_nonempty_topics:
+      - /hybrid_control/controller_tracking_status
+      - /hybrid_control/pure_pursuit/command_envelope
+      - /hybrid_control/pure_pursuit/execution_envelope
+      - /hybrid_control_mux/debug
+      - /debug/overtake/metrics
     rosbag_output: rosbag2_autoware
     rosbag_storage_id: mcap
     # Leave both empty to keep rosbag output as plain .mcap (no outer compression).

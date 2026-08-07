@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Test-only observer: no Mux, PP, race-arm, or AWSIM authority. -->
+<launch>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="run_id"/>
+  <arg name="topic_token"/>
+  <arg name="input_odom" default="/localization/kinematic_state"/>
+  <arg name="param_path" default="$(find-pkg-share state_lattice_overtake_planner)/config/state_lattice_overtake_planner.param.yaml"/>
+  <arg name="horizon_points" default="20"/>
+  <arg name="mpc_health_solve_time_warn_ms" default="80.0"/>
+  <arg name="mpc_health_speed_guard_enabled" default="true"/>
+
+  <node pkg="state_lattice_overtake_planner"
+        exec="state_lattice_overtake_planner_node"
+        name="test_only_state_lattice_observer"
+        output="screen">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param from="$(var param_path)"/>
+    <param name="horizon_points" value="$(var horizon_points)"/>
+    <param name="mpc_health_solve_time_warn_ms" value="$(var mpc_health_solve_time_warn_ms)"/>
+    <param name="mpc_health_speed_guard_enabled" value="$(var mpc_health_speed_guard_enabled)"/>
+
+    <!-- No launch argument may override this no-authority contract. -->
+    <param name="live_control_output_enabled" value="false"/>
+    <param name="instant_control_enabled" value="false"/>
+    <param name="safety_evaluation_enabled" value="true"/>
+    <param name="c002ay0_state_lattice_shadow_enabled" value="false"/>
+    <param name="instant_control_topic" value="/test_only/$(var topic_token)/state_lattice/instant_control_cmd"/>
+    <param name="reference_override_topic" value="/test_only/$(var topic_token)/state_lattice/reference_override"/>
+
+    <remap from="/localization/kinematic_state" to="$(var input_odom)"/>
+    <remap from="/debug/overtake/mode" to="/test_only/$(var topic_token)/debug/overtake/mode"/>
+    <remap from="/debug/overtake/metrics" to="/test_only/$(var topic_token)/debug/overtake/metrics"/>
+    <remap from="/debug/overtake/wall_map" to="/test_only/$(var topic_token)/debug/overtake/wall_map"/>
+    <remap from="/debug/overtake/wall_costmap" to="/test_only/$(var topic_token)/debug/overtake/wall_costmap"/>
+    <remap from="/debug/overtake/opponent_costmap" to="/test_only/$(var topic_token)/debug/overtake/opponent_costmap"/>
+    <remap from="/debug/overtake/costmap" to="/test_only/$(var topic_token)/debug/overtake/costmap"/>
+    <remap from="/debug/overtake/trajectory_candidates" to="/test_only/$(var topic_token)/debug/overtake/trajectory_candidates"/>
+    <remap from="/debug/overtake/selected_trajectory" to="/test_only/$(var topic_token)/debug/overtake/selected_trajectory"/>
+    <remap from="/debug/overtake/target_states" to="/test_only/$(var topic_token)/debug/overtake/target_states"/>
+    <remap from="/debug/overtake/rear_safety_paths" to="/test_only/$(var topic_token)/debug/overtake/rear_safety_paths"/>
+    <remap from="/debug/overtake/planning_geometry" to="/test_only/$(var topic_token)/debug/overtake/planning_geometry"/>
+  </node>
+</launch>

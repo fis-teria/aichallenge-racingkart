@@ -16,8 +16,8 @@ Autostart Orchestrator (aichallenge_system)
 ## 責務分離ルール（重要）
 
 - `autostart_orchestrator_node.py` は `/admin/awsim/start` の送受信を行いません。
-- `/admin/awsim/start` の publish/subscribe は `awsim_state_manager_node.py` の責務です。
-- `autostart_orchestrator_node.py` は `vehicle_state_topic`（default: `/awsim/state`）と記録/初期化フローに集中します。
+- `/admin/awsim/start` のpublish/subscribeはdomain0の`awsim_state_manager_node.py`と`request_awsim_start.bash`が担当します。
+- `autostart_orchestrator_node.py` は車両domain側で`vehicle_state_topic`、記録/初期化、`/autostart/official_start` serviceによるarmに集中します。
 
 ## 起動先（launch）
 

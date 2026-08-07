@@ -9,6 +9,24 @@
     <arg name="rosbag" default="false"/>
     <arg name="domain_id" default="0"/>
     <arg name="control_method" default="pure_pursuit_mpc_horizon"/>
+    <arg name="race_arm_on_vehicle_state" default="Start"/>
+    <arg name="autostart_debug_visualization" default="true"/>
+    <arg name="pp_core_exact_snapshot_enabled" default="false"/>
+    <arg name="overtake_trajectory_backend" default="current"/>
+    <arg name="state_lattice_v2_live_proposal_publish_enabled" default="false"/>
+    <arg name="state_lattice_v2_live_proposal_accept_enabled" default="false"/>
+    <arg name="state_lattice_v2_producer_instance_id" default="0"/>
+    <arg name="state_lattice_v2_pp_producer_instance_id" default=""/>
+    <arg name="state_lattice_v2_session_id" default=""/>
+    <arg name="state_lattice_v4_poc_command_activation_enabled" default="false"/>
+    <arg name="c002ay1_prod_measure_enabled" default="false"/>
+    <arg name="c002ay1_prod_measure_socket_path" default=""/>
+    <arg name="c002ay1_prod_measure_run_id" default=""/>
+    <arg name="c002ay1_prod_measure_planner_nonce" default="0"/>
+    <arg name="c002ay1_prod_measure_planner_instance_id" default="0"/>
+    <arg name="c002ay1_prod_measure_pp_nonce" default="0"/>
+    <arg name="c002ay1_prod_measure_pp_instance_id" default="0"/>
+    <arg name="c002ay1_prod_measure_selected_stream" default="legacy"/>
 
     <let name="domain_id" value="$(var domain_id)"/>
     <let name="rviz_config" value="$(find-pkg-share aichallenge_system_launch)/config/autoware_vehicle.rviz"/>
@@ -25,6 +43,7 @@
     <log message=" - rosbag: $(var rosbag)"/>
     <log message=" - domain_id: $(var domain_id)"/>
     <log message=" - control_method: $(var control_method)"/>
+    <log message=" - race_arm_on_vehicle_state: $(var race_arm_on_vehicle_state)"/>
 
     <!-- Main module of AI challenge 2025. -->
     <include file="$(find-pkg-share aichallenge_submit_launch)/launch/aichallenge_submit.launch.xml" >
@@ -33,6 +52,22 @@
         <arg name="sensor_model" value="$(var sensor_model)"/>
         <arg name="launch_vehicle_interface" value="$(var launch_vehicle_interface)"/>
         <arg name="control_method" value="$(var control_method)"/>
+        <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
+        <arg name="overtake_trajectory_backend" value="$(var overtake_trajectory_backend)"/>
+        <arg name="state_lattice_v2_live_proposal_publish_enabled" value="$(var state_lattice_v2_live_proposal_publish_enabled)"/>
+        <arg name="state_lattice_v2_live_proposal_accept_enabled" value="$(var state_lattice_v2_live_proposal_accept_enabled)"/>
+        <arg name="state_lattice_v2_producer_instance_id" value="$(var state_lattice_v2_producer_instance_id)"/>
+        <arg name="state_lattice_v2_pp_producer_instance_id" value="$(var state_lattice_v2_pp_producer_instance_id)"/>
+        <arg name="state_lattice_v2_session_id" value="$(var state_lattice_v2_session_id)"/>
+        <arg name="state_lattice_v4_poc_command_activation_enabled" value="$(var state_lattice_v4_poc_command_activation_enabled)"/>
+        <arg name="c002ay1_prod_measure_enabled" value="$(var c002ay1_prod_measure_enabled)"/>
+        <arg name="c002ay1_prod_measure_socket_path" value="$(var c002ay1_prod_measure_socket_path)"/>
+        <arg name="c002ay1_prod_measure_run_id" value="$(var c002ay1_prod_measure_run_id)"/>
+        <arg name="c002ay1_prod_measure_planner_nonce" value="$(var c002ay1_prod_measure_planner_nonce)"/>
+        <arg name="c002ay1_prod_measure_planner_instance_id" value="$(var c002ay1_prod_measure_planner_instance_id)"/>
+        <arg name="c002ay1_prod_measure_pp_nonce" value="$(var c002ay1_prod_measure_pp_nonce)"/>
+        <arg name="c002ay1_prod_measure_pp_instance_id" value="$(var c002ay1_prod_measure_pp_instance_id)"/>
+        <arg name="c002ay1_prod_measure_selected_stream" value="$(var c002ay1_prod_measure_selected_stream)"/>
     </include>
 
     <!-- Visualization. -->
@@ -51,6 +86,8 @@
         <include file="$(find-pkg-share aichallenge_system_launch)/launch/mode/awsim.launch.xml">
             <arg name="capture" value="$(var capture)"/>
             <arg name="rosbag" value="$(var rosbag)"/>
+            <arg name="race_arm_on_vehicle_state" value="$(var race_arm_on_vehicle_state)"/>
+            <arg name="autostart_debug_visualization" value="$(var autostart_debug_visualization)"/>
         </include>
     </group>
 

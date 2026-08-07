@@ -65,8 +65,13 @@ void ActuationCmdConverter::on_actuation_cmd(const ActuationCommandStamped::Cons
 
   const double velocity = std::abs(velocity_report_->longitudinal_velocity);
   const double acceleration = get_acceleration(*msg, velocity);
-  // Add steer_cmd to history. Limit -35 deg to 35 deg
-  steer_cmd_history_.emplace_back(msg->header.stamp, std::clamp(msg->actuation.steer_cmd, -0.61, 0.61));
+  // Add steer_cmd to history. Match the vehicle_info tire-angle hard limit.
+  constexpr double kMaxSteeringTireAngleRad = 0.64;
+  steer_cmd_history_.emplace_back(
+    msg->header.stamp,
+    std::clamp(
+      msg->actuation.steer_cmd, -kMaxSteeringTireAngleRad,
+      kMaxSteeringTireAngleRad));
 
 
   // Publish ControlCommand

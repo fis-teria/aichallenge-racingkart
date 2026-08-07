@@ -1,0 +1,6 @@
+# AW2 shadow-only immutable controller sample identity.
+multi_purpose_mpc_ros_msgs/PlanSampleKey plan_sample_key
+uint8 controller_role
+uint64 controller_instance_id
+uint64 controller_sequence
+builtin_interfaces/Time controller_command_stamp

@@ -17,7 +17,9 @@
 #include <autoware_sensing_msgs/msg/gnss_ins_orientation_stamped.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -35,9 +37,17 @@ GNSSPoser::GNSSPoser(const rclcpp::NodeOptions & node_options)
   use_gnss_ins_orientation_(declare_parameter("use_gnss_ins_orientation", true)),
   plane_zone_(declare_parameter<int>("plane_zone", 9)),
   gnss_change_threshold_(declare_parameter<double>("gnss_change_threshold")),
+  unknown_position_covariance_m2_(
+    declare_parameter<double>("unknown_position_covariance_m2", 10.0)),
   msg_gnss_ins_orientation_stamped_(
     std::make_shared<autoware_sensing_msgs::msg::GnssInsOrientationStamped>())
 {
+  if (
+    !std::isfinite(unknown_position_covariance_m2_) ||
+    unknown_position_covariance_m2_ <= 0.0) {
+    throw std::invalid_argument(
+            "unknown_position_covariance_m2 must be finite and greater than zero");
+  }
   int coordinate_system =
     declare_parameter("coordinate_system", static_cast<int>(CoordinateSystem::MGRS));
   coordinate_system_ = static_cast<CoordinateSystem>(coordinate_system);
@@ -141,8 +151,18 @@ void GNSSPoser::callbackNavSatFix(
 
   // get TF from base_link to gnss_antenna
   auto tf_gnss_antenna2base_link_msg_ptr = std::make_shared<geometry_msgs::msg::TransformStamped>();
-  getStaticTransform(
-    gnss_frame_, base_frame_, tf_gnss_antenna2base_link_msg_ptr, nav_sat_fix_msg_ptr->header.stamp);
+  if (!getStaticTransform(
+      gnss_frame_, base_frame_, tf_gnss_antenna2base_link_msg_ptr,
+      nav_sat_fix_msg_ptr->header.stamp)) {
+    // 静的lever arm取得失敗をidentity変換としてpublishすると、base_linkが
+    // GNSSアンテナ位置へ約0.26 m飛ぶ。正しいTFが届くまで当該sampleだけを
+    // fail-closedで破棄し、誤った初期poseをlocalizationへ混ぜない。
+    RCLCPP_ERROR_STREAM_THROTTLE(
+      this->get_logger(), *this->get_clock(), std::chrono::milliseconds(1000).count(),
+      "Skipping GNSS pose because static TF " << gnss_frame_ << " -> " << base_frame_
+                                               << " is unavailable");
+    return;
+  }
   tf2::Transform tf_gnss_antenna2base_link{};
   tf2::fromMsg(tf_gnss_antenna2base_link_msg_ptr->transform, tf_gnss_antenna2base_link);
 
@@ -162,12 +182,11 @@ void GNSSPoser::callbackNavSatFix(
   geometry_msgs::msg::PoseWithCovarianceStamped gnss_base_pose_cov_msg;
   gnss_base_pose_cov_msg.header = gnss_base_pose_msg.header;
   gnss_base_pose_cov_msg.pose.pose = gnss_base_pose_msg.pose;
-  gnss_base_pose_cov_msg.pose.covariance[7 * 0] =
-    canGetCovariance(*nav_sat_fix_msg_ptr) ? nav_sat_fix_msg_ptr->position_covariance[0] : 10.0;
-  gnss_base_pose_cov_msg.pose.covariance[7 * 1] =
-    canGetCovariance(*nav_sat_fix_msg_ptr) ? nav_sat_fix_msg_ptr->position_covariance[4] : 10.0;
-  gnss_base_pose_cov_msg.pose.covariance[7 * 2] =
-    canGetCovariance(*nav_sat_fix_msg_ptr) ? nav_sat_fix_msg_ptr->position_covariance[8] : 10.0;
+  const auto position_covariance =
+    resolvePositionCovariance(*nav_sat_fix_msg_ptr, unknown_position_covariance_m2_);
+  gnss_base_pose_cov_msg.pose.covariance[7 * 0] = position_covariance[0];
+  gnss_base_pose_cov_msg.pose.covariance[7 * 1] = position_covariance[1];
+  gnss_base_pose_cov_msg.pose.covariance[7 * 2] = position_covariance[2];
 
   if (use_gnss_ins_orientation_) {
     gnss_base_pose_cov_msg.pose.covariance[7 * 3] =
@@ -357,8 +376,7 @@ bool GNSSPoser::getStaticTransform(
 
   try {
     *transform_stamped_ptr = tf2_buffer_.lookupTransform(
-      target_frame, source_frame,
-      tf2::TimePoint(std::chrono::seconds(stamp.sec) + std::chrono::nanoseconds(stamp.nanosec)));
+      target_frame, source_frame, tf2::TimePointZero);
   } catch (tf2::TransformException & ex) {
     RCLCPP_WARN_STREAM_THROTTLE(
       this->get_logger(), *this->get_clock(), std::chrono::milliseconds(1000).count(), ex.what());

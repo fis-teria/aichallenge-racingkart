@@ -173,6 +173,46 @@ inline double smoothLookaheadDistance(double desired_distance_m,
   return alpha * desired_distance_m + (1.0 - alpha) * previous_distance_m;
 }
 
+inline std::size_t selectForwardTrajectoryIndex(
+    const autoware_auto_planning_msgs::msg::Trajectory &trajectory,
+    std::size_t nearest_index, double min_forward_arc_m) {
+  if (trajectory.points.empty()) {
+    return 0;
+  }
+
+  const std::size_t clamped_index =
+      std::min(nearest_index, trajectory.points.size() - 1);
+  if (clamped_index + 1 >= trajectory.points.size()) {
+    return clamped_index;
+  }
+
+  const double min_arc =
+      std::isfinite(min_forward_arc_m) ? std::max(0.0, min_forward_arc_m) : 0.0;
+  double accumulated_arc_m = 0.0;
+  for (std::size_t i = clamped_index + 1; i < trajectory.points.size(); ++i) {
+    accumulated_arc_m +=
+        distance2d(trajectory.points[i - 1], trajectory.points[i]);
+    if (accumulated_arc_m >= min_arc) {
+      return i;
+    }
+  }
+  return trajectory.points.size() - 1;
+}
+
+inline std::size_t selectMpcHorizonVelocityCapIndex(
+    const autoware_auto_planning_msgs::msg::Trajectory &trajectory,
+    std::size_t nearest_index, double min_forward_arc_m,
+    bool skip_zero_index_anchor) {
+  if (trajectory.points.empty()) {
+    return 0;
+  }
+  if (skip_zero_index_anchor && nearest_index == 0) {
+    return selectForwardTrajectoryIndex(trajectory, nearest_index,
+                                        min_forward_arc_m);
+  }
+  return std::min(nearest_index, trajectory.points.size() - 1);
+}
+
 inline double estimateTrajectoryCurvature(
     const autoware_auto_planning_msgs::msg::Trajectory &trajectory,
     std::size_t start_index, double window_distance_m,
