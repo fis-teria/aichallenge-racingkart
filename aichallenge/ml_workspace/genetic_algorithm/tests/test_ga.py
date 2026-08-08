@@ -34,6 +34,8 @@ from ga_pure_pursuit.progress_dashboard import (
 )
 from ga_pure_pursuit.config import validate_config
 from ga_pure_pursuit.surrogate import KnnSurrogate, select_candidates
+from ga_pure_pursuit.cmaes import BlockCmaEs, decode_genome, encode_genome, phase_gene_names
+from ga_pure_pursuit.constrained_objective import evaluate_constrained, timer_is_valid
 from ga_pure_pursuit.storage import Storage
 from ga_pure_pursuit.phase2 import (
     EmitterBandit, KnnFeasibilityModel, MapElitesArchive, Observation,
@@ -646,6 +648,99 @@ def test_seed_is_injected_and_missing_new_genes_use_baseline():
     )
     assert population[0] == {"old": 5.0, "new": 0.25}
     assert population[1] == {"old": 7.0, "new": 0.25}
+
+
+def test_cmaes_gene_blocks_and_normalized_round_trip():
+    bounds = {
+        "lookahead_gain": Bounds(0.0, 2.0),
+        "dual_preview_blend": Bounds(0.0, 1.0),
+        "path_offset_00": Bounds(-2.0, 2.0),
+        "path_offset_01": Bounds(-2.0, 2.0),
+    }
+    genome = {
+        "lookahead_gain": 1.0,
+        "dual_preview_blend": 0.25,
+        "path_offset_00": -1.0,
+        "path_offset_01": 1.0,
+    }
+    assert phase_gene_names("controller", bounds) == (
+        "lookahead_gain", "dual_preview_blend"
+    )
+    assert phase_gene_names("path", bounds) == (
+        "path_offset_00", "path_offset_01"
+    )
+    names = phase_gene_names("joint", bounds)
+    decoded = decode_genome(encode_genome(genome, names, bounds), names, genome, bounds)
+    assert decoded == genome
+
+
+def test_block_cmaes_checkpoint_round_trip_and_phase_transition():
+    bounds = {
+        "lookahead_gain": Bounds(0.0, 2.0),
+        "path_offset_00": Bounds(-1.0, 1.0),
+    }
+    center = {"lookahead_gain": 1.0, "path_offset_00": 0.0}
+    settings = {
+        "population_size": 4,
+        "controller_sigma": 0.04,
+        "path_sigma": 0.03,
+        "joint_sigma": 0.015,
+        "phase_stagnation_generations": 1,
+        "joint_max_generations": 1,
+    }
+    optimizer = BlockCmaEs(bounds, center, settings, seed=7)
+    population = optimizer.ask()
+    assert population[0] == center
+    assert all(item["path_offset_00"] == 0.0 for item in population)
+    assert not optimizer.tell(population, [1.0] * len(population))
+    population = optimizer.ask()
+    assert optimizer.tell(population, [1.0] * len(population))
+    optimizer.transition()
+    assert optimizer.phase == "path"
+    restored = BlockCmaEs.restore(bounds, settings, optimizer.checkpoint())
+    assert restored.phase == "path"
+    assert len(restored.ask()) == 4
+
+
+def test_constrained_objective_prefers_valid_robust_flying_lap():
+    settings = {
+        "required_complete_repeat_ratio": 1.0,
+        "maximum_collision_count": 0,
+        "maximum_wall_count": 0,
+        "lateral_error_p95_limit_m": 1.35,
+        "lateral_error_max_limit_m": 2.0,
+    }
+    episodes = [
+        {"completed": True, "invalid": False, "flying_lap_time_seconds": lap,
+         "section_splits": [{"section": 1, "lap_time_seconds": 5.0}],
+         "collision_count": 0, "wall_count": 0,
+         "lateral_error_p95_m": 1.0, "lateral_error_max_m": 1.8,
+         "diagnostic_trace": []}
+        for lap in (43.0, 43.5, 44.0)
+    ]
+    result = evaluate_constrained(episodes, settings)
+    assert result.feasible
+    assert abs(result.robust_lap - 43.7) < 1.0e-9
+    assert abs(result.objective_value - 43.7) < 1.0e-9
+
+
+def test_constrained_objective_ranks_shortcut_as_infeasible():
+    settings = {
+        "lateral_error_p95_limit_m": 1.35,
+        "lateral_error_max_limit_m": 2.0,
+    }
+    episode = {
+        "completed": True, "invalid": False, "flying_lap_time_seconds": 41.62,
+        "section_splits": [{"section": 1, "lap_time_seconds": 5.0}],
+        "collision_count": 0, "wall_count": 0,
+        "lateral_error_p95_m": 2.66, "lateral_error_max_m": 2.81,
+        "diagnostic_trace": [],
+    }
+    assert timer_is_valid(episode)
+    result = evaluate_constrained([episode], settings)
+    assert not result.feasible
+    assert set(result.failure_reasons) == {"lateral_p95", "lateral_max"}
+    assert result.objective_value > 1_000_000.0
 
 
 def test_path_genes_are_split_and_generate_closed_offset_path(tmp_path):

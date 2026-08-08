@@ -27,6 +27,19 @@ CREATE TABLE IF NOT EXISTS episodes (
   FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
 );
 CREATE INDEX IF NOT EXISTS candidates_fitness ON candidates(fitness);
+CREATE TABLE IF NOT EXISTS candidate_metadata (
+  candidate_id TEXT PRIMARY KEY,
+  optimizer_type TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  feasible INTEGER,
+  violation REAL,
+  robust_lap REAL,
+  objective_value REAL,
+  details_json TEXT NOT NULL,
+  FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+);
+CREATE INDEX IF NOT EXISTS candidate_metadata_objective
+  ON candidate_metadata(objective_value);
 """
 
 
@@ -68,6 +81,17 @@ class Storage:
             ).fetchone()
         return None if row is None else float(row[0])
 
+    def get_objective(self, parameter_hash: str) -> float | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT m.objective_value FROM candidate_metadata m "
+                "JOIN candidates c ON c.candidate_id=m.candidate_id "
+                "WHERE c.parameter_hash=? AND c.status='complete' "
+                "AND m.objective_value IS NOT NULL ORDER BY m.objective_value LIMIT 1",
+                (parameter_hash,),
+            ).fetchone()
+        return None if row is None else float(row[0])
+
     def begin_candidate(
         self, candidate_id: str, generation: int, genome: dict[str, float], parameter_hash: str
     ) -> None:
@@ -103,6 +127,17 @@ class Storage:
             )
         self._write_transaction(write)
 
+    def save_candidate_metadata(self, candidate_id: str, optimizer_type: str,
+                                phase: str, result: dict[str, Any]) -> None:
+        def write() -> None:
+            self.connection.execute(
+                "INSERT OR REPLACE INTO candidate_metadata VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (candidate_id, optimizer_type, phase, int(bool(result["feasible"])),
+                 float(result["violation"]), result.get("robust_lap"),
+                 float(result["objective_value"]), json.dumps(result, sort_keys=True)),
+            )
+        self._write_transaction(write)
+
     def best(self, limit: int = 1) -> list[dict[str, Any]]:
         with self._lock:
             rows = self.connection.execute(
@@ -120,6 +155,25 @@ class Storage:
             }
             for row in rows
         ]
+
+    def best_objective(self, limit: int = 1) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT c.candidate_id, c.generation, c.genome_json, c.parameter_hash, "
+                "c.fitness, m.phase, m.details_json FROM candidates c "
+                "JOIN candidate_metadata m ON m.candidate_id=c.candidate_id "
+                "WHERE c.status='complete' AND m.objective_value IS NOT NULL "
+                "ORDER BY m.objective_value, c.candidate_id LIMIT ?", (limit,)
+            ).fetchall()
+        result = []
+        for row in rows:
+            objective = json.loads(row[6])
+            result.append({
+                "candidate_id": row[0], "generation": row[1],
+                "parameters": json.loads(row[2]), "parameter_hash": row[3],
+                "fitness": row[4], "phase": row[5], **objective,
+            })
+        return result
 
     def generation_best_fitness(self) -> list[tuple[int, float]]:
         with self._lock:

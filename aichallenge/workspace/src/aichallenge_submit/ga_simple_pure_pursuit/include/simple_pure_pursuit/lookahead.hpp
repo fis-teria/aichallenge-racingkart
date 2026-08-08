@@ -10,6 +10,69 @@
 
 namespace simple_pure_pursuit {
 
+struct InterpolatedTrajectoryPoint {
+  autoware_auto_planning_msgs::msg::TrajectoryPoint point{};
+  std::size_t lower_index{0};
+  std::size_t upper_index{0};
+  bool endpoint_fallback{false};
+};
+
+// Returns a Cartesian target at a requested forward arc length. Trajectory
+// samples in the GA path are roughly 3 m apart, so this avoids a waypoint jump.
+// Only position is interpolated because Pure Pursuit consumes a point target.
+inline InterpolatedTrajectoryPoint interpolateForwardTrajectoryPoint(
+    const autoware_auto_planning_msgs::msg::Trajectory &trajectory,
+    std::size_t start_index, double forward_arc_m) {
+  InterpolatedTrajectoryPoint result;
+  if (trajectory.points.empty()) {
+    result.endpoint_fallback = true;
+    return result;
+  }
+
+  const std::size_t first = std::min(start_index, trajectory.points.size() - 1);
+  result.point = trajectory.points[first];
+  result.lower_index = first;
+  result.upper_index = first;
+  const double requested_arc_m =
+      std::isfinite(forward_arc_m) ? std::max(0.0, forward_arc_m) : 0.0;
+  if (requested_arc_m <= 1.0e-9) {
+    return result;
+  }
+
+  double accumulated_arc_m = 0.0;
+  for (std::size_t index = first + 1; index < trajectory.points.size(); ++index) {
+    const auto &lower = trajectory.points[index - 1];
+    const auto &upper = trajectory.points[index];
+    const double segment_m = std::hypot(
+        upper.pose.position.x - lower.pose.position.x,
+        upper.pose.position.y - lower.pose.position.y);
+    if (!std::isfinite(segment_m) || segment_m <= 1.0e-9) {
+      continue;
+    }
+    if (accumulated_arc_m + segment_m >= requested_arc_m) {
+      const double ratio = std::clamp(
+          (requested_arc_m - accumulated_arc_m) / segment_m, 0.0, 1.0);
+      result.point = lower;
+      result.point.pose.position.x =
+          lower.pose.position.x + ratio * (upper.pose.position.x - lower.pose.position.x);
+      result.point.pose.position.y =
+          lower.pose.position.y + ratio * (upper.pose.position.y - lower.pose.position.y);
+      result.point.pose.position.z =
+          lower.pose.position.z + ratio * (upper.pose.position.z - lower.pose.position.z);
+      result.lower_index = index - 1;
+      result.upper_index = index;
+      return result;
+    }
+    accumulated_arc_m += segment_m;
+  }
+
+  result.point = trajectory.points.back();
+  result.lower_index = trajectory.points.size() - 1;
+  result.upper_index = result.lower_index;
+  result.endpoint_fallback = true;
+  return result;
+}
+
 struct BoundedSteeringCommand {
   bool valid{false};
   double requested_angle_rad{0.0};

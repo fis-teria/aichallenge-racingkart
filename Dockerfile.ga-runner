@@ -1,0 +1,5 @@
+FROM aichallenge-2025-dev
+
+# GA-only dependency. Keeping this as a thin overlay avoids rebuilding the
+# large Autoware/AWSIM development image when the optimizer changes.
+RUN python3 -m pip install --no-cache-dir "cma>=4.0"

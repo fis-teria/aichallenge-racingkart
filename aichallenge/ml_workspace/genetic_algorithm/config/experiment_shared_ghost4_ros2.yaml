@@ -16,14 +16,42 @@
     "immigrant_sigma_fraction": 0.08,
     "alternating_block_generations": 5,
     "repeats": 1,
-    "fast_candidate_lap_time_threshold_sec": 56.5,
+    "fast_candidate_lap_time_threshold_sec": 44.5,
     "fast_candidate_repeats": 3,
     "checkpoint_every": 1,
     "parallel_workers": 4,
     "initial_seed_files": [
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260804T175800Z_g0103-i0017.json",
+      "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260802T221610Z_constrained_best_g0107-i0007.json",
       "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260802T101104Z_refinement/fitness_best_g0016-i0016.json",
       "/aichallenge/ml_workspace/genetic_algorithm/seeds/run_20260802T101104Z_refinement/lap_best_g0022-i0028.json"
     ]
+  },
+  "optimizer": {
+    "type": "block_cmaes",
+    "population_size": 32,
+    "phase_stagnation_generations": 6,
+    "minimum_improvement_seconds": 0.01,
+    "controller_sigma": 0.04,
+    "path_sigma": 0.03,
+    "joint_sigma": 0.015,
+    "joint_max_generations": 5
+  },
+  "constrained_objective": {
+    "required_complete_repeat_ratio": 1.0,
+    "maximum_collision_count": 0,
+    "maximum_wall_count": 0,
+    "lateral_error_p95_limit_m": 1.35,
+    "lateral_error_max_limit_m": 2.0,
+    "infeasible_objective_base": 1000000.0,
+    "violation_weights": {
+      "unfinished": 1000.0,
+      "invalid_timer": 1000.0,
+      "collision": 100.0,
+      "wall": 100.0,
+      "lateral_p95": 10.0,
+      "lateral_max": 10.0
+    }
   },
   "evaluator": {
     "mode": "shared_awsim_batch",
@@ -41,6 +69,7 @@
     },
     "fixed_controller_parameters": {
       "actual_lookahead_distance_blend": 0.0,
+      "continuous_preview_interpolation_enabled": true,
       "corner_speed_retention": 1.0,
       "longitudinal_acceleration_limit": 0.8,
       "external_target_vel": 9.722222222222

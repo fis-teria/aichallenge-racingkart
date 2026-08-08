@@ -1,5 +1,8 @@
 #include "simple_pure_pursuit/simple_pure_pursuit.hpp"
 
+#include "simple_pure_pursuit/delay_compensation.hpp"
+#include "simple_pure_pursuit/lookahead.hpp"
+
 #include <motion_utils/motion_utils.hpp>
 #include <tier4_autoware_utils/tier4_autoware_utils.hpp>
 #include <tf2/utils.h>
@@ -88,6 +91,48 @@ SimplePurePursuit::SimplePurePursuit()
     declare_parameter<double>("longitudinal_acceleration_limit", 1.0);
   tuning_.external_target_vel =
     declare_parameter<double>("external_target_vel", 9.722222222222);
+  tuning_.continuous_preview_interpolation_enabled =
+    declare_parameter<bool>("continuous_preview_interpolation_enabled", false);
+  tuning_.delay_compensation_enabled =
+    declare_parameter<bool>("delay_compensation_enabled", false);
+  tuning_.pp_control_delay_sec =
+    declare_parameter<double>("pp_control_delay_sec", 0.2);
+  tuning_.pp_prediction_dt_sec =
+    declare_parameter<double>("pp_prediction_dt_sec", 0.02);
+  tuning_.steering_time_constant_sec =
+    declare_parameter<double>("steering_time_constant_sec", 0.30);
+  tuning_.steering_status_timeout_sec =
+    declare_parameter<double>("steering_status_timeout_sec", 0.20);
+  tuning_.min_velocity_for_delay_compensation_mps =
+    declare_parameter<double>("min_velocity_for_delay_compensation_mps", 0.20);
+  tuning_.curvature_feedforward_enabled =
+    declare_parameter<bool>("curvature_feedforward_enabled", false);
+  tuning_.curvature_feedforward_gain =
+    declare_parameter<double>("curvature_feedforward_gain", 0.20);
+  tuning_.exit_unwind_enabled =
+    declare_parameter<bool>("exit_unwind_enabled", false);
+  tuning_.exit_unwind_far_preview_boost =
+    declare_parameter<double>("exit_unwind_far_preview_boost", 0.20);
+  tuning_.exit_unwind_curvature_drop_threshold =
+    declare_parameter<double>("exit_unwind_curvature_drop_threshold", 0.02);
+  tuning_.rotation_gate_enabled =
+    declare_parameter<bool>("rotation_gate_enabled", false);
+  tuning_.rotation_gate_min_curvature =
+    declare_parameter<double>("rotation_gate_min_curvature", 0.06);
+  tuning_.rotation_gate_min_steering_angle =
+    declare_parameter<double>("rotation_gate_min_steering_angle", 0.18);
+  tuning_.rotation_gate_yaw_rate_error_threshold =
+    declare_parameter<double>("rotation_gate_yaw_rate_error_threshold", 0.30);
+  tuning_.rotation_gate_yaw_rate_error_release_ratio =
+    declare_parameter<double>("rotation_gate_yaw_rate_error_release_ratio", 0.60);
+  tuning_.rotation_gate_max_lateral_error =
+    declare_parameter<double>("rotation_gate_max_lateral_error", 1.00);
+  tuning_.rotation_gate_min_duration_sec =
+    declare_parameter<double>("rotation_gate_min_duration_sec", 0.05);
+  tuning_.rotation_gate_max_duration_sec =
+    declare_parameter<double>("rotation_gate_max_duration_sec", 0.20);
+  tuning_.rotation_gate_cooldown_sec =
+    declare_parameter<double>("rotation_gate_cooldown_sec", 0.50);
   ga_run_id_ = declare_parameter<std::string>("ga_run_id", "");
   ga_candidate_id_ = declare_parameter<std::string>("ga_candidate_id", "");
   ga_parameter_hash_ = declare_parameter<std::string>("ga_parameter_hash", "");
@@ -105,6 +150,9 @@ SimplePurePursuit::SimplePurePursuit()
   sub_trajectory_ = create_subscription<Trajectory>(
     "input/trajectory", best_effort,
     [this](const Trajectory::SharedPtr message) {trajectory_ = message;});
+  sub_steering_status_ = create_subscription<SteeringReport>(
+    "input/steering_status", best_effort,
+    [this](const SteeringReport::SharedPtr message) {steering_status_ = message;});
 
   parameter_callback_ = add_on_set_parameters_callback(
     std::bind(&SimplePurePursuit::onSetParameters, this, std::placeholders::_1));
@@ -181,6 +229,48 @@ rcl_interfaces::msg::SetParametersResult SimplePurePursuit::onSetParameters(
         candidate.longitudinal_acceleration_limit = parameter.as_double();
       } else if (name == "external_target_vel") {
         candidate.external_target_vel = parameter.as_double();
+      } else if (name == "continuous_preview_interpolation_enabled") {
+        candidate.continuous_preview_interpolation_enabled = parameter.as_bool();
+      } else if (name == "delay_compensation_enabled") {
+        candidate.delay_compensation_enabled = parameter.as_bool();
+      } else if (name == "pp_control_delay_sec") {
+        candidate.pp_control_delay_sec = parameter.as_double();
+      } else if (name == "pp_prediction_dt_sec") {
+        candidate.pp_prediction_dt_sec = parameter.as_double();
+      } else if (name == "steering_time_constant_sec") {
+        candidate.steering_time_constant_sec = parameter.as_double();
+      } else if (name == "steering_status_timeout_sec") {
+        candidate.steering_status_timeout_sec = parameter.as_double();
+      } else if (name == "min_velocity_for_delay_compensation_mps") {
+        candidate.min_velocity_for_delay_compensation_mps = parameter.as_double();
+      } else if (name == "curvature_feedforward_enabled") {
+        candidate.curvature_feedforward_enabled = parameter.as_bool();
+      } else if (name == "curvature_feedforward_gain") {
+        candidate.curvature_feedforward_gain = parameter.as_double();
+      } else if (name == "exit_unwind_enabled") {
+        candidate.exit_unwind_enabled = parameter.as_bool();
+      } else if (name == "exit_unwind_far_preview_boost") {
+        candidate.exit_unwind_far_preview_boost = parameter.as_double();
+      } else if (name == "exit_unwind_curvature_drop_threshold") {
+        candidate.exit_unwind_curvature_drop_threshold = parameter.as_double();
+      } else if (name == "rotation_gate_enabled") {
+        candidate.rotation_gate_enabled = parameter.as_bool();
+      } else if (name == "rotation_gate_min_curvature") {
+        candidate.rotation_gate_min_curvature = parameter.as_double();
+      } else if (name == "rotation_gate_min_steering_angle") {
+        candidate.rotation_gate_min_steering_angle = parameter.as_double();
+      } else if (name == "rotation_gate_yaw_rate_error_threshold") {
+        candidate.rotation_gate_yaw_rate_error_threshold = parameter.as_double();
+      } else if (name == "rotation_gate_yaw_rate_error_release_ratio") {
+        candidate.rotation_gate_yaw_rate_error_release_ratio = parameter.as_double();
+      } else if (name == "rotation_gate_max_lateral_error") {
+        candidate.rotation_gate_max_lateral_error = parameter.as_double();
+      } else if (name == "rotation_gate_min_duration_sec") {
+        candidate.rotation_gate_min_duration_sec = parameter.as_double();
+      } else if (name == "rotation_gate_max_duration_sec") {
+        candidate.rotation_gate_max_duration_sec = parameter.as_double();
+      } else if (name == "rotation_gate_cooldown_sec") {
+        candidate.rotation_gate_cooldown_sec = parameter.as_double();
       } else if (name == "ga_run_id") {
         run_id = parameter.as_string();
       } else if (name == "ga_candidate_id") {
@@ -216,7 +306,24 @@ rcl_interfaces::msg::SetParametersResult SimplePurePursuit::onSetParameters(
     !finiteInRange(candidate.curvature_speed_preview_distance, 1.0, 50.0) ||
     !finiteInRange(candidate.speed_proportional_gain, 0.0, 10.0) ||
     !finiteInRange(candidate.longitudinal_acceleration_limit, 0.0, 1.0) ||
-    !finiteInRange(candidate.external_target_vel, 0.0, 30.0))
+    !finiteInRange(candidate.external_target_vel, 0.0, 30.0) ||
+    !finiteInRange(candidate.pp_control_delay_sec, 0.0, 1.0) ||
+    !finiteInRange(candidate.pp_prediction_dt_sec, 0.001, 0.10) ||
+    !finiteInRange(candidate.steering_time_constant_sec, 0.001, 2.0) ||
+    !finiteInRange(candidate.steering_status_timeout_sec, 0.01, 2.0) ||
+    !finiteInRange(candidate.min_velocity_for_delay_compensation_mps, 0.0, 10.0) ||
+    !finiteInRange(candidate.curvature_feedforward_gain, 0.0, 2.0) ||
+    !finiteInRange(candidate.exit_unwind_far_preview_boost, 0.0, 1.0) ||
+    !finiteInRange(candidate.exit_unwind_curvature_drop_threshold, 0.001, 1.0) ||
+    !finiteInRange(candidate.rotation_gate_min_curvature, 0.001, 1.0) ||
+    !finiteInRange(candidate.rotation_gate_min_steering_angle, 0.01, 1.0) ||
+    !finiteInRange(candidate.rotation_gate_yaw_rate_error_threshold, 0.01, 10.0) ||
+    !finiteInRange(candidate.rotation_gate_yaw_rate_error_release_ratio, 0.1, 1.0) ||
+    !finiteInRange(candidate.rotation_gate_max_lateral_error, 0.1, 5.0) ||
+    !finiteInRange(candidate.rotation_gate_min_duration_sec, 0.01, 1.0) ||
+    !finiteInRange(candidate.rotation_gate_max_duration_sec, 0.01, 2.0) ||
+    candidate.rotation_gate_max_duration_sec < candidate.rotation_gate_min_duration_sec ||
+    !finiteInRange(candidate.rotation_gate_cooldown_sec, 0.0, 5.0))
   {
     result.reason = "candidate contains a non-finite or out-of-range value";
     return result;
@@ -269,6 +376,9 @@ void SimplePurePursuit::resetExperimentState()
   smoothed_curvature_ = 0.0;
   curvature_initialized_ = false;
   previous_steering_ = 0.0;
+  rotation_gate_active_ = false;
+  rotation_gate_started_sec_ = 0.0;
+  rotation_gate_cooldown_until_sec_ = 0.0;
   ++reset_epoch_;
 }
 
@@ -299,6 +409,30 @@ double SimplePurePursuit::estimateCurvature(const std::size_t nearest_index) con
   const double twice_area =
     std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
   return 2.0 * twice_area / denominator;
+}
+
+double SimplePurePursuit::estimateSignedCurvature(const std::size_t nearest_index) const
+{
+  const auto & points = trajectory_->points;
+  if (points.size() < 3) {
+    return 0.0;
+  }
+  const std::size_t first = nearest_index > 1 ? nearest_index - 1 : 0;
+  const std::size_t last = std::min(points.size() - 1, nearest_index + 4);
+  const std::size_t middle = (first + last) / 2;
+  const auto & a = points[first].pose.position;
+  const auto & b = points[middle].pose.position;
+  const auto & c = points[last].pose.position;
+  const double ab = std::hypot(b.x - a.x, b.y - a.y);
+  const double bc = std::hypot(c.x - b.x, c.y - b.y);
+  const double ca = std::hypot(a.x - c.x, a.y - c.y);
+  const double denominator = ab * bc * ca;
+  if (denominator <= 1.0e-6) {
+    return 0.0;
+  }
+  const double twice_signed_area =
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  return 2.0 * twice_signed_area / denominator;
 }
 
 double SimplePurePursuit::estimatePreviewCurvature(
@@ -332,16 +466,62 @@ void SimplePurePursuit::onTimer()
     return;
   }
 
+  const double current_velocity = odometry_->twist.twist.linear.x;
+  const double current_yaw = tf2::getYaw(odometry_->pose.pose.orientation);
+  const double current_rear_x =
+    odometry_->pose.pose.position.x - wheel_base_ * 0.5 * std::cos(current_yaw);
+  const double current_rear_y =
+    odometry_->pose.pose.position.y - wheel_base_ * 0.5 * std::sin(current_yaw);
+  double control_yaw = current_yaw;
+  double control_rear_x = current_rear_x;
+  double control_rear_y = current_rear_y;
+  bool steering_status_fresh = false;
+  bool delay_compensation_used = false;
+  const rclcpp::Time now = get_clock()->now();
+  if (steering_status_ && std::isfinite(steering_status_->steering_tire_angle)) {
+    const rclcpp::Time steering_stamp(steering_status_->stamp);
+    const double steering_age_sec = (now - steering_stamp).seconds();
+    steering_status_fresh = steering_stamp.nanoseconds() > 0 &&
+      steering_age_sec >= 0.0 && steering_age_sec <= tuning_.steering_status_timeout_sec;
+  }
+
+  if (tuning_.delay_compensation_enabled &&
+    tuning_.pp_control_delay_sec > 0.0 &&
+    current_velocity >= tuning_.min_velocity_for_delay_compensation_mps &&
+    steering_status_fresh)
+  {
+    const EgoControlState current_state{
+      current_rear_x, current_rear_y, current_yaw, current_velocity};
+    const DelayedPosePrediction prediction = predictDelayedPose(
+      current_state, steering_status_->steering_tire_angle, previous_steering_,
+      tuning_.pp_control_delay_sec, tuning_.pp_prediction_dt_sec,
+      tuning_.steering_time_constant_sec, wheel_base_);
+    if (prediction.shifted) {
+      control_rear_x = prediction.x;
+      control_rear_y = prediction.y;
+      control_yaw = prediction.yaw;
+      delay_compensation_used = true;
+    }
+  }
+
+  geometry_msgs::msg::Point control_position = odometry_->pose.pose.position;
+  if (delay_compensation_used) {
+    control_position.x = control_rear_x + wheel_base_ * 0.5 * std::cos(control_yaw);
+    control_position.y = control_rear_y + wheel_base_ * 0.5 * std::sin(control_yaw);
+  }
   const std::size_t nearest_index =
-    motion_utils::findNearestIndex(trajectory_->points, odometry_->pose.pose.position);
+    motion_utils::findNearestIndex(trajectory_->points, control_position);
   const TrajectoryPoint & nearest = trajectory_->points.at(nearest_index);
   const double maximum_velocity =
     (ga_experiment_mode_ || use_external_target_vel_) ?
     tuning_.external_target_vel : nearest.longitudinal_velocity_mps;
-  const double current_velocity = odometry_->twist.twist.linear.x;
 
   const double curvature = estimatePreviewCurvature(
     nearest_index, tuning_.curvature_speed_preview_distance);
+  const double signed_curvature = estimateSignedCurvature(nearest_index);
+  const std::size_t exit_preview_index = selectForwardTrajectoryIndex(
+    *trajectory_, nearest_index, tuning_.curvature_speed_preview_distance);
+  const double exit_signed_curvature = estimateSignedCurvature(exit_preview_index);
   const double alpha = tuning_.curvature_lookahead_smoothing_alpha;
   if (!curvature_initialized_) {
     smoothed_curvature_ = curvature;
@@ -354,7 +534,7 @@ void SimplePurePursuit::onTimer()
   const double curvature_target_velocity = std::min(
     maximum_velocity, std::max(tuning_.minimum_corner_speed, curvature_speed_limit));
   const double lateral_error = tier4_autoware_utils::calcLateralDeviation(
-    nearest.pose, odometry_->pose.pose.position);
+    nearest.pose, control_position);
   const double absolute_lateral_error = std::abs(lateral_error);
   const double retention_gate = tuning_.lateral_error_speed_gate_enabled ? std::clamp(
     (tuning_.corner_speed_retention_lateral_error_hard - absolute_lateral_error) /
@@ -373,22 +553,46 @@ void SimplePurePursuit::onTimer()
     speed_lookahead /
     (1.0 + tuning_.curvature_lookahead_sensitivity * smoothed_curvature_));
 
-  const double yaw = tf2::getYaw(odometry_->pose.pose.orientation);
-  const double rear_x = odometry_->pose.pose.position.x - wheel_base_ * 0.5 * std::cos(yaw);
-  const double rear_y = odometry_->pose.pose.position.y - wheel_base_ * 0.5 * std::sin(yaw);
+  struct PreviewTarget
+  {
+    TrajectoryPoint point;
+    std::size_t lower_index;
+    std::size_t upper_index;
+    bool endpoint_fallback;
+  };
   const auto find_preview_point = [&](const double distance) {
-      auto point = std::find_if(
+      if (tuning_.continuous_preview_interpolation_enabled) {
+        const auto interpolated = interpolateForwardTrajectoryPoint(
+          *trajectory_, nearest_index, distance);
+        return PreviewTarget{
+          interpolated.point, interpolated.lower_index, interpolated.upper_index,
+          interpolated.endpoint_fallback};
+      }
+      const auto point = std::find_if(
         trajectory_->points.begin() + static_cast<std::ptrdiff_t>(nearest_index),
         trajectory_->points.end(), [&](const TrajectoryPoint & candidate) {
           return std::hypot(
-            candidate.pose.position.x - rear_x, candidate.pose.position.y - rear_y) >= distance;
+            candidate.pose.position.x - control_rear_x,
+            candidate.pose.position.y - control_rear_y) >= distance;
         });
-      return point == trajectory_->points.end() ? std::prev(trajectory_->points.end()) : point;
+      const auto selected = point == trajectory_->points.end() ?
+        std::prev(trajectory_->points.end()) : point;
+      const std::size_t index = static_cast<std::size_t>(
+        std::distance(trajectory_->points.begin(), selected));
+      return PreviewTarget{*selected, index, index, point == trajectory_->points.end()};
     };
-  const auto lookahead = find_preview_point(lookahead_distance);
+  const PreviewTarget lookahead = find_preview_point(lookahead_distance);
   const double near_preview_distance = std::max(
     0.5, lookahead_distance * tuning_.dual_preview_near_ratio);
-  const auto near_preview = find_preview_point(near_preview_distance);
+  const PreviewTarget near_preview = find_preview_point(near_preview_distance);
+  const double curvature_drop = std::max(
+    0.0, std::abs(signed_curvature) - std::abs(exit_signed_curvature));
+  const double exit_unwind_progress = tuning_.exit_unwind_enabled ? std::clamp(
+    curvature_drop / tuning_.exit_unwind_curvature_drop_threshold, 0.0, 1.0) : 0.0;
+  const double effective_dual_preview_blend = std::clamp(
+    tuning_.dual_preview_blend -
+    tuning_.exit_unwind_far_preview_boost * exit_unwind_progress,
+    0.0, 1.0);
 
   AckermannControlCommand command = zeroCommand(get_clock()->now());
   command.longitudinal.speed = target_velocity;
@@ -396,17 +600,22 @@ void SimplePurePursuit::onTimer()
     tuning_.speed_proportional_gain * (target_velocity - current_velocity), 0.0,
     tuning_.longitudinal_acceleration_limit);
   const double heading_error =
-    std::atan2(lookahead->pose.position.y - rear_y, lookahead->pose.position.x - rear_x) - yaw;
+    std::atan2(
+    lookahead.point.pose.position.y - control_rear_y,
+    lookahead.point.pose.position.x - control_rear_x) - control_yaw;
   const double actual_lookahead_distance = std::hypot(
-    lookahead->pose.position.x - rear_x, lookahead->pose.position.y - rear_y);
+    lookahead.point.pose.position.x - control_rear_x,
+    lookahead.point.pose.position.y - control_rear_y);
   const double steering_lookahead_distance =
     (1.0 - tuning_.actual_lookahead_distance_blend) * lookahead_distance +
     tuning_.actual_lookahead_distance_blend * actual_lookahead_distance;
   const double near_heading_error =
     std::atan2(
-    near_preview->pose.position.y - rear_y, near_preview->pose.position.x - rear_x) - yaw;
+    near_preview.point.pose.position.y - control_rear_y,
+    near_preview.point.pose.position.x - control_rear_x) - control_yaw;
   const double actual_near_preview_distance = std::hypot(
-    near_preview->pose.position.x - rear_x, near_preview->pose.position.y - rear_y);
+    near_preview.point.pose.position.x - control_rear_x,
+    near_preview.point.pose.position.y - control_rear_y);
   const double steering_near_preview_distance =
     (1.0 - tuning_.actual_lookahead_distance_blend) * near_preview_distance +
     tuning_.actual_lookahead_distance_blend * actual_near_preview_distance;
@@ -414,15 +623,60 @@ void SimplePurePursuit::onTimer()
     2.0 * wheel_base_ * std::sin(heading_error), steering_lookahead_distance);
   const double near_steering_angle = std::atan2(
     2.0 * wheel_base_ * std::sin(near_heading_error), steering_near_preview_distance);
-  command.lateral.steering_tire_angle =
+  const double pure_pursuit_steering_angle =
     tuning_.steering_tire_angle_gain *
-    ((1.0 - tuning_.dual_preview_blend) * far_steering_angle +
-    tuning_.dual_preview_blend * near_steering_angle);
+    ((1.0 - effective_dual_preview_blend) * far_steering_angle +
+    effective_dual_preview_blend * near_steering_angle);
+  const double curvature_feedforward_angle = tuning_.curvature_feedforward_enabled ?
+    tuning_.curvature_feedforward_gain * std::atan(wheel_base_ * signed_curvature) : 0.0;
+  command.lateral.steering_tire_angle =
+    pure_pursuit_steering_angle + curvature_feedforward_angle;
+
+  const double measured_yaw_rate = odometry_->twist.twist.angular.z;
+  const double reference_yaw_rate = current_velocity * signed_curvature;
+  const double signed_yaw_rate_error =
+    std::copysign(1.0, signed_curvature == 0.0 ? 1.0 : signed_curvature) *
+    (reference_yaw_rate - measured_yaw_rate);
+  const double gate_steering_angle = steering_status_fresh ?
+    steering_status_->steering_tire_angle : 0.0;
+  const bool gate_safe = steering_status_fresh &&
+    absolute_lateral_error <= tuning_.rotation_gate_max_lateral_error;
+  const bool gate_entry_condition = tuning_.rotation_gate_enabled && gate_safe &&
+    std::abs(signed_curvature) >= tuning_.rotation_gate_min_curvature &&
+    std::abs(gate_steering_angle) >= tuning_.rotation_gate_min_steering_angle &&
+    signed_yaw_rate_error >= tuning_.rotation_gate_yaw_rate_error_threshold;
+  const bool gate_hold_condition = gate_safe &&
+    std::abs(signed_curvature) >= 0.8 * tuning_.rotation_gate_min_curvature &&
+    std::abs(gate_steering_angle) >= 0.8 * tuning_.rotation_gate_min_steering_angle &&
+    signed_yaw_rate_error >=
+    tuning_.rotation_gate_yaw_rate_error_threshold *
+    tuning_.rotation_gate_yaw_rate_error_release_ratio;
+  const double now_sec = now.seconds();
+  if (rotation_gate_active_) {
+    const double elapsed_sec = now_sec - rotation_gate_started_sec_;
+    const bool min_hold_active = elapsed_sec < tuning_.rotation_gate_min_duration_sec && gate_safe;
+    if (elapsed_sec >= tuning_.rotation_gate_max_duration_sec ||
+      (!min_hold_active && !gate_hold_condition))
+    {
+      rotation_gate_active_ = false;
+      rotation_gate_cooldown_until_sec_ = now_sec + tuning_.rotation_gate_cooldown_sec;
+    }
+  }
+  if (!rotation_gate_active_ && gate_entry_condition &&
+    now_sec >= rotation_gate_cooldown_until_sec_)
+  {
+    rotation_gate_active_ = true;
+    rotation_gate_started_sec_ = now_sec;
+  }
+  if (rotation_gate_active_) {
+    // A rotation gate is coast only. It never requests braking.
+    command.longitudinal.acceleration = 0.0;
+  }
 
   PointStamped lookahead_message;
   lookahead_message.header.stamp = get_clock()->now();
   lookahead_message.header.frame_id = "map";
-  lookahead_message.point = lookahead->pose.position;
+  lookahead_message.point = lookahead.point.pose.position;
   pub_lookahead_point_->publish(lookahead_message);
   pub_cmd_->publish(command);
   AckermannControlCommand raw_command = command;
@@ -435,6 +689,19 @@ void SimplePurePursuit::onTimer()
        << "\",\"parameter_hash\":\"" << jsonEscape(ga_parameter_hash_)
        << "\",\"reset_epoch\":" << reset_epoch_
        << ",\"nearest_trajectory_index\":" << nearest_index
+       << ",\"continuous_preview_interpolation_enabled\":" <<
+    (tuning_.continuous_preview_interpolation_enabled ? "true" : "false")
+       << ",\"lookahead_lower_trajectory_index\":" << lookahead.lower_index
+       << ",\"lookahead_upper_trajectory_index\":" << lookahead.upper_index
+       << ",\"delay_compensation_enabled\":" <<
+    (tuning_.delay_compensation_enabled ? "true" : "false")
+       << ",\"delay_compensation_used\":" <<
+    (delay_compensation_used ? "true" : "false")
+       << ",\"steering_status_fresh\":" <<
+    (steering_status_fresh ? "true" : "false")
+       << ",\"control_rear_x\":" << control_rear_x
+       << ",\"control_rear_y\":" << control_rear_y
+       << ",\"control_yaw\":" << control_yaw
        << ",\"lateral_error_m\":" << lateral_error
        << ",\"lookahead_distance_m\":" << lookahead_distance
        << ",\"actual_lookahead_distance_m\":" << actual_lookahead_distance
@@ -443,8 +710,17 @@ void SimplePurePursuit::onTimer()
        << ",\"actual_near_preview_distance_m\":" << actual_near_preview_distance
        << ",\"dual_preview_near_ratio\":" << tuning_.dual_preview_near_ratio
        << ",\"dual_preview_blend\":" << tuning_.dual_preview_blend
+       << ",\"effective_dual_preview_blend\":" << effective_dual_preview_blend
+       << ",\"exit_unwind_enabled\":" <<
+    (tuning_.exit_unwind_enabled ? "true" : "false")
+       << ",\"exit_unwind_progress\":" << exit_unwind_progress
        << ",\"far_steering_angle_rad\":" << far_steering_angle
        << ",\"near_steering_angle_rad\":" << near_steering_angle
+       << ",\"pure_pursuit_steering_angle_rad\":" << pure_pursuit_steering_angle
+       << ",\"curvature_feedforward_enabled\":" <<
+    (tuning_.curvature_feedforward_enabled ? "true" : "false")
+       << ",\"signed_curvature_1pm\":" << signed_curvature
+       << ",\"curvature_feedforward_angle_rad\":" << curvature_feedforward_angle
        << ",\"curvature\":" << smoothed_curvature_
        << ",\"target_velocity_mps\":" << target_velocity
        << ",\"maximum_velocity_mps\":" << maximum_velocity
@@ -456,6 +732,15 @@ void SimplePurePursuit::onTimer()
        << ",\"effective_corner_speed_retention\":" << effective_corner_speed_retention
        << ",\"corner_speed_retention_gate\":" << retention_gate
        << ",\"commanded_acceleration_mps2\":" << command.longitudinal.acceleration
+       << ",\"measured_yaw_rate_radps\":" << measured_yaw_rate
+       << ",\"reference_yaw_rate_radps\":" << reference_yaw_rate
+       << ",\"signed_yaw_rate_error_radps\":" << signed_yaw_rate_error
+       << ",\"rotation_gate_enabled\":" <<
+    (tuning_.rotation_gate_enabled ? "true" : "false")
+       << ",\"rotation_gate_active\":" <<
+    (rotation_gate_active_ ? "true" : "false")
+       << ",\"rotation_gate_entry_condition\":" <<
+    (gate_entry_condition ? "true" : "false")
        << ",\"speed_limited\":" << (target_velocity < maximum_velocity)
        << ",\"steering_rate_limited\":false}";
   debug.data = json.str();

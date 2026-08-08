@@ -61,17 +61,22 @@ class MockEvaluator:
                 parameters.get("curvature_speed_preview_distance", 99.0) < 8.0
             )
         )
+        lap_time = 62.0 + 18.0 * distance + noise
         return {
             "completed": not unstable,
             "invalid": False,
-            "lap_time_seconds": 62.0 + 18.0 * distance + noise,
-            "elapsed_seconds": 62.0 + 18.0 * distance + noise,
+            "lap_time_seconds": lap_time,
+            "flying_lap_time_seconds": lap_time,
+            "lap_times_seconds": [lap_time + 8.0, lap_time],
+            "section_splits": [{"section": 1, "lap_time_seconds": 5.0}],
+            "elapsed_seconds": lap_time,
             "progress": 0.65 if unstable else 1.0,
             "collision_count": int(unstable),
             "wall_count": 0,
             "over_count": 0,
             "penalty_seconds": 0.0,
             "lateral_error_p95_m": 0.12 + 0.5 * math.sqrt(distance),
+            "lateral_error_max_m": 0.2 + 0.7 * math.sqrt(distance),
             "steering_delta_rms": 0.02 + 0.1 * distance,
             "steering_rate_limit_ratio": min(1.0, 0.01 + 0.1 * distance),
             "exit_reason": "collision" if unstable else "completed",

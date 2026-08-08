@@ -96,6 +96,10 @@ services:
 
   ga-runner:
     <<: *autoware-base
+    image: "aichallenge-2025-dev-ga"
+    build:
+      context: .
+      dockerfile: Dockerfile.ga-runner
     privileged: false
     restart: "no"
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"

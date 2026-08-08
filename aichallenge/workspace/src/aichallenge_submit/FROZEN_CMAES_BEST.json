@@ -1,0 +1,38 @@
+{
+  "source_run": "20260804T175800Z",
+  "candidate_id": "g0065-i0010",
+  "feasible": true,
+  "robust_lap_seconds": 43.510700712287345,
+  "objective_value": 43.510700712287345,
+  "parameter_hash": "sha256:3c42d1a59232bf35b23e2c13ae2824008dd0d83553a150d8be21e6b31e2e38a0",
+  "path_sha256": "8225459b7aff44c3a51494a456e05c276fc155b4652df8c73c6986cbc8aed42c",
+  "parameters": {
+    "curvature_lookahead_min_distance": 1.370599267535113,
+    "curvature_lookahead_sensitivity": 1.9799676729694742,
+    "curvature_lookahead_smoothing_alpha": 0.21596381301312476,
+    "curvature_speed_preview_distance": 21.422826964417297,
+    "dual_preview_blend": 0.22853606092001316,
+    "dual_preview_near_ratio": 0.557938018486374,
+    "lookahead_gain": 0.9730464856294982,
+    "lookahead_min_distance": 1.9056789445669908,
+    "steering_tire_angle_gain": 2.2578519967320787
+  },
+  "path_offsets": [
+    -0.1918646638607171,
+    0.23777206836244558,
+    0.036186295480022945,
+    -1.1786881861230754,
+    -0.41885182752913375,
+    0.44789150047197057,
+    0.01641248012261043,
+    -0.3686881535046318,
+    0.344467802156849,
+    -0.41938484816984545,
+    0.7453800642757233,
+    0.4715915243373421,
+    0.6374191566849636,
+    0.0714318618480767,
+    -0.13538862700123233,
+    -0.4972237443673113
+  ]
+}

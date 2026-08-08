@@ -21,6 +21,8 @@ from .phase2 import (
     EmitterBandit, KnnFeasibilityModel, MapElitesArchive, load_observations,
     path_novelty_candidate, select_feasible_candidates, trust_region_candidate,
 )
+from .cmaes import BlockCmaEs
+from .constrained_objective import evaluate_constrained
 
 
 def required_repeat_count(settings: dict[str, Any], metrics: dict[str, Any]) -> int:
@@ -138,13 +140,15 @@ class Optimizer:
             json.dumps(self.config, indent=2, sort_keys=True), encoding="utf-8"
         )
 
-    def _checkpoint(self, generation: int, population: list[dict[str, float]], emitters=None) -> None:
+    def _checkpoint(self, generation: int, population: list[dict[str, float]], emitters=None, optimizer_state=None) -> None:
         data = {
             "generation": generation,
             "population": population,
             "random_state": repr(self.rng.getstate()),
             "population_emitters": emitters or ["seed"] * len(population),
             "emitter_bandit": self.emitter_bandit.state(),
+            "optimizer_type": self.config.get("optimizer", {}).get("type", "genetic_algorithm"),
+            "optimizer_state": optimizer_state,
         }
         target = self.run_dir / "checkpoint" / f"generation_{generation:05d}.json"
         target.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
@@ -159,9 +163,11 @@ class Optimizer:
         self._resumed_emitters = data.get("population_emitters", ["seed"] * len(data["population"]))
         return int(data["generation"]) + 1, data["population"]
 
-    def _evaluate(self, generation: int, index: int, genome: dict[str, float]) -> float:
+    def _evaluate(self, generation: int, index: int, genome: dict[str, float],
+                  constrained: bool = False, phase: str = "ga") -> float:
         hash_value = parameter_hash(genome)
-        cached = self.storage.get_fitness(hash_value)
+        cached = (self.storage.get_objective(hash_value) if constrained
+                  else self.storage.get_fitness(hash_value))
         if cached is not None:
             return cached
         candidate_id = f"g{generation:04d}-i{index:04d}"
@@ -187,6 +193,14 @@ class Optimizer:
             repeat += 1
         fitness = robust_score([item[2] for item in episodes])
         self.storage.complete_candidate(candidate_id, episodes, fitness)
+        objective = None
+        if constrained:
+            objective = evaluate_constrained(
+                [item[1] for item in episodes], self.config["constrained_objective"]
+            )
+            self.storage.save_candidate_metadata(
+                candidate_id, "block_cmaes", phase, objective.to_dict()
+            )
         with self._history_lock:
             with (self.run_dir / "candidates.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(
@@ -197,14 +211,21 @@ class Optimizer:
                             "parameter_hash": hash_value,
                             "parameters": genome,
                             "fitness": fitness,
+                            "objective_value": (
+                                objective.objective_value if objective else None
+                            ),
+                            "feasible": objective.feasible if objective else None,
+                            "robust_lap": objective.robust_lap if objective else None,
                         },
                         sort_keys=True,
                     )
                     + "\n"
                 )
-        return fitness
+        return objective.objective_value if objective else fitness
 
     def run(self) -> dict[str, Any]:
+        if self.config.get("optimizer", {}).get("type") == "block_cmaes":
+            return self._run_block_cmaes()
         if not self.resume:
             self._save_manifest()
         settings = self.config["run"]
@@ -424,5 +445,58 @@ class Optimizer:
         (self.run_dir / "best.json").write_text(
             json.dumps(best, indent=2, sort_keys=True), encoding="utf-8"
         )
+        self.storage.close()
+        return best
+
+    def _run_block_cmaes(self) -> dict[str, Any]:
+        if not self.resume:
+            self._save_manifest()
+        settings = self.config["run"]
+        optimizer_settings = dict(self.config.get("optimizer", {}))
+        optimizer_settings.setdefault("population_size", settings["population_size"])
+        checkpoints = sorted((self.run_dir / "checkpoint").glob("generation_*.json"))
+        if self.resume and checkpoints:
+            data = json.loads(checkpoints[-1].read_text(encoding="utf-8"))
+            if data.get("optimizer_type") != "block_cmaes" or not data.get("optimizer_state"):
+                raise ValueError("latest checkpoint is not a block_cmaes checkpoint")
+            cma_optimizer = BlockCmaEs.restore(self.bounds, optimizer_settings, data["optimizer_state"])
+            start_generation = int(data["generation"]) + 1
+        else:
+            seeds = self._initial_seeds()
+            source = seeds[0] if seeds else self.config["baseline"]
+            center = {name: float(source.get(name, self.config["baseline"][name])) for name in self.bounds}
+            cma_optimizer = BlockCmaEs(self.bounds, center, optimizer_settings, int(settings["seed"]))
+            start_generation = 0
+        generation_limit = int(settings["generations"])
+        generation_numbers = itertools.count(start_generation) if generation_limit == 0 else range(start_generation, generation_limit)
+        for generation in generation_numbers:
+            population = cma_optimizer.ask()
+            indexed = list(enumerate(population))
+            workers = int(settings.get("parallel_workers", 1))
+            if workers > 1:
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    fitness_values = list(executor.map(
+                        lambda item: self._evaluate(
+                            generation, item[0], item[1], True, cma_optimizer.phase
+                        ), indexed))
+            else:
+                fitness_values = [self._evaluate(
+                    generation, index, genome, True, cma_optimizer.phase
+                ) for index, genome in indexed]
+            transition = cma_optimizer.tell(population, fitness_values)
+            best_index = min(range(len(population)), key=lambda index: fitness_values[index])
+            print(f"generation={generation} optimizer=block_cmaes phase={cma_optimizer.phase} "
+                  f"sigma={cma_optimizer.sigma:.6f} best={fitness_values[best_index]:.6f} "
+                  f"hash={parameter_hash(population[best_index])}", flush=True)
+            if transition:
+                previous = cma_optimizer.phase
+                cma_optimizer.transition()
+                print(f"cmaes phase transition {previous}->{cma_optimizer.phase}", flush=True)
+            if (generation + 1) % int(settings.get("checkpoint_every", 1)) == 0:
+                self._checkpoint(generation, population,
+                                 [f"cmaes:{cma_optimizer.phase}"] * len(population),
+                                 cma_optimizer.checkpoint())
+        best = self.storage.best_objective(1)[0]
+        (self.run_dir / "best.json").write_text(json.dumps(best, indent=2, sort_keys=True), encoding="utf-8")
         self.storage.close()
         return best

@@ -70,6 +70,19 @@ def validate_config(config: dict[str, Any]) -> None:
             raise ValueError(
                 "surrogate selection fractions must be non-negative and sum to at most 1"
             )
+    optimizer = config.get("optimizer", {})
+    optimizer_type = str(optimizer.get("type", "genetic_algorithm"))
+    if optimizer_type not in {"genetic_algorithm", "block_cmaes"}:
+        raise ValueError(f"unsupported optimizer.type: {optimizer_type}")
+    if optimizer_type == "block_cmaes":
+        if not isinstance(config.get("constrained_objective"), dict):
+            raise ValueError("block_cmaes requires constrained_objective settings")
+        if int(optimizer.get("population_size", run["population_size"])) <= 1:
+            raise ValueError("optimizer.population_size must be greater than 1")
+        for name in ("controller_sigma", "path_sigma", "joint_sigma"):
+            value = float(optimizer.get(name, 0.01))
+            if not 0.0 < value <= 0.5:
+                raise ValueError(f"optimizer.{name} must be in (0, 0.5]")
     baseline = config["baseline"]
     for name, spec in config["search_space"].items():
         low, high = float(spec["min"]), float(spec["max"])

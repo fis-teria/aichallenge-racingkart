@@ -4,16 +4,22 @@
   <arg name="use_sim_time" default="true"/>
   <arg name="ga_experiment_mode" default="$(env GA_EXPERIMENT_MODE false)"/>
 
-  <let name="steering_tire_angle_gain_var" value="1.50" if="$(var simulation)"/>
-  <let name="steering_tire_angle_gain_var" value="1.639" unless="$(var simulation)"/>
+  <!-- Frozen from constrained CMA-ES run 20260804T175800Z, g0065-i0010. -->
+  <let name="steering_tire_angle_gain_var" value="2.2578519967320787"/>
 
   <node pkg="simple_pure_pursuit" exec="simple_pure_pursuit" name="simple_pure_pursuit_node" output="screen">
     <param name="ga_experiment_mode" value="$(var ga_experiment_mode)"/>
-    <param name="use_external_target_vel" value="false"/>
+    <!-- Keep the frozen GA condition outside GA_EXPERIMENT_MODE as well. -->
+    <param name="use_external_target_vel" value="true"/>
     <!-- 35 km/h. GA mode forces this fixed target instead of trajectory speed. -->
     <param name="external_target_vel" value="9.722222222222"/>
-    <param name="lookahead_gain" value="0.5"/>
-    <param name="lookahead_min_distance" value="3.5"/>
+    <param name="lookahead_gain" value="0.9730464856294982"/>
+    <param name="lookahead_min_distance" value="1.9056789445669908"/>
+    <param name="dual_preview_near_ratio" value="0.557938018486374"/>
+    <param name="dual_preview_blend" value="0.22853606092001316"/>
+    <param name="curvature_lookahead_min_distance" value="1.370599267535113"/>
+    <param name="curvature_lookahead_sensitivity" value="1.9799676729694742"/>
+    <param name="curvature_lookahead_smoothing_alpha" value="0.21596381301312476"/>
     <param name="speed_proportional_gain" value="1.0"/>
     <param name="steering_tire_angle_gain" value="$(var steering_tire_angle_gain_var)"/>
     <param name="max_lateral_acceleration" value="6.0"/>
@@ -22,10 +28,33 @@
     <param name="corner_speed_retention" value="1.0"/>
     <!-- Keep the configured corner-speed retention even when lateral error grows. -->
     <param name="lateral_error_speed_gate_enabled" value="false"/>
-    <param name="curvature_speed_preview_distance" value="12.0"/>
+    <param name="curvature_speed_preview_distance" value="21.422826964417297"/>
+    <!-- Structural controller experiments are opt-in so the frozen baseline is unchanged. -->
+    <param name="continuous_preview_interpolation_enabled" value="false"/>
+    <param name="delay_compensation_enabled" value="false"/>
+    <param name="pp_control_delay_sec" value="0.2"/>
+    <param name="pp_prediction_dt_sec" value="0.02"/>
+    <param name="steering_time_constant_sec" value="0.30"/>
+    <param name="steering_status_timeout_sec" value="0.20"/>
+    <param name="min_velocity_for_delay_compensation_mps" value="0.20"/>
+    <param name="curvature_feedforward_enabled" value="false"/>
+    <param name="curvature_feedforward_gain" value="0.20"/>
+    <param name="exit_unwind_enabled" value="false"/>
+    <param name="exit_unwind_far_preview_boost" value="0.20"/>
+    <param name="exit_unwind_curvature_drop_threshold" value="0.02"/>
+    <param name="rotation_gate_enabled" value="false"/>
+    <param name="rotation_gate_min_curvature" value="0.06"/>
+    <param name="rotation_gate_min_steering_angle" value="0.18"/>
+    <param name="rotation_gate_yaw_rate_error_threshold" value="0.30"/>
+    <param name="rotation_gate_yaw_rate_error_release_ratio" value="0.60"/>
+    <param name="rotation_gate_max_lateral_error" value="1.00"/>
+    <param name="rotation_gate_min_duration_sec" value="0.05"/>
+    <param name="rotation_gate_max_duration_sec" value="0.20"/>
+    <param name="rotation_gate_cooldown_sec" value="0.50"/>
 
     <remap from="input/kinematics" to="/localization/kinematic_state"/>
     <remap from="input/trajectory" to="/planning/scenario_planning/trajectory"/>
+    <remap from="input/steering_status" to="/vehicle/status/steering_status"/>
     <remap from="output/control_cmd" to="/control/command/control_cmd"/>
   </node>
 </launch>
