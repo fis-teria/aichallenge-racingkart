@@ -145,6 +145,11 @@ public:
   bool evaluateTrajectory(CandidateTrajectory *candidate,
                           const std::vector<OpponentState> &opponents,
                           double initial_speed_mps = 0.0) const;
+  std::optional<CandidateTrajectory> boundedExactCartesianExecution(
+      const CandidateTrajectory &candidate,
+      const std::vector<OpponentState> &opponents,
+      std::size_t maximum_points,
+      OutputHorizonDiagnostic *diagnostic = nullptr) const;
   bool validateOutputHorizon(const EgoState &ego,
                              const std::vector<OpponentState> &opponents,
                              const std::vector<double> &d,
@@ -229,11 +234,11 @@ private:
   };
 
   std::vector<TrajectoryPoint>
-  denseSamples(const ParametricQuintic &polynomial) const;
+  denseSamples(const ParametricQuintic &polynomial,
+               int coarse_intervals = 100) const;
   std::vector<CandidateTrajectory>
   generateCandidatesInternal(const EgoState &ego,
-                             const std::vector<OpponentState> &opponents,
-                             const PassContinuationLatch *continuation) const;
+                             const std::vector<OpponentState> &opponents) const;
   std::optional<CandidateTrajectory> movingTargetFollowCandidate(
       const EgoState &ego, const OpponentState &target,
       const std::vector<OpponentState> &opponents) const;
@@ -264,6 +269,7 @@ private:
                                 bool interpolated_sample) const;
   struct PoseCostBreakdown {
     int total_cost{0};
+    int safety_cost{0};
     int reference_cost{0};
     int wall_cost{0};
     int object_cost{0};
@@ -304,6 +310,10 @@ private:
                      std::vector<double> *speed,
                      std::vector<double> *longitudinal_offsets_m,
                      OutputHorizonDiagnostic *diagnostic) const;
+  bool validateExactCartesianHorizon(
+      const CandidateTrajectory &candidate,
+      const std::vector<OpponentState> &opponents,
+      OutputHorizonDiagnostic *diagnostic) const;
   bool validateResampledHorizon(
       const EgoState &ego, const std::vector<OpponentState> &opponents,
       const std::vector<double> &d, const std::vector<double> &speed,

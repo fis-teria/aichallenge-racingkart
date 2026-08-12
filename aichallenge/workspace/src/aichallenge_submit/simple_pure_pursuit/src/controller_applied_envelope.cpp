@@ -18,7 +18,8 @@ using ControllerGeometry = multi_purpose_mpc_ros_msgs::msg::ControllerGeometry;
 using ControllerSampleKey =
     multi_purpose_mpc_ros_msgs::msg::ControllerSampleKey;
 
-constexpr std::size_t kAw2MaxGeometryPoints = 100U;
+constexpr std::size_t kAw2MaxGeometryPoints =
+    aw2_shadow::kMaxGeometryPoints;
 constexpr std::size_t kAw2MaxRolloutSamples = 100U;
 constexpr std::size_t kAw2MaxSourceBytes = 4096U;
 constexpr std::size_t kAw2MaxFrameBytes = 128U;

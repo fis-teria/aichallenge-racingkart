@@ -8,6 +8,21 @@ readonly SOURCE_BAG="${TEST_ONLY_REPLAY_SOURCE_BAG:?TEST_ONLY_REPLAY_SOURCE_BAG 
 readonly ARTIFACT_DIR="${TEST_ONLY_REPLAY_ARTIFACT_DIR:?TEST_ONLY_REPLAY_ARTIFACT_DIR is required}"
 readonly TIMEOUT_SEC="${TEST_ONLY_REPLAY_TIMEOUT_SEC:-45}"
 readonly REPLAY_DOMAIN_ID="${TEST_ONLY_REPLAY_ROS_DOMAIN_ID:?TEST_ONLY_REPLAY_ROS_DOMAIN_ID is required}"
+readonly EXACT_CARTESIAN_ENABLED="${TEST_ONLY_REPLAY_EXACT_CARTESIAN_ENABLED:-false}"
+readonly STEERING_FEEDBACK_ENABLED="${TEST_ONLY_REPLAY_STEERING_FEEDBACK_ENABLED:-false}"
+if [[ "${EXACT_CARTESIAN_ENABLED}" != "true" && "${EXACT_CARTESIAN_ENABLED}" != "false" ]]; then
+    echo "TEST_ONLY_OFFLINE_REPLAY_HOLD: invalid exact Cartesian flag" >&2
+    exit 2
+fi
+if [[ "${STEERING_FEEDBACK_ENABLED}" != "true" && "${STEERING_FEEDBACK_ENABLED}" != "false" ]]; then
+    echo "TEST_ONLY_OFFLINE_REPLAY_HOLD: invalid steering feedback flag" >&2
+    exit 2
+fi
+if [[ "${STEERING_FEEDBACK_ENABLED}" == "true" && "${EXACT_CARTESIAN_ENABLED}" != "true" ]]; then
+    echo "TEST_ONLY_OFFLINE_REPLAY_HOLD: steering feedback requires exact Cartesian mode" >&2
+    exit 2
+fi
+readonly CONTROLLER_TRACKABILITY_PROFILE="$([[ "${EXACT_CARTESIAN_ENABLED}" == "true" ]] && echo pure_pursuit || echo shadow_only)"
 readonly TOPIC_TOKEN="run_${RUN_ID//[^A-Za-z0-9_]/_}"
 readonly PRIVATE_ROOT="/test_only/offline_replay/${TOPIC_TOKEN}"
 readonly LAUNCH_FILE="/aichallenge/workspace/src/aichallenge_submit/aichallenge_submit_launch/launch/test_only/state_lattice_pp_mux_offline_replay.launch.xml"
@@ -17,7 +32,7 @@ readonly OUTPUT_BAG="${ARTIFACT_DIR}/rosbag2_private_output"
 readonly OUTPUT_METADATA="${OUTPUT_BAG}/metadata.yaml"
 readonly GRAPH_TIMEOUT_SEC=5
 
-readonly -a SOURCE_PLAY_TOPICS=(
+SOURCE_PLAY_TOPICS=(
     /clock
     /tf
     /tf_static
@@ -26,10 +41,9 @@ readonly -a SOURCE_PLAY_TOPICS=(
     /planning/scenario_planning/trajectory
     /overtake/race_armed
     /awsim/state
-    /vehicle/status/steering_status
     /mpc/speed_profile_debug
 )
-readonly -a SOURCE_REMAPS=(
+SOURCE_REMAPS=(
     "/clock:=${PRIVATE_ROOT}/input/clock"
     "/tf:=${PRIVATE_ROOT}/input/tf"
     "/tf_static:=${PRIVATE_ROOT}/input/tf_static"
@@ -38,11 +52,21 @@ readonly -a SOURCE_REMAPS=(
     "/planning/scenario_planning/trajectory:=${PRIVATE_ROOT}/input/trajectory"
     "/overtake/race_armed:=${PRIVATE_ROOT}/input/race_armed"
     "/awsim/state:=${PRIVATE_ROOT}/input/awsim_state"
-    "/vehicle/status/steering_status:=${PRIVATE_ROOT}/input/steering_status"
     "/mpc/speed_profile_debug:=${PRIVATE_ROOT}/input/mpc_health"
 )
+if [[ "${STEERING_FEEDBACK_ENABLED}" != "true" ]]; then
+    SOURCE_PLAY_TOPICS+=(/vehicle/status/steering_status)
+    SOURCE_REMAPS+=("/vehicle/status/steering_status:=${PRIVATE_ROOT}/input/steering_status")
+fi
+readonly -a SOURCE_PLAY_TOPICS SOURCE_REMAPS
 readonly -a RECORDED_TOPICS=(
     "${PRIVATE_ROOT}/planner/reference_override"
+    "${PRIVATE_ROOT}/planner/debug/mode"
+    "${PRIVATE_ROOT}/planner/debug/metrics"
+    "${PRIVATE_ROOT}/planner/debug/selected_trajectory"
+    "${PRIVATE_ROOT}/planner/v2_proposal"
+    "${PRIVATE_ROOT}/pp/v2_base_attestation"
+    "${PRIVATE_ROOT}/pp/v2_binding_status"
     "${PRIVATE_ROOT}/planner/plan"
     "${PRIVATE_ROOT}/planner/safety_constraint"
     "${PRIVATE_ROOT}/pp/control_cmd"
@@ -54,6 +78,7 @@ readonly -a RECORDED_TOPICS=(
     "${PRIVATE_ROOT}/mux/tracking_status"
     "${PRIVATE_ROOT}/mux/motion_authority_grant"
     "${PRIVATE_ROOT}/output/control_cmd"
+    "${PRIVATE_ROOT}/input/steering_status"
 )
 readonly -a FORBIDDEN_LIVE_TOPICS=(
     /control/command/control_cmd
@@ -274,15 +299,25 @@ fi
 
 regenerated_flag=false
 [[ "${MODE}" == regenerated ]] && regenerated_flag=true
-setsid ros2 launch --noninteractive "${LAUNCH_FILE}"     "topic_token:=${TOPIC_TOKEN}" "regenerated_mode:=${regenerated_flag}"     "use_sim_time:=true" >"${ARTIFACT_DIR}/combined_launch.log" 2>&1 &
+setsid ros2 launch --noninteractive "${LAUNCH_FILE}" \
+    "topic_token:=${TOPIC_TOKEN}" \
+    "regenerated_mode:=${regenerated_flag}" \
+    "use_sim_time:=true" \
+    "exact_cartesian_enabled:=${EXACT_CARTESIAN_ENABLED}" \
+    "steering_feedback_enabled:=${STEERING_FEEDBACK_ENABLED}" \
+    "controller_trackability_profile:=${CONTROLLER_TRACKABILITY_PROFILE}" \
+    >"${ARTIFACT_DIR}/combined_launch.log" 2>&1 &
 launch_pid=$!
 
 expected_nodes=(
-    /test_only_offline_state_lattice_planner
+    /state_lattice_overtake_planner_node
     /test_only_offline_pure_pursuit
     /test_only_offline_hybrid_control_mux
 )
-[[ "${MODE}" == regenerated ]] && expected_nodes+=(/test_only_offline_overtake_planner)
+[[ "${MODE}" == regenerated && "${EXACT_CARTESIAN_ENABLED}" != true ]] &&
+    expected_nodes+=(/test_only_offline_overtake_planner)
+[[ "${STEERING_FEEDBACK_ENABLED}" == true ]] &&
+    expected_nodes+=(/test_only_offline_steering_actuator)
 ready_deadline=$((SECONDS + 15))
 for expected in "${expected_nodes[@]}"; do
     until timeout "${GRAPH_TIMEOUT_SEC}s" ros2 node list | grep -Fxq "${expected}"; do
@@ -330,14 +365,22 @@ snapshot_graph "${ARTIFACT_DIR}/ros_graph_recording.txt"
 
 recorder_name=rosbag2_recorder
 assert_topic_contract reference_override "${PRIVATE_ROOT}/planner/reference_override" 1 \
-    test_only_offline_state_lattice_planner test_only_offline_pure_pursuit "${recorder_name}"
-if [[ "${MODE}" == regenerated ]]; then
+    state_lattice_overtake_planner_node test_only_offline_pure_pursuit "${recorder_name}"
+if [[ "${MODE}" == regenerated && "${EXACT_CARTESIAN_ENABLED}" != true ]]; then
     assert_topic_contract plan "${PRIVATE_ROOT}/planner/plan" 1 \
         test_only_offline_overtake_planner test_only_offline_pure_pursuit \
         test_only_offline_hybrid_control_mux "${recorder_name}"
     assert_topic_contract safety "${PRIVATE_ROOT}/planner/safety_constraint" 1 \
         test_only_offline_overtake_planner test_only_offline_hybrid_control_mux "${recorder_name}"
     grant_subscribers=(test_only_offline_overtake_planner "${recorder_name}")
+elif [[ "${EXACT_CARTESIAN_ENABLED}" == true ]]; then
+    assert_topic_contract plan "${PRIVATE_ROOT}/planner/plan" 1 \
+        state_lattice_overtake_planner_node test_only_offline_pure_pursuit \
+        test_only_offline_hybrid_control_mux "${recorder_name}"
+    assert_topic_contract safety "${PRIVATE_ROOT}/planner/safety_constraint" 1 \
+        state_lattice_overtake_planner_node test_only_offline_hybrid_control_mux \
+        "${recorder_name}"
+    grant_subscribers=("${recorder_name}")
 else
     assert_topic_contract plan "${PRIVATE_ROOT}/planner/plan" 0 "" \
         test_only_offline_pure_pursuit test_only_offline_hybrid_control_mux
@@ -349,8 +392,15 @@ assert_topic_contract pp_ack "${PRIVATE_ROOT}/pp/free_run_execution_ack" 1 \
     test_only_offline_pure_pursuit test_only_offline_hybrid_control_mux "${recorder_name}"
 assert_topic_contract mux_grant "${PRIVATE_ROOT}/mux/motion_authority_grant" 1 \
     test_only_offline_hybrid_control_mux "${grant_subscribers[@]}"
+final_control_subscribers=("${recorder_name}")
+if [[ "${STEERING_FEEDBACK_ENABLED}" == true ]]; then
+    final_control_subscribers+=(test_only_offline_steering_actuator)
+    assert_topic_contract steering_feedback "${PRIVATE_ROOT}/input/steering_status" 1 \
+        test_only_offline_steering_actuator test_only_offline_pure_pursuit \
+        "${recorder_name}"
+fi
 assert_topic_contract final_control "${final_topic}" 1 \
-    test_only_offline_hybrid_control_mux "${recorder_name}"
+    test_only_offline_hybrid_control_mux "${final_control_subscribers[@]}"
 
 play_command=(ros2 bag play "${SOURCE_BAG}" --topics)
 play_command+=("${SOURCE_PLAY_TOPICS[@]}")

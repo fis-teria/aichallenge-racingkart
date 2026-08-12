@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from dataclasses import dataclass, field
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,9 @@ COMMAND_EPSILON = 1.0e-5
 MAX_STEERING_RAD = 0.64
 MAX_FINAL_SPEED_MPS = 2.0
 DIAGNOSTIC_COUNTER_MAX = (1 << 32) - 1
+LATEST_SAMPLE_SELECTOR_RULE = "first_invalid_zero_envelope_after_invalid_v4"
+SELECTOR_CANDIDATE_CAPACITY = 8
+CAPTURE_CLOSE_QUIET_SEC = 0.10
 
 
 def _validate_private_root(root: str) -> bool:
@@ -288,6 +292,17 @@ class Stage2Evidence:
     mux_selected_input_stamp: tuple[int, int] | None = None
     mux_output_stamp: tuple[int, int] | None = None
     invalid_envelope_at: float | None = None
+    invalid_envelope_identity: tuple[int, int, int, int] | None = None
+    selector_eligible_candidates: list[dict[str, Any]] = field(default_factory=list)
+    selector_eligible_candidate_count: int = 0
+    selector_eligible_candidate_observation_count: int = 0
+    selector_candidate_overflow: bool = False
+    selector_candidate_duplicate_conflict: bool = False
+    selector_candidate_window_opened_at: float | None = None
+    selector_candidate_window_closed: bool = False
+    selector_capture_close_marker_observed: bool = False
+    target_published_after_arm: bool = False
+    race_armed_at: float | None = None
     invalid_pp_stamp: tuple[int, int] | None = None
     invalid_matched_pp_at: float | None = None
     zero_pp_command_at: float | None = None
@@ -443,14 +458,277 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+def _canonical_json_sha256(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _selector_candidate_payload_sha256(message: object) -> str:
+    command = message.command
+    payload = {
+        "identity": [
+            int(message.producer_instance_id),
+            int(message.command_sequence),
+            int(message.header.stamp.sec) * 1_000_000_000
+            + int(message.header.stamp.nanosec),
+            int(message.plan_generation),
+        ],
+        "command_stamp_ns": int(command.stamp.sec) * 1_000_000_000
+        + int(command.stamp.nanosec),
+        "speed_mps": float(command.longitudinal.speed),
+        "acceleration_mps2": float(command.longitudinal.acceleration),
+        "steering_rad": float(command.lateral.steering_tire_angle),
+        "trajectory_tracking_usable": bool(message.trajectory_tracking_usable),
+        "pp_command_fresh": bool(message.pp_command_fresh),
+        "reason": str(message.reason),
+    }
+    return _canonical_json_sha256(payload)
+
+
+def _capture_close_ready(
+    *, marker_observed_at: float | None, last_envelope_at: float | None, now_sec: float
+) -> bool:
+    """Require a bounded post-marker quiet drain before sealing evidence."""
+    if marker_observed_at is None:
+        return False
+    last_activity_at = max(
+        marker_observed_at,
+        last_envelope_at if last_envelope_at is not None else marker_observed_at,
+    )
+    return now_sec - last_activity_at >= CAPTURE_CLOSE_QUIET_SEC
+
+
+def _first_valid_marker_observed_at(
+    current: float | None, *, marker_valid: bool, now_sec: float
+) -> float | None:
+    """Latch the first valid marker; only PP callbacks reset the quiet drain."""
+    return now_sec if marker_valid and current is None else current
+
+
+def write_latest_sample_selector_manifest(
+    path: Path, private_root: str, capture_epoch_nonce: str, capture_epoch: int = 1
+) -> str:
+    """Save the pre-run PP-only selector rule and return its content digest."""
+    if (
+        not _validate_private_root(private_root)
+        or len(capture_epoch_nonce) < 16
+        or capture_epoch <= 0
+    ):
+        raise ValueError("private Stage-2 root required")
+    payload = {
+        "schema_version": 1,
+        "private_root": private_root,
+        "selector_rule": LATEST_SAMPLE_SELECTOR_RULE,
+        "selector_source": "pp_observer",
+        "capture_epoch_nonce": capture_epoch_nonce,
+        "capture_epoch": capture_epoch,
+        # The runner cannot prove the installed Mux source hash before launch.
+        # Leave this empty and keep the final workflow verdict HOLD.
+        "expected_source_hashes": {},
+    }
+    _write_json_atomic(path, payload)
+    return _canonical_json_sha256(payload)
+
+
+def _continuous_ordinals(records: list[list[Any]] | tuple[tuple[Any, ...], ...]) -> bool:
+    try:
+        return all(
+            isinstance(record, (list, tuple)) and len(record) >= 1
+            for record in records
+        ) and all(
+            int(current[0]) == int(previous[0]) + 1
+            for previous, current in zip(records, records[1:])
+        ) and (not records or int(records[0][0]) == 1)
+    except (IndexError, TypeError, ValueError):
+        return False
+
+
+def _optional_identity(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, (list, tuple))
+        and len(value) == 4
+        and all(isinstance(element, int) and not isinstance(element, bool) for element in value)
+    )
+
+
+def classify_latest_sample_capture(
+    *, selector_manifest: dict[str, Any], mux_capture: dict[str, Any], pp_result: dict[str, Any]
+) -> str:
+    """Classify a sealed target-agnostic Mux trace without granting authority."""
+    if (
+        selector_manifest.get("schema_version") != 1
+        or selector_manifest.get("selector_rule") != LATEST_SAMPLE_SELECTOR_RULE
+        or selector_manifest.get("selector_source") != "pp_observer"
+        or mux_capture.get("latest_sample_schema_version") != 1
+        or mux_capture.get("latest_sample_observability_enabled") is not True
+    ):
+        return "INDETERMINATE_TRACE_LOSS"
+    capture = mux_capture.get("latest_sample_capture")
+    evidence = pp_result.get("evidence")
+    if not isinstance(capture, dict) or not isinstance(evidence, dict):
+        return "INDETERMINATE_TRACE_LOSS"
+    candidates = evidence.get("selector_eligible_candidates")
+    callbacks = mux_capture.get("latest_sample_callback_records")
+    cycles = mux_capture.get("latest_sample_cycle_records")
+    loss = any(
+        mux_capture.get(field) is True
+        for field in ("overflow", "callback_overflow", "cycle_overflow")
+    ) or int(mux_capture.get("measurement_faults", 0)) != 0
+    if (
+        not capture.get("closed")
+        or not mux_capture.get("sealed")
+        or capture.get("late_entry")
+        or not capture.get("selector_manifest_sha256")
+        or selector_manifest.get("private_root") != pp_result.get("private_root")
+        or selector_manifest.get("capture_epoch_nonce") != pp_result.get("capture_epoch_nonce")
+        or selector_manifest.get("capture_epoch_nonce") != capture.get("capture_epoch_nonce")
+        or selector_manifest.get("capture_epoch") != capture.get("epoch")
+        or selector_manifest.get("capture_epoch") != capture.get("expected_capture_epoch")
+        or not evidence.get("selector_candidate_window_closed")
+        or not evidence.get("selector_capture_close_marker_observed")
+        or not isinstance(evidence.get("selector_candidate_window_opened_at"), (int, float))
+        or not evidence.get("target_published_after_arm")
+        or evidence.get("selector_candidate_overflow")
+        or evidence.get("selector_candidate_duplicate_conflict")
+        or evidence.get("selector_eligible_candidate_count") != 1
+        or not isinstance(candidates, list)
+        or len(candidates) != 1
+        or not isinstance(callbacks, list)
+        or not isinstance(cycles, list)
+        or loss
+        or not _continuous_ordinals(callbacks)
+        or not _continuous_ordinals(cycles)
+    ):
+        return "INDETERMINATE_TRACE_LOSS"
+    if any(len(record) < 10 for record in callbacks) or any(
+        len(record) < 4 for record in cycles
+    ):
+        return "INDETERMINATE_TRACE_LOSS"
+    if any(
+        not _optional_identity(record[index])
+        for record in callbacks
+        for index in (2, 6, 7)
+    ) or any(not _optional_identity(record[3]) for record in cycles):
+        return "INDETERMINATE_TRACE_LOSS"
+    candidate = candidates[0]
+    target = candidate.get("identity") if isinstance(candidate, dict) else None
+    if (
+        not isinstance(target, list)
+        or len(target) != 4
+        or not all(isinstance(value, int) and not isinstance(value, bool) for value in target)
+        or not isinstance(candidate.get("payload_sha256"), str)
+        or len(candidate["payload_sha256"]) != 64
+        or candidate.get("published_after_arm") is not True
+    ):
+        return "INDETERMINATE_TRACE_LOSS"
+    target_identity = tuple(target)
+    if any(
+        tuple(record[2] or ()) == target_identity
+        and (record[5] == "duplicate_conflict" or record[4] == "duplicate_conflict")
+        for record in callbacks
+    ):
+        return "INDETERMINATE_TRACE_LOSS"
+    target_record = next(
+        (record for record in callbacks if tuple(record[2] or ()) == target_identity), None
+    )
+    target_admitted = bool(
+        target_record is not None
+        and target_record[5] == "inserted"
+        and tuple(target_record[7] or ()) == target_identity
+    )
+    if target_admitted and any(tuple(record[3] or ()) == target_identity for record in cycles):
+        return "RECEIVED_AND_EVALUATED"
+    if target_admitted:
+        successor = next(
+            (
+                record
+                for record in callbacks
+                if record[8] == "advanced"
+                and tuple(record[6] or ()) == target_identity
+                and tuple(record[7] or ()) != target_identity
+                and tuple(record[7] or ())[0] == target_identity[0]
+                and tuple(record[7] or ())[3] == target_identity[3]
+                and tuple(record[7] or ())[1] > target_identity[1]
+            ),
+            None,
+        )
+        if successor is not None and any(
+            tuple(record[3] or ()) == tuple(successor[7]) for record in cycles
+        ):
+            return "RECEIVED_AND_SUPERSEDED"
+        return "NONQUALIFYING"
+    successor = next(
+        (
+            record
+            for record in callbacks
+            if record[2] is not None
+            and tuple(record[2])[0] == target_identity[0]
+            and tuple(record[2])[3] == target_identity[3]
+            and tuple(record[2])[1] > target_identity[1]
+        ),
+        None,
+    )
+    if successor is not None and any(
+        tuple(record[3] or ()) == tuple(successor[2]) for record in cycles
+    ):
+        return "NOT_OBSERVED_IN_COMPLETE_MUX_TRACE"
+    return "NONQUALIFYING"
+
+
+def classify_latest_sample_artifacts(
+    *, selector_manifest_path: Path, mux_capture_path: Path, pp_result_path: Path
+) -> dict[str, Any]:
+    """Hash-bind immutable inputs before applying the fail-closed classifier."""
+    try:
+        selector_manifest = json.loads(selector_manifest_path.read_text(encoding="utf-8"))
+        mux_capture = json.loads(mux_capture_path.read_text(encoding="utf-8"))
+        pp_result = json.loads(pp_result_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"schema_version": 1, "terminal": "INDETERMINATE_TRACE_LOSS"}
+    manifest_sha256 = _canonical_json_sha256(selector_manifest)
+    mux_capture_sha256 = hashlib.sha256(mux_capture_path.read_bytes()).hexdigest()
+    pp_result_sha256 = hashlib.sha256(pp_result_path.read_bytes()).hexdigest()
+    capture = mux_capture.get("latest_sample_capture")
+    bound = isinstance(capture, dict) and (
+        capture.get("selector_manifest_sha256") == manifest_sha256
+    )
+    terminal = (
+        classify_latest_sample_capture(
+            selector_manifest=selector_manifest,
+            mux_capture=mux_capture,
+            pp_result=pp_result,
+        )
+        if bound
+        else "INDETERMINATE_TRACE_LOSS"
+    )
+    if not selector_manifest.get("expected_source_hashes"):
+        terminal = "HOLD_SOURCE_HASH_UNBOUND"
+    return {
+        "schema_version": 1,
+        "terminal": terminal,
+        "selector_manifest_sha256": manifest_sha256,
+        "mux_capture_sha256": mux_capture_sha256,
+        "pp_result_sha256": pp_result_sha256,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--private-root", required=True)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--ready", type=Path)
+    parser.add_argument("--capture-epoch-nonce", required=True)
+    parser.add_argument("--capture-close-marker", type=Path, required=True)
     args = parser.parse_args()
-    if not (_validate_private_root(args.private_root) and 3.0 <= args.timeout <= 30.0):
+    if not (
+        _validate_private_root(args.private_root)
+        and 3.0 <= args.timeout <= 30.0
+        and len(args.capture_epoch_nonce) >= 16
+    ):
         parser.error("bounded private Stage-2 observer configuration required")
 
     import rclpy
@@ -459,7 +737,7 @@ def main() -> int:
     from multi_purpose_mpc_ros_msgs.msg import ControllerCommandEnvelope
     from nav_msgs.msg import Odometry
     from rclpy.node import Node
-    from std_msgs.msg import Float32MultiArray, String
+    from std_msgs.msg import Bool, Float32MultiArray, String
 
     rclpy.init(args=None)
     node = Node("aic_test_v4_pp_mux_observer")
@@ -626,6 +904,7 @@ def main() -> int:
         elif evidence.positive_complete() and evidence.invalid_v4_at is None:
             evidence.invalid_v4_at = observed
             evidence.invalid_v4_first_at = observed
+            evidence.selector_candidate_window_opened_at = observed
         if not _valid_v4_payload(list(message.data)):
             _record_bounded_counter(evidence, "invalid_v4_count")
             evidence.invalid_v4_last_at = observed
@@ -693,7 +972,9 @@ def main() -> int:
                 complete_invalid_chain()
 
     def on_envelope(message: ControllerCommandEnvelope) -> None:
+        nonlocal last_envelope_at
         observed = now()
+        last_envelope_at = observed
         command = message.command
         speed = float(command.longitudinal.speed)
         steer = float(command.lateral.steering_tire_angle)
@@ -706,6 +987,55 @@ def main() -> int:
             and abs(pp_steer - steer) <= COMMAND_EPSILON
         ]
         matching_pp = bool(matching_pp_times)
+        if (
+            evidence.invalid_v4_at is not None
+            and observed >= evidence.invalid_v4_at
+            and matching_pp
+            and not bool(message.trajectory_tracking_usable)
+            and _zero_command(command)
+        ):
+            identity = [
+                int(message.producer_instance_id),
+                int(message.command_sequence),
+                int(message.header.stamp.sec) * 1_000_000_000
+                + int(message.header.stamp.nanosec),
+                int(message.plan_generation),
+            ]
+            payload_sha256 = _selector_candidate_payload_sha256(message)
+            evidence.selector_eligible_candidate_observation_count = _saturating_increment(
+                evidence.selector_eligible_candidate_observation_count
+            )
+            existing = next(
+                (
+                    candidate
+                    for candidate in evidence.selector_eligible_candidates
+                    if candidate["identity"] == identity
+                ),
+                None,
+            )
+            if existing is not None:
+                evidence.selector_candidate_duplicate_conflict |= (
+                    existing["payload_sha256"] != payload_sha256
+                )
+            elif len(evidence.selector_eligible_candidates) >= SELECTOR_CANDIDATE_CAPACITY:
+                evidence.selector_candidate_overflow = True
+            else:
+                evidence.selector_eligible_candidate_count = _saturating_increment(
+                    evidence.selector_eligible_candidate_count
+                )
+                evidence.selector_eligible_candidates.append(
+                    {
+                        "identity": identity,
+                        "payload_sha256": payload_sha256,
+                        "published_after_arm": bool(
+                            evidence.race_armed_at is not None
+                            and observed >= evidence.race_armed_at
+                        ),
+                    }
+                )
+                evidence.target_published_after_arm |= evidence.selector_eligible_candidates[-1][
+                    "published_after_arm"
+                ]
         if (
             evidence.valid_v4_at is not None
             and matching_pp
@@ -730,6 +1060,13 @@ def main() -> int:
             )
         ):
             evidence.invalid_envelope_at = observed
+            evidence.invalid_envelope_identity = (
+                int(message.producer_instance_id),
+                int(message.command_sequence),
+                int(message.header.stamp.sec) * 1_000_000_000
+                + int(message.header.stamp.nanosec),
+                int(message.plan_generation),
+            )
             evidence.invalid_pp_stamp = stamp
             evidence.invalid_matched_pp_at = max(matching_pp_times)
             evidence.zero_pp_command_at = evidence.invalid_matched_pp_at
@@ -917,6 +1254,10 @@ def main() -> int:
         del message
         evidence.private_trajectory_last_at = now()
 
+    def on_race_armed(message: Bool) -> None:
+        if bool(message.data) and evidence.race_armed_at is None:
+            evidence.race_armed_at = now()
+
     # This observer deliberately owns no publishers; the driver is the sole
     # test authority publisher in this graph.
     subscriptions = (
@@ -936,6 +1277,7 @@ def main() -> int:
         node.create_subscription(String, f"{root}/mux/debug", on_mux_debug, 10),
         node.create_subscription(Odometry, f"{root}/input/kinematics", on_private_odom, 10),
         node.create_subscription(Trajectory, f"{root}/input/trajectory", on_private_trajectory, 10),
+        node.create_subscription(Bool, f"{root}/input/race_armed", on_race_armed, 10),
         node.create_subscription(
             AckermannControlCommand,
             f"{root}/output/control_cmd",
@@ -952,14 +1294,45 @@ def main() -> int:
         )
 
     deadline = time.monotonic() + args.timeout
+    close_marker_seen = False
+    close_marker_observed_at: float | None = None
+    last_envelope_at: float | None = None
+    close_barrier_complete = False
     try:
         while (
             rclpy.ok()
             and time.monotonic() < deadline
-            and evidence.verdict() != "PASS"
         ):
             rclpy.spin_once(node, timeout_sec=0.05)
+            if _capture_close_ready(
+                marker_observed_at=close_marker_observed_at,
+                last_envelope_at=last_envelope_at,
+                now_sec=now(),
+            ):
+                close_barrier_complete = True
+                break
+            if not close_marker_seen and args.capture_close_marker.is_file():
+                try:
+                    close_marker = json.loads(
+                        args.capture_close_marker.read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError, TypeError):
+                    continue
+                close_marker_seen = bool(
+                    close_marker.get("schema_version") == 1
+                    and close_marker.get("private_root") == root
+                    and close_marker.get("capture_epoch_nonce")
+                    == args.capture_epoch_nonce
+                    and close_marker.get("driver_complete") is True
+                )
+                close_marker_observed_at = _first_valid_marker_observed_at(
+                    close_marker_observed_at,
+                    marker_valid=close_marker_seen,
+                    now_sec=now(),
+                )
     finally:
+        evidence.selector_capture_close_marker_observed = close_marker_seen
+        evidence.selector_candidate_window_closed = close_barrier_complete
         base_fresh = bool(evidence.base_fresh_at_first_pp_zero)
         evidence.post_invalid_no_callback = bool(
             evidence.invalid_v4_at is not None
@@ -969,6 +1342,7 @@ def main() -> int:
             "schema_version": 1,
             "verdict": evidence.verdict(),
             "private_root": root,
+            "capture_epoch_nonce": args.capture_epoch_nonce,
             "causal_window_sec": CAUSAL_WINDOW_S,
             "observer_authority_publisher_count": 0,
             "evidence": {

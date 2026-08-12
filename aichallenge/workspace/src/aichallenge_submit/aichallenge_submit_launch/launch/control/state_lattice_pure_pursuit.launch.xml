@@ -21,6 +21,7 @@
   <arg name="state_lattice_v2_pp_producer_instance_id" default=""/>
   <arg name="state_lattice_v2_session_id" default=""/>
   <arg name="state_lattice_v4_poc_command_activation_enabled" default="false"/>
+  <arg name="state_lattice_v4_poc_identity_gate_enabled" default="false"/>
   <!-- Shadow-only observation needs valid worker sessions. These values are
        passed only to the primary PP and State Lattice workers below; recovery
        PP remains explicitly unconfigured in the shared horizon launch. -->
@@ -69,17 +70,18 @@
       <arg name="free_run_live_exact_observe_enabled" value="$(var free_run_live_exact_observe_enabled)"/>
       <arg name="free_run_live_exact_pre_ack_hold_enabled" value="$(var free_run_live_exact_pre_ack_hold_enabled)"/>
       <arg name="pp_core_exact_snapshot_enabled" value="$(var pp_core_exact_snapshot_enabled)"/>
-      <!-- Stage1 uses V4 as the only live trajectory payload. V2 proposal,
-           acceptance, and direct command activation remain disabled. -->
-      <arg name="state_lattice_v2_live_proposal_publish_enabled" value="false"/>
-      <arg name="state_lattice_v2_live_proposal_accept_enabled" value="false"/>
+      <!-- V4 remains the command authority. V2 carries only the exact,
+           same-generation Cartesian geometry; direct V2 authority is off. -->
+      <arg name="state_lattice_v2_live_proposal_publish_enabled" value="$(var state_lattice_v2_live_proposal_publish_enabled)"/>
+      <arg name="state_lattice_v2_live_proposal_accept_enabled" value="$(var state_lattice_v2_live_proposal_accept_enabled)"/>
       <arg name="state_lattice_v2_command_activation_enabled" value="false"/>
-      <arg name="state_lattice_v4_poc_identity_gate_enabled" value="false"/>
+      <arg name="state_lattice_v4_poc_identity_gate_enabled"
+           value="$(eval &quot;'$(var state_lattice_v4_poc_identity_gate_enabled)' == 'true' or ('$(var state_lattice_v2_live_proposal_publish_enabled)' == 'true' and '$(var state_lattice_v2_live_proposal_accept_enabled)' == 'true')&quot;)"/>
       <arg name="state_lattice_v4_poc_command_activation_enabled" value="$(var state_lattice_v4_poc_command_activation_enabled)"/>
-      <!-- The V4 AWSIM PoC has no State-Lattice-owned typed plan/constraint
-           producer yet. Keep the Mux safety-constraint machinery enabled but
-           optional; watchdog, stale, race-arm, E-stop and clamps remain live. -->
-      <arg name="require_safety_constraint" value="false"/>
+      <!-- This dedicated route must never fall back to unconstrained primary
+           Pure Pursuit. V2 transport remains independently optional; V4
+           execution always requires the State-Lattice Plan/Constraint. -->
+      <arg name="require_safety_constraint" value="true"/>
       <arg name="state_lattice_v2_producer_instance_id" value="4101"/>
       <arg name="state_lattice_v2_pp_producer_instance_id" value="4201"/>
       <arg name="state_lattice_v2_session_id" value="1"/>

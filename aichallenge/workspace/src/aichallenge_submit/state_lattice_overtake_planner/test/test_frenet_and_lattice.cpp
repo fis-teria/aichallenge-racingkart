@@ -23,6 +23,28 @@
 
 namespace sl = state_lattice_overtake_planner;
 
+namespace state_lattice_overtake_planner {
+struct StateLatticeTestAccess {
+  static std::optional<CandidateTrajectory> movingTargetFollowCandidate(
+      const LatticePlanner &planner, const EgoState &ego,
+      const OpponentState &target,
+      const std::vector<OpponentState> &opponents) {
+    return planner.movingTargetFollowCandidate(ego, target, opponents);
+  }
+
+  static bool outputHorizon(
+      const LatticePlanner &planner, const EgoState &ego,
+      const CandidateTrajectory &candidate,
+      const std::vector<OpponentState> &opponents, double target_speed,
+      std::vector<double> *d, std::vector<double> *speed,
+      std::vector<double> *longitudinal_offsets_m,
+      OutputHorizonDiagnostic *diagnostic) {
+    return planner.outputHorizon(ego, candidate, opponents, target_speed, d,
+                                 speed, longitudinal_offsets_m, diagnostic);
+  }
+};
+} // namespace state_lattice_overtake_planner
+
 namespace {
 sl::FrenetFrame squareFrame() {
   sl::FrenetFrame frame;
@@ -266,6 +288,41 @@ TEST(FrenetFrame, ProjectsContinuouslyAndUnwrapsLoopBoundary) {
   ASSERT_TRUE(near_lap.valid);
   EXPECT_GT(near_lap.s, 39.0);
   EXPECT_NEAR(frame.wrapS(near_lap.s), 39.5, 0.6);
+  const auto unique_near_lap =
+      frame.projectContinuousUnique(0.0, 0.5, -M_PI_2, 39.5, 2.0);
+  ASSERT_TRUE(unique_near_lap.valid);
+  EXPECT_NEAR(unique_near_lap.s, near_lap.s, 1.0e-9);
+}
+
+TEST(FrenetFrame, UniqueContinuousProjectionRejectsDistinctEqualCandidates) {
+  sl::FrenetFrame frame;
+  std::string error;
+  const double diagonal = std::sqrt(8.0);
+  ASSERT_TRUE(frame.setReference(
+      {{0.0, 0.0, M_PI_4, 0.0, 0.0, 1.0},
+       {2.0, 2.0, M_PI, diagonal, 0.0, 1.0},
+       {0.0, 2.0, -M_PI_4, diagonal + 2.0, 0.0, 1.0},
+       {2.0, 0.0, M_PI, 2.0 * diagonal + 2.0, 0.0, 1.0}},
+      &error)) << error;
+
+  const double expected_s = diagonal + 1.0;
+  const auto legacy =
+      frame.projectContinuous(1.0, 1.0, 0.0, expected_s, 5.0);
+  ASSERT_TRUE(legacy.valid);
+  const auto unique =
+      frame.projectContinuousUnique(1.0, 1.0, 0.0, expected_s, 5.0);
+  EXPECT_FALSE(unique.valid);
+}
+
+TEST(FrenetFrame, UniqueContinuousProjectionKeepsInclusiveTwoMetreWindow) {
+  const auto frame = squareFrame();
+  const auto boundary =
+      frame.projectContinuousUnique(4.0, 1.0, 0.0, 2.0, 2.0);
+  ASSERT_TRUE(boundary.valid);
+  EXPECT_NEAR(boundary.s, 4.0, 1.0e-9);
+  const auto outside =
+      frame.projectContinuousUnique(4.01, 1.0, 0.0, 2.0, 2.0);
+  EXPECT_FALSE(outside.valid);
 }
 
 TEST(FrenetFrame, BoundedContinuousProjectionMatchesLegacyExhaustiveSearch) {
@@ -324,14 +381,23 @@ TEST(FrenetFrame,
             frame, x, y, point.yaw, expected_s, 2.0);
         const auto actual =
             frame.projectContinuous(x, y, point.yaw, expected_s, 2.0);
+        const auto unique =
+            frame.projectContinuousUnique(x, y, point.yaw, expected_s, 2.0);
         ASSERT_EQ(actual.valid, expected.valid)
             << "reference_s=" << point.s << " lap_offset=" << lap_offset
             << " lateral_offset=" << lateral_offset;
         ASSERT_TRUE(expected.valid);
+        ASSERT_TRUE(unique.valid)
+            << "reference_s=" << point.s << " lap_offset=" << lap_offset
+            << " lateral_offset=" << lateral_offset;
         EXPECT_EQ(actual.segment_index, expected.segment_index);
         EXPECT_DOUBLE_EQ(actual.s, expected.s);
         EXPECT_DOUBLE_EQ(actual.d, expected.d);
         EXPECT_DOUBLE_EQ(actual.yaw_error, expected.yaw_error);
+        EXPECT_EQ(unique.segment_index, actual.segment_index);
+        EXPECT_DOUBLE_EQ(unique.s, actual.s);
+        EXPECT_DOUBLE_EQ(unique.d, actual.d);
+        EXPECT_DOUBLE_EQ(unique.yaw_error, actual.yaw_error);
       }
     }
   }
@@ -664,6 +730,81 @@ TEST(LatticePlanner, DistinctOutputFrameEncodesAndValidatesControllerOffsets) {
   EXPECT_TRUE(std::all_of(output.lateral_offsets_m.begin(),
                           output.lateral_offsets_m.end(),
                           [](double value) { return std::isfinite(value); }));
+}
+
+TEST(LatticePlanner, TwoFrameContinuousProjectionRejectsBackwardMapping) {
+  sl::PlannerConfig config;
+  config.experimental_exact_spatial_follow_shadow_enabled = true;
+  auto planning_frame = shiftedStraightFrame(1.0);
+  auto output_frame = shiftedStraightFrame(0.0);
+  auto map = openGrid(config);
+  ASSERT_TRUE(map.buildReferenceLayer(planning_frame, config));
+
+  auto ego = sideRoleEgo(planning_frame, 5.0, 0.0, 1.0, 10.0);
+  sl::CandidateTrajectory candidate;
+  for (int index = 0; index < 4; ++index) {
+    sl::TrajectoryPoint point;
+    point.x = ego.x - static_cast<double>(index);
+    point.y = ego.y;
+    point.yaw = M_PI;
+    point.speed_mps = 1.0;
+    point.kappa = 0.0;
+    candidate.dense.push_back(point);
+  }
+
+  sl::LatticePlanner planner(config, &planning_frame, &map, &output_frame);
+  std::vector<double> d;
+  std::vector<double> speed;
+  std::vector<double> longitudinal_offsets_m;
+  sl::OutputHorizonDiagnostic diagnostic;
+  EXPECT_FALSE(sl::StateLatticeTestAccess::outputHorizon(
+      planner, ego, candidate, {}, 1.0, &d, &speed,
+      &longitudinal_offsets_m, &diagnostic));
+  EXPECT_EQ(diagnostic.failure, sl::OutputHorizonFailure::INVALID_INPUT);
+  EXPECT_EQ(diagnostic.waypoint_index, 1);
+  EXPECT_LT(diagnostic.observed_value, -config.projection_max_backward_m);
+  EXPECT_DOUBLE_EQ(diagnostic.limit_value,
+                   config.projection_max_backward_m);
+}
+
+TEST(LatticePlanner, TwoFrameContinuousProjectionExtendsTerminalOffsetForward) {
+  sl::PlannerConfig config;
+  config.experimental_exact_spatial_follow_shadow_enabled = true;
+  auto planning_frame = shiftedStraightFrame(1.0);
+  auto output_frame = shiftedStraightFrame(0.0);
+  auto map = openGrid(config);
+  ASSERT_TRUE(map.buildReferenceLayer(planning_frame, config));
+
+  auto ego = sideRoleEgo(planning_frame, 5.0, 0.0, 1.0, 10.0);
+  sl::CandidateTrajectory candidate;
+  for (int index = 0; index < 2; ++index) {
+    sl::TrajectoryPoint point;
+    point.x = ego.x + 0.2 * static_cast<double>(index);
+    point.y = ego.y;
+    point.yaw = 0.0;
+    point.speed_mps = 1.0;
+    point.kappa = 0.0;
+    candidate.dense.push_back(point);
+  }
+
+  sl::LatticePlanner planner(config, &planning_frame, &map, &output_frame);
+  std::vector<double> d;
+  std::vector<double> speed;
+  std::vector<double> longitudinal_offsets_m;
+  sl::OutputHorizonDiagnostic diagnostic;
+  EXPECT_TRUE(sl::StateLatticeTestAccess::outputHorizon(
+      planner, ego, candidate, {}, 1.0, &d, &speed,
+      &longitudinal_offsets_m, &diagnostic));
+  EXPECT_EQ(diagnostic.failure, sl::OutputHorizonFailure::NONE);
+  ASSERT_EQ(d.size(), static_cast<std::size_t>(config.horizon_points));
+  ASSERT_EQ(d.size(), longitudinal_offsets_m.size());
+  EXPECT_TRUE(std::all_of(d.begin(), d.end(), [](double value) {
+    return std::abs(value - 1.0) <= 1.0e-6;
+  }));
+  for (std::size_t index = 1U; index < longitudinal_offsets_m.size(); ++index) {
+    EXPECT_GT(longitudinal_offsets_m[index],
+              longitudinal_offsets_m[index - 1U]);
+  }
 }
 
 TEST(FrontDetector, Dev3D1StartPrefersTransitionCorridorOverFrenetGap) {
@@ -2093,6 +2234,7 @@ TEST(LatticePlanner, HighSpeedPreparesAndLowSpeedExecutesSameSafePass) {
       sl::ControllerTrackabilityProfile::PURE_PURSUIT;
   sl::applyResolvedControllerTrackabilityEnvelope(&pp_aligned_config, 0.5236,
                                                   0.35);
+  pp_aligned_config.exact_cartesian_execution_enabled = true;
   config.controller_trackability_profile =
       sl::ControllerTrackabilityProfile::INSTANT;
   sl::applyResolvedControllerTrackabilityEnvelope(&config, 0.5236, 0.35);
@@ -2150,6 +2292,10 @@ TEST(LatticePlanner, HighSpeedPreparesAndLowSpeedExecutesSameSafePass) {
       << pp_aligned_pass.reason << " / "
       << sl::toString(pp_aligned_pass.output_horizon_diagnostic.failure);
   EXPECT_TRUE(pp_aligned_pass.safe_lateral);
+  EXPECT_EQ(pp_aligned_pass.execution_geometry_kind,
+            sl::ExecutionGeometryKind::EXACT_CARTESIAN);
+  EXPECT_EQ(pp_aligned_pass.lateral_offsets_m,
+            std::vector<double>({0.0, 0.0}));
   EXPECT_GT(pp_aligned_pass.feasible_candidates, 0);
   EXPECT_EQ(pp_aligned_pass.output_horizon_diagnostic.failure,
             sl::OutputHorizonFailure::NONE);
@@ -3022,6 +3168,11 @@ TEST(LatticePlanner,
   sl::applyResolvedControllerTrackabilityEnvelope(&config, 0.5236, 0.35);
   config.overtake_permission_profile_enabled = true;
   config.default_overtake_allowed = true;
+  config.front_detection_radius_m = 2.0;
+  config.early_aware_enabled = true;
+  config.early_aware_base_distance_m = 4.0;
+  config.early_aware_min_distance_m = 8.0;
+  config.early_aware_max_distance_m = 30.0;
   config.overtake_permission_lookahead_m = 0.0;
   config.overtake_permission_rules = {
       sl::OvertakePermissionRule{"initial_follow_only", 0.0, 3.0, false}};
@@ -3902,4 +4053,285 @@ TEST(LatticePlanner, UnsafeDebugModeBypassesEnvironmentalSafetyEvaluation) {
                    [](const auto &candidate) {
                      return candidate.rejection_reason == "hard_collision";
                    }));
+}
+
+TEST(LatticePlanner, ExactCartesianRun09SelectsEvaluatedExecutionGeometry) {
+  sl::PlannerConfig config;
+  config.lateral_targets_m = {0.0, 1.0, -1.0, 2.4, -2.4};
+  config.controller_trackability_profile =
+      sl::ControllerTrackabilityProfile::PURE_PURSUIT;
+  config.hard_max_steer_rad = 0.64;
+  config.planner_max_steer_rad = 0.64;
+  config.max_steer_rate_radps = 0.5;
+  config.exact_cartesian_execution_enabled = true;
+  // Isolate the execution-geometry contract from the independently calibrated
+  // production cost-stop boundary (the default run09 cost is 460 vs 380).
+  const std::string share = TEST_MPC_SOURCE_DIR;
+  sl::FrenetFrame frame;
+  std::string error;
+  ASSERT_TRUE(frame.loadCsv(
+      share + "/env/final_ver3/traj_mincurv_manual.csv", &error)) << error;
+  sl::GridMap map;
+  ASSERT_TRUE(map.load(share + "/env/final_ver3/occupancy_grid_map.yaml",
+                       config, &error)) << error;
+  ASSERT_TRUE(map.buildReferenceLayer(frame, config));
+
+  sl::EgoState ego;
+  ego.x = 89633.252;
+  ego.y = 43124.957;
+  ego.yaw = 2.264;
+  ego.speed_mps = 0.0;
+  ego.stamp_sec = 3.25;
+  ego.frenet = frame.project(ego.x, ego.y, ego.yaw);
+  ego.curvature = frame.interpolate(ego.frenet.s).kappa;
+  ego.valid = ego.frenet.valid;
+  ASSERT_TRUE(ego.valid);
+  const auto opponent = [&](const char *id, double x, double y) {
+    sl::OpponentState value;
+    value.id = id;
+    value.x = x;
+    value.y = y;
+    value.frenet = frame.project(x, y, 0.0);
+    value.yaw = frame.interpolate(value.frenet.s).yaw;
+    value.frenet = frame.project(x, y, value.yaw);
+    value.stamp_sec = ego.stamp_sec;
+    value.uncertainty_x_m = 0.15;
+    value.uncertainty_y_m = 0.15;
+    value.valid = value.frenet.valid;
+    return value;
+  };
+  const std::vector<sl::OpponentState> opponents{
+      opponent("d2", 89628.9140625, 43131.0),
+      opponent("d3", 89624.7265625, 43137.74609375),
+      opponent("d4", 89620.234375, 43144.671875)};
+
+  sl::LatticePlanner planner(config, &frame, &map);
+  const auto output = planner.update(ego, opponents, true, ego.stamp_sec);
+  int feasible_total = std::numeric_limits<int>::max();
+  int feasible_reference = -1;
+  int feasible_wall = -1;
+  int feasible_object = -1;
+  for (const auto &candidate : planner.candidates()) {
+    if (candidate.feasible && candidate.total_cost < feasible_total) {
+      feasible_total = candidate.total_cost;
+      feasible_reference = candidate.reference_cost;
+      feasible_wall = candidate.wall_cost;
+      feasible_object = candidate.object_cost;
+    }
+  }
+  ASSERT_TRUE(planner.selected().has_value())
+      << output.reason << " failure="
+      << static_cast<int>(output.output_horizon_diagnostic.failure)
+      << " waypoint=" << output.output_horizon_diagnostic.waypoint_index
+      << " cost=" << feasible_total << " ref=" << feasible_reference
+      << " wall=" << feasible_wall << " object=" << feasible_object
+      << " stop=" << config.stop_cost;
+  EXPECT_TRUE(output.active);
+  EXPECT_TRUE(output.safe_lateral);
+  EXPECT_FALSE(output.emergency_stop);
+  EXPECT_EQ(output.execution_geometry_kind,
+            sl::ExecutionGeometryKind::EXACT_CARTESIAN);
+  ASSERT_EQ(output.lateral_offsets_m.size(), 2U);
+  EXPECT_EQ(output.lateral_offsets_m, std::vector<double>({0.0, 0.0}));
+  ASSERT_EQ(output.longitudinal_offsets_m.size(), 2U);
+  EXPECT_DOUBLE_EQ(output.longitudinal_offsets_m.front(), 0.0);
+  EXPECT_GT(output.longitudinal_offsets_m.back(), 0.0);
+  EXPECT_TRUE(planner.selected()->feasible);
+  EXPECT_LT(planner.selected()->safety_cost, config.stop_cost);
+  EXPECT_GE(planner.selected()->total_cost, config.stop_cost);
+}
+
+TEST(LatticePlanner, RealMapExactOvertakeFixtureSelectsCartesianExecution) {
+  sl::PlannerConfig config;
+  config.lateral_targets_m = {0.0, 1.0, -1.0, 2.4, -2.4};
+  config.controller_trackability_profile =
+      sl::ControllerTrackabilityProfile::PURE_PURSUIT;
+  sl::applyResolvedControllerTrackabilityEnvelope(&config, 0.5236, 0.35);
+  config.exact_cartesian_execution_enabled = true;
+  config.overtake_permission_profile_enabled = false;
+  config.default_overtake_allowed = true;
+  sl::FrenetFrame frame;
+  sl::FrenetFrame output_frame;
+  std::string error;
+  ASSERT_TRUE(frame.loadCsv(
+      std::string(TEST_STATE_LATTICE_SOURCE_DIR) +
+          "/data/course_centerline.csv",
+      &error)) << error;
+  ASSERT_TRUE(output_frame.loadCsv(
+      std::string(TEST_MPC_SOURCE_DIR) +
+          "/env/final_ver3/traj_mincurv_manual.csv",
+      &error)) << error;
+  sl::GridMap map;
+  ASSERT_TRUE(map.load(
+      std::string(TEST_MPC_SOURCE_DIR) +
+          "/env/final_ver3/occupancy_grid_map.yaml",
+      config, &error)) << error;
+  ASSERT_TRUE(map.buildReferenceLayer(frame, config));
+
+  constexpr std::size_t kReferenceIndex = 25U;
+  constexpr double kOpponentGapM = 7.5;
+  ASSERT_LT(kReferenceIndex, frame.points().size());
+  const double ego_s = frame.points()[kReferenceIndex].s;
+  const auto ego_pose = frame.frenetToCartesian(ego_s, 0.0);
+  const auto opponent_pose =
+      frame.frenetToCartesian(ego_s + kOpponentGapM, 0.0);
+  sl::EgoState ego;
+  ego.x = ego_pose.x;
+  ego.y = ego_pose.y;
+  ego.yaw = ego_pose.yaw;
+  ego.speed_mps = 1.0;
+  ego.stamp_sec = 10.0;
+  ego.frenet = frame.project(ego.x, ego.y, ego.yaw);
+  ego.curvature = frame.interpolate(ego.frenet.s).kappa;
+  ego.valid = ego.frenet.valid;
+  ASSERT_TRUE(ego.valid);
+  sl::OpponentState opponent;
+  opponent.id = "d2";
+  opponent.x = opponent_pose.x;
+  opponent.y = opponent_pose.y;
+  opponent.yaw = opponent_pose.yaw;
+  opponent.stamp_sec = ego.stamp_sec;
+  opponent.uncertainty_x_m = 0.30;
+  opponent.uncertainty_y_m = 0.30;
+  opponent.frenet = frame.project(opponent.x, opponent.y, opponent.yaw);
+  opponent.valid = opponent.frenet.valid;
+  ASSERT_TRUE(opponent.valid);
+
+  sl::LatticePlanner planner(config, &frame, &map, &output_frame);
+  const auto output = planner.update(ego, {opponent}, true, ego.stamp_sec);
+  EXPECT_TRUE(output.active) << output.reason;
+  EXPECT_EQ(output.mode, sl::BehaviorMode::OVERTAKE_RIGHT) << output.reason;
+  EXPECT_TRUE(output.safe_lateral);
+  EXPECT_EQ(output.execution_geometry_kind,
+            sl::ExecutionGeometryKind::EXACT_CARTESIAN);
+  ASSERT_TRUE(planner.selected().has_value());
+  EXPECT_TRUE(planner.selected()->feasible);
+  sl::OutputHorizonDiagnostic wire_diagnostic;
+  const auto wire_execution = planner.boundedExactCartesianExecution(
+      planner.selected().value(), {opponent}, 256U, &wire_diagnostic);
+  ASSERT_TRUE(wire_execution.has_value())
+      << sl::toString(wire_diagnostic.failure);
+  EXPECT_LE(wire_execution->dense.size(), 256U);
+  EXPECT_DOUBLE_EQ(wire_execution->dense.front().x,
+                   planner.selected()->dense.front().x);
+  EXPECT_DOUBLE_EQ(wire_execution->dense.back().x,
+                   planner.selected()->dense.back().x);
+}
+
+TEST(LatticePlanner,
+     Runtime10Generation489UsesContinuousTwoFrameProjection) {
+  sl::PlannerConfig config;
+  config.lateral_targets_m = {0.0, 1.0, -1.0, 2.2, -2.2};
+  config.controller_trackability_profile =
+      sl::ControllerTrackabilityProfile::PURE_PURSUIT;
+  sl::applyResolvedControllerTrackabilityEnvelope(&config, 0.5236, 0.35);
+  config.exact_cartesian_execution_enabled = true;
+  config.experimental_exact_spatial_follow_shadow_enabled = true;
+  config.overtake_permission_profile_enabled = false;
+  config.default_overtake_allowed = true;
+  config.front_enter_cycles = 1;
+  config.normal_mode_min_hold_sec = 0.0;
+
+  sl::FrenetFrame planning_frame;
+  sl::FrenetFrame output_frame;
+  std::string error;
+  ASSERT_TRUE(planning_frame.loadCsv(
+      std::string(TEST_STATE_LATTICE_SOURCE_DIR) +
+          "/data/course_centerline.csv",
+      &error)) << error;
+  ASSERT_TRUE(output_frame.loadCsv(
+      std::string(TEST_MPC_SOURCE_DIR) +
+          "/env/final_ver3/traj_mincurv_manual.csv",
+      &error)) << error;
+  sl::GridMap map;
+  ASSERT_TRUE(map.load(
+      std::string(TEST_MPC_SOURCE_DIR) +
+          "/env/final_ver3/occupancy_grid_map.yaml",
+      config, &error)) << error;
+  ASSERT_TRUE(map.buildReferenceLayer(planning_frame, config));
+
+  sl::EgoState ego;
+  ego.x = 89631.4184286478;
+  ego.y = 43127.920105601734;
+  ego.yaw = 2.0829759361539733;
+  ego.speed_mps = 0.22280558130669867;
+  ego.yaw_rate_radps = 0.0005721452037306844;
+  ego.stamp_sec = 30.924999308;
+  ego.frenet = planning_frame.project(ego.x, ego.y, ego.yaw);
+  ego.curvature = planning_frame.interpolate(ego.frenet.s).kappa;
+  ego.valid = ego.frenet.valid;
+  ASSERT_TRUE(ego.valid);
+
+  const auto make_opponent = [&planning_frame, &ego](
+                                 const std::string &id, double x, double y) {
+    sl::OpponentState opponent;
+    opponent.id = id;
+    opponent.x = x;
+    opponent.y = y;
+    const auto projected = planning_frame.project(x, y, ego.yaw);
+    opponent.yaw = projected.valid
+                       ? planning_frame.interpolate(projected.s).yaw
+                       : ego.yaw;
+    opponent.speed_mps = id == "d2" ? 0.20 : 0.0;
+    opponent.vx_mps = opponent.speed_mps * std::cos(opponent.yaw);
+    opponent.vy_mps = opponent.speed_mps * std::sin(opponent.yaw);
+    opponent.stamp_sec = ego.stamp_sec;
+    opponent.uncertainty_x_m = 0.005;
+    opponent.uncertainty_y_m = 0.005;
+    opponent.frenet = projected;
+    opponent.valid = opponent.frenet.valid;
+    return opponent;
+  };
+  const std::vector<sl::OpponentState> opponents = {
+      make_opponent("d2", 89628.9140625, 43131.0),
+      make_opponent("d3", 89624.7265625, 43137.74609375),
+      make_opponent("d4", 89620.234375, 43144.671875),
+  };
+  ASSERT_TRUE(std::all_of(opponents.begin(), opponents.end(),
+                          [](const auto &opponent) {
+                            return opponent.valid;
+                          }));
+
+  sl::LatticePlanner planner(config, &planning_frame, &map, &output_frame);
+  const auto candidates = planner.generateCandidates(ego, opponents);
+  ASSERT_FALSE(candidates.empty());
+  std::optional<sl::CandidateTrajectory> matching_candidate;
+  for (const auto &candidate : candidates) {
+    if (candidate.feasible && std::abs(candidate.goal_d_m + 1.0) <= 1.0e-9 &&
+        std::abs(candidate.tangent_scale - 1.0) <= 1.0e-9) {
+      matching_candidate = candidate;
+      break;
+    }
+  }
+  ASSERT_TRUE(matching_candidate.has_value());
+  std::vector<double> projected_d;
+  std::vector<double> projected_speed;
+  std::vector<double> projected_longitudinal_offsets_m;
+  sl::OutputHorizonDiagnostic projected_diagnostic;
+  EXPECT_TRUE(sl::StateLatticeTestAccess::outputHorizon(
+      planner, ego, matching_candidate.value(), opponents,
+      config.safe_stop_speed_mps, &projected_d, &projected_speed,
+      &projected_longitudinal_offsets_m, &projected_diagnostic))
+      << sl::toString(projected_diagnostic.failure) << " waypoint="
+      << projected_diagnostic.waypoint_index << " observed="
+      << projected_diagnostic.observed_value;
+  EXPECT_EQ(projected_diagnostic.failure, sl::OutputHorizonFailure::NONE);
+  ASSERT_EQ(projected_d.size(),
+            static_cast<std::size_t>(config.horizon_points));
+  ASSERT_EQ(projected_d.size(), projected_longitudinal_offsets_m.size());
+  EXPECT_NEAR(projected_longitudinal_offsets_m.front(), 0.0, 1.0e-9);
+  EXPECT_TRUE(std::is_sorted(projected_longitudinal_offsets_m.begin(),
+                             projected_longitudinal_offsets_m.end()));
+
+  sl::LatticePlanner same_frame_planner(config, &planning_frame, &map,
+                                        &planning_frame);
+  std::vector<double> same_frame_d;
+  std::vector<double> same_frame_speed;
+  std::vector<double> same_frame_longitudinal_offsets_m;
+  sl::OutputHorizonDiagnostic same_frame_diagnostic;
+  EXPECT_TRUE(sl::StateLatticeTestAccess::outputHorizon(
+      same_frame_planner, ego, matching_candidate.value(), opponents,
+      config.safe_stop_speed_mps, &same_frame_d, &same_frame_speed,
+      &same_frame_longitudinal_offsets_m, &same_frame_diagnostic));
+  EXPECT_EQ(same_frame_diagnostic.failure, sl::OutputHorizonFailure::NONE);
 }

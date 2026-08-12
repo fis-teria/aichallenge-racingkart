@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 import hashlib
 import json
 import math
@@ -38,11 +39,1910 @@ from hybrid_control_mux.core import (
     SteeringLimitResult,
 )
 from hybrid_control_mux.hybrid_control_mux_node import (
+    DeliveryGapPlanRelationSubreason,
+    DeliveryGapRevokeReason,
     FreeRunPublishedCommandRecord,
     FreeRunSourceGapLease,
     HybridControlMuxNode,
+    MotionAuthorityDeliveryGapLease,
+    SafetyAuthoritySelection,
     SafetyAuthorityRendezvousState,
+    retain_warmup_proof_in_stop_state,
 )
+
+
+def _install_committed_passing_delivery_gap_lease(
+    mux, *, required_brake_decel_mps2: float = 0.0
+):
+    """Build an immutable committed N cohort and its direct N+1 plan."""
+    _set_mux_ros_time_for_envelope(mux, 10)
+    mux.finish_stop_latch.armed = True
+    mux.finish_stop_latch.epoch = 1
+    previous = _authorized_passing_plan(stamp_sec=10, generation=7)
+    successor = _authorized_passing_plan(stamp_sec=11, generation=8)
+    for plan in (previous, successor):
+        plan.race_arm_epoch = 1
+        plan.planner_instance_id = 41
+        plan.attempt_id = 3
+        plan.target_vehicle_id = "grid_d2"
+        plan.pass_direction = -1
+        plan.connector_transaction_id = 9
+        plan.aw2_identity_schema_version = 1
+        plan.candidate_content_sha256 = [0x5A] * 32
+    previous.candidate_revision = 4
+    successor.candidate_revision = 5
+    mux.on_overtake_plan(previous)
+    previous_identity = mux.overtake_plan_motion_identity_cache[7]
+    constraint = _constraint(
+        stamp_sec=10,
+        constraint_generation=1,
+        plan_generation=7,
+        speed_limit_mps=1.0,
+        stop_requested=False,
+        release_authorized=True,
+    )
+    constraint.required_brake_decel_mps2 = required_brake_decel_mps2
+    envelope = _command_envelope(
+        stamp_sec=10,
+        command_sequence=1,
+        plan_generation=7,
+        plan=previous,
+    )
+    envelope.command.longitudinal.speed = 0.4
+    envelope.command.lateral.steering_tire_angle = -0.1
+    final_command = copy.deepcopy(envelope.command)
+    mux.steering_limiter.reset(-0.1, mux.now_sec(), "pure_pursuit")
+    mux.motion_authority_delivery_gap_lease = MotionAuthorityDeliveryGapLease(
+        plan_generation=7,
+        plan_identity=tuple(previous_identity),
+        constraint=constraint,
+        envelope=envelope,
+        final_command=final_command,
+        acquired_steady_time_sec=mux.now_sec(),
+        constraint_header_stamp_ns=mux._stamp_ns(constraint.header.stamp),
+        constraint_payload_fingerprint=(
+            mux._motion_constraint_payload_fingerprint(
+                mux._coerce_safety_constraint_state(constraint)
+            )
+        ),
+    )
+    mux.on_overtake_plan(successor)
+    return constraint
+
+
+def test_committed_passing_cohort_bridges_only_direct_successor_delivery_gap():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        sample = mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        )
+        assert sample is not None
+        assert sample.authority_proof.plan_generation == 7
+        assert sample.envelope_identity[3] == 7
+        assert sample.command.lateral.steering_tire_angle == pytest.approx(-0.1)
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_rate_limited_commit_replays_only_immutable_limited_final():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        seeded = mux.motion_authority_delivery_gap_lease
+        assert seeded is not None
+        mux.motion_authority_delivery_gap_lease = None
+        mux.motion_authority_delivery_gap_tombstone = None
+
+        limited_final = copy.deepcopy(seeded.final_command)
+        limited_final.lateral.steering_tire_angle = -0.02
+        limiter_result = SteeringLimitResult(
+            raw_steering_rad=-0.1,
+            limited_steering_rad=-0.02,
+            steering_delta_rad=-0.02,
+            angle_limited=False,
+            rate_limited=True,
+            limiter_reset=False,
+        )
+        mux.steering_limiter.reset(
+            -0.02, mux.now_sec(), "pure_pursuit"
+        )
+        mux._commit_motion_authority_delivery_gap_lease(
+            plan_identity=seeded.plan_identity,
+            constraint=seeded.constraint,
+            envelope=seeded.envelope,
+            final_command=limited_final,
+            now_sec=mux.now_sec(),
+            steering_result=limiter_result,
+        )
+        # The synthetic fixture cached N+1 before minting N.  Replay the Plan
+        # callback so the production ordering rule freezes N+1 on the lease.
+        mux.on_overtake_plan(_delivery_gap_successor_plan())
+
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        assert lease.envelope.command.lateral.steering_tire_angle == pytest.approx(
+            -0.1
+        )
+        assert lease.final_command.lateral.steering_tire_angle == pytest.approx(
+            -0.02
+        )
+        assert lease.steering_result == limiter_result
+        # A later tick may advance the process-wide limiter while the
+        # immutable N cohort is still held.  That state belongs to a different
+        # generation and must not revoke the frozen N binding.
+        mux.steering_limiter.reset(
+            0.03, mux.now_sec(), "pure_pursuit"
+        )
+        sample = mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        )
+        assert sample is not None
+        assert sample.command.lateral.steering_tire_angle == pytest.approx(-0.02)
+        assert mux.steering_limiter.last_steering_rad == pytest.approx(0.03)
+        assert mux.motion_authority_delivery_gap_last_revoke is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        ("raw", DeliveryGapRevokeReason.COMMITTED_STEERING_BINDING_INVALID),
+        ("limited", DeliveryGapRevokeReason.COMMITTED_STEERING_BINDING_INVALID),
+        ("final", DeliveryGapRevokeReason.COMMITTED_STEERING_BINDING_INVALID),
+    ],
+)
+def test_rate_limited_commit_rejects_mutated_frozen_binding(
+    mutation, expected_reason
+):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        seeded = mux.motion_authority_delivery_gap_lease
+        limited_final = copy.deepcopy(seeded.final_command)
+        limited_final.lateral.steering_tire_angle = -0.02
+        limiter_result = SteeringLimitResult(
+            raw_steering_rad=-0.1,
+            limited_steering_rad=-0.02,
+            steering_delta_rad=-0.02,
+            angle_limited=False,
+            rate_limited=True,
+            limiter_reset=False,
+        )
+        mux.motion_authority_delivery_gap_lease = replace(
+            seeded,
+            final_command=limited_final,
+            steering_result=limiter_result,
+        )
+        lease = mux.motion_authority_delivery_gap_lease
+        if mutation == "raw":
+            lease = replace(
+                lease,
+                steering_result=replace(
+                    lease.steering_result, raw_steering_rad=-0.09
+                ),
+            )
+        elif mutation == "limited":
+            lease = replace(
+                lease,
+                steering_result=replace(
+                    lease.steering_result, limited_steering_rad=-0.03
+                ),
+            )
+        else:
+            changed_final = copy.deepcopy(lease.final_command)
+            changed_final.lateral.steering_tire_angle = -0.03
+            lease = replace(lease, final_command=changed_final)
+        mux.motion_authority_delivery_gap_lease = lease
+
+        assert mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        ) is None
+        assert mux.motion_authority_delivery_gap_last_revoke is not None
+        assert (
+            mux.motion_authority_delivery_gap_last_revoke.reason
+            == expected_reason
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_replay_rejects_intervening_non_n_publish():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        candidate = copy.deepcopy(lease.final_command)
+        mux.last_published_control_command = copy.deepcopy(lease.final_command)
+        mux.last_published_control_source = "stop"
+        mux.steering_limiter.reset(0.03, mux.now_sec(), "stop")
+
+        assert mux._prepare_motion_authority_delivery_gap_replay(
+            command=candidate,
+            source="pure_pursuit",
+            now_sec=mux.now_sec(),
+        ) is None
+        assert mux.steering_limiter.last_steering_rad == pytest.approx(0.03)
+        assert mux.steering_limiter.last_source == "stop"
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_replay_realigns_n_then_n1_respects_selected_rate():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        frozen_n = copy.deepcopy(lease.final_command)
+        frozen_n.lateral.steering_tire_angle = -0.02
+        frozen_result = SteeringLimitResult(
+            raw_steering_rad=-0.1,
+            limited_steering_rad=-0.02,
+            steering_delta_rad=-0.02,
+            angle_limited=False,
+            rate_limited=True,
+            limiter_reset=False,
+        )
+        mux.motion_authority_delivery_gap_lease = replace(
+            lease,
+            final_command=copy.deepcopy(frozen_n),
+            steering_result=frozen_result,
+        )
+        mux.last_published_control_command = copy.deepcopy(frozen_n)
+        mux.last_published_control_source = "pure_pursuit"
+        mux.steering_limiter.reset(0.03, mux.now_sec(), "pure_pursuit")
+
+        replay = mux._prepare_motion_authority_delivery_gap_replay(
+            command=frozen_n,
+            source="pure_pursuit",
+            now_sec=mux.now_sec(),
+        )
+        assert replay is not None
+        assert replay.limited_steering_rad == pytest.approx(-0.02)
+
+        next_command = copy.deepcopy(frozen_n)
+        next_command.lateral.steering_tire_angle = 0.20
+        dt_sec = 0.02
+        next_result = mux._limit_steering(
+            next_command,
+            "pure_pursuit",
+            mux.steering_limiter.last_time_sec + dt_sec,
+        )
+        assert abs(
+            next_result.limited_steering_rad
+            - replay.limited_steering_rad
+        ) <= (
+            mux.steering_limiter.config.max_steering_rate_radps * dt_sec
+            + 1.0e-12
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_committed_passing_delivery_gap_lease_expires_without_refresh():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        original_acquired_steady_time_sec = lease.acquired_steady_time_sec
+        mux._commit_motion_authority_delivery_gap_lease(
+            plan_identity=lease.plan_identity,
+            constraint=lease.constraint,
+            envelope=lease.envelope,
+            final_command=lease.final_command,
+            now_sec=mux.now_sec() + 1.0,
+        )
+        assert (
+            mux.motion_authority_delivery_gap_lease.acquired_steady_time_sec
+            == original_acquired_steady_time_sec
+        )
+        mux.motion_authority_delivery_gap_lease = (
+            MotionAuthorityDeliveryGapLease(
+                plan_generation=lease.plan_generation,
+                plan_identity=lease.plan_identity,
+                constraint=lease.constraint,
+                envelope=lease.envelope,
+                final_command=lease.final_command,
+                acquired_steady_time_sec=mux.now_sec(),
+                gap_started_steady_time_sec=(
+                    mux.now_sec()
+                    - mux._motion_authority_delivery_gap_lease_timeout_sec()
+                    - 1.0e-3
+                ),
+            )
+        )
+        assert mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        ) is None
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_delivery_gap_last_revoke is not None
+        assert (
+            mux.motion_authority_delivery_gap_last_revoke.reason
+            == DeliveryGapRevokeReason.GAP_TIMEOUT
+        )
+        assert (
+            mux.motion_authority_delivery_gap_last_revoke.origin
+            == "timer_preview"
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_revoke_reason_is_first_reason_wins_until_timer_consumes():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        mux._invalidate_motion_authority_delivery_gap_lease(
+            stop_pending=True,
+            reason=DeliveryGapRevokeReason.N1_CONSTRAINT_STAMP_MISMATCH,
+            origin="constraint_callback",
+            observed_generation=8,
+            now_sec=mux.now_sec(),
+        )
+        first = mux.motion_authority_delivery_gap_revoke_pending
+        assert first is not None
+        assert first.reason == DeliveryGapRevokeReason.N1_CONSTRAINT_STAMP_MISMATCH
+        assert first.origin == "constraint_callback"
+        assert first.lease_generation == 7
+        assert first.observed_generation == 8
+
+        # Later symptoms cannot overwrite the callback that first revoked N.
+        mux._invalidate_motion_authority_delivery_gap_lease(
+            stop_pending=True,
+            reason=DeliveryGapRevokeReason.GAP_TIMEOUT,
+            origin="timer_preview",
+            observed_generation=8,
+            now_sec=mux.now_sec() + 1.0,
+        )
+        assert mux.motion_authority_delivery_gap_revoke_pending == first
+        assert mux.motion_authority_delivery_gap_last_revoke == first
+        assert mux.motion_authority_delivery_gap_stop_pending
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        ("invalid", DeliveryGapRevokeReason.N1_CONSTRAINT_INVALID),
+        ("stop", DeliveryGapRevokeReason.N1_CONSTRAINT_STOP_REQUESTED),
+        ("withdraw", DeliveryGapRevokeReason.N1_CONSTRAINT_RELEASE_WITHDRAWN),
+        ("frame", DeliveryGapRevokeReason.N1_CONSTRAINT_FRAME_OR_VALUE_INVALID),
+        ("generation", DeliveryGapRevokeReason.LATEST_CONSTRAINT_GENERATION_UNEXPECTED),
+        ("stamp", DeliveryGapRevokeReason.N1_CONSTRAINT_STAMP_MISMATCH),
+    ],
+)
+def test_delivery_gap_constraint_reason_classifier_is_branch_specific(
+    mutation, expected_reason
+):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = mux._coerce_safety_constraint_state(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+        if mutation == "invalid":
+            constraint = replace(constraint, valid=False)
+        elif mutation == "stop":
+            constraint = replace(constraint, stop_requested=True)
+        elif mutation == "withdraw":
+            constraint = replace(constraint, release_authorized=False)
+        elif mutation == "frame":
+            constraint = replace(constraint, frame_id="base_link")
+        elif mutation == "generation":
+            constraint = replace(constraint, plan_generation=9)
+        elif mutation == "stamp":
+            constraint = replace(
+                constraint, header_stamp_ns=constraint.header_stamp_ns + 1
+            )
+        assert mux._motion_release_constraint_revoke_reason(
+            constraint,
+            receipt_time_sec=mux.now_sec(),
+            now_sec=mux.now_sec(),
+            expected_generation=8,
+            expected_stamp_ns=11_000_000_000,
+        ) == expected_reason
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        ("invalid", DeliveryGapRevokeReason.N1_PLAN_INVALID),
+        ("phase", DeliveryGapRevokeReason.N1_PLAN_PHASE_INVALID),
+        ("unauthorized", DeliveryGapRevokeReason.N1_PLAN_UNAUTHORIZED),
+        ("stamp", DeliveryGapRevokeReason.N1_PLAN_STAMP_NOT_FORWARD),
+        ("identity", DeliveryGapRevokeReason.N1_PLAN_RELATION_INVALID),
+    ],
+)
+def test_delivery_gap_plan_reason_classifier_is_branch_specific(
+    mutation, expected_reason
+):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        successor = _authorized_passing_plan(stamp_sec=11, generation=8)
+        successor.race_arm_epoch = 1
+        successor.planner_instance_id = 41
+        successor.attempt_id = 3
+        successor.target_vehicle_id = "grid_d2"
+        successor.pass_direction = -1
+        successor.connector_transaction_id = 9
+        successor.aw2_identity_schema_version = 1
+        successor.candidate_revision = 5
+        successor.candidate_content_sha256 = [0x5A] * 32
+        if mutation == "phase":
+            successor.phase = OvertakePlan.ATTACK_FOLLOW
+        elif mutation == "unauthorized":
+            successor.trajectory_authorized = False
+        elif mutation == "stamp":
+            _set_stamp(successor.header.stamp, 10)
+        elif mutation == "identity":
+            successor.attempt_id += 1
+        assert mux._delivery_gap_successor_plan_revoke_reason(
+            lease,
+            successor,
+            plan_valid=mutation != "invalid",
+        ) == expected_reason
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def _delivery_gap_direct_successor_plan() -> OvertakePlan:
+    successor = _authorized_passing_plan(stamp_sec=11, generation=8)
+    successor.race_arm_epoch = 1
+    successor.planner_instance_id = 41
+    successor.attempt_id = 3
+    successor.target_vehicle_id = "grid_d2"
+    successor.pass_direction = -1
+    successor.connector_transaction_id = 9
+    successor.aw2_identity_schema_version = 1
+    successor.candidate_revision = 5
+    successor.candidate_content_sha256 = [0x5A] * 32
+    return successor
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_subreason"),
+    [
+        (
+            "identity",
+            DeliveryGapPlanRelationSubreason.IDENTITY_PREFIX_MISMATCH,
+        ),
+        (
+            "constraint_stamp",
+            DeliveryGapPlanRelationSubreason.EXPECTED_CONSTRAINT_STAMP_MISMATCH,
+        ),
+        (
+            "revision",
+            DeliveryGapPlanRelationSubreason.CANDIDATE_REVISION_MISMATCH,
+        ),
+        (
+            "digest",
+            DeliveryGapPlanRelationSubreason.CANDIDATE_CONTENT_DIGEST_MISMATCH,
+        ),
+        (
+            "schema",
+            DeliveryGapPlanRelationSubreason.AW2_IDENTITY_SCHEMA_INVALID,
+        ),
+        (
+            "fingerprint_missing",
+            DeliveryGapPlanRelationSubreason.LATERAL_STOP_FINGERPRINT_MISSING,
+        ),
+        (
+            "fingerprint",
+            DeliveryGapPlanRelationSubreason.LATERAL_STOP_FINGERPRINT_MISMATCH,
+        ),
+    ],
+)
+def test_delivery_gap_plan_relation_subreason_is_branch_specific(
+    mutation, expected_subreason
+):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        successor = _delivery_gap_direct_successor_plan()
+        lease = replace(
+            lease,
+            successor_plan_identity=(
+                int(successor.race_arm_epoch),
+                int(successor.planner_instance_id),
+                int(successor.attempt_id),
+                str(successor.target_vehicle_id),
+                int(successor.pass_direction),
+                int(successor.connector_transaction_id),
+                mux._stamp_ns(successor.header.stamp),
+                int(successor.plan_generation),
+                int(successor.phase),
+                int(successor.candidate_revision),
+                bytes(successor.candidate_content_sha256),
+                True,
+            ),
+            successor_plan_lateral_stop_fingerprint=(
+                mux._overtake_plan_lateral_stop_fingerprint(successor)
+            ),
+        )
+        if mutation == "identity":
+            successor.attempt_id += 1
+        elif mutation == "constraint_stamp":
+            mux.safety_constraint = replace(
+                mux._coerce_safety_constraint_state(constraint),
+                plan_generation=8,
+                header_stamp_ns=mux._stamp_ns(successor.header.stamp) + 1,
+            )
+        elif mutation == "revision":
+            successor.candidate_revision += 1
+        elif mutation == "digest":
+            successor.candidate_content_sha256[0] ^= 0xFF
+        elif mutation == "schema":
+            successor.aw2_identity_schema_version = 2
+        elif mutation == "fingerprint_missing":
+            lease = replace(
+                lease, successor_plan_lateral_stop_fingerprint=None
+            )
+        elif mutation == "fingerprint":
+            successor.trajectory.points[0].pose.position.y += 0.1
+        assert mux._delivery_gap_successor_plan_revoke_reason(
+            lease, successor, plan_valid=True
+        ) == DeliveryGapRevokeReason.N1_PLAN_RELATION_INVALID
+        assert mux._delivery_gap_successor_plan_relation_subreason(
+            lease, successor
+        ) == expected_subreason
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_plan_callback_records_primary_and_subreason_once():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        successor = _delivery_gap_direct_successor_plan()
+        successor.candidate_revision += 1
+        mux.motion_authority_delivery_gap_lease = lease
+        mux.motion_authority_delivery_gap_revoke_pending = None
+        mux.on_overtake_plan(successor)
+        record = mux.motion_authority_delivery_gap_revoke_pending
+        assert record is not None
+        assert record.reason == DeliveryGapRevokeReason.N1_PLAN_RELATION_INVALID
+        assert (
+            record.plan_relation_subreason
+            == DeliveryGapPlanRelationSubreason.CANDIDATE_REVISION_MISMATCH
+        )
+        assert (
+            mux._delivery_gap_plan_relation_subreason_code(
+                record.plan_relation_subreason
+            )
+            == "DG408-S03"
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_new_successor_geometry_holds_n_and_binds_n1_envelope():
+    """A valid replanned N+1 is not an N mutation and cannot renew N."""
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        lease = _prime_committed_delivery_gap_without_successor(mux)
+        acquired_steady_time_sec = lease.acquired_steady_time_sec
+        n_digest = bytes(lease.plan_identity[10])
+
+        successor = _delivery_gap_direct_successor_plan()
+        successor.candidate_content_sha256 = [0x6B] * 32
+        successor.trajectory.points[0].pose.position.y += 0.1
+        mux.on_overtake_plan(successor)
+
+        held = mux.motion_authority_delivery_gap_lease
+        assert held is not None
+        assert held.plan_generation == lease.plan_generation
+        assert bytes(held.plan_identity[10]) == n_digest
+        assert held.acquired_steady_time_sec == acquired_steady_time_sec
+        assert held.gap_started_steady_time_sec == lease.gap_started_steady_time_sec
+        assert held.successor_plan_identity is not None
+        assert bytes(held.successor_plan_identity[10]) == bytes([0x6B] * 32)
+        assert mux.motion_authority_delivery_gap_revoke_pending is None
+
+        envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=2,
+            plan_generation=8,
+            plan=successor,
+        )
+        _set_mux_ros_time_for_envelope(mux, 11)
+        mux.on_pure_pursuit_command_envelope(envelope)
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert mux.motion_authority_delivery_gap_revoke_pending is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_replanned_n1_envelope_must_match_frozen_n1_digest():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _prime_committed_delivery_gap_without_successor(mux)
+        successor = _delivery_gap_direct_successor_plan()
+        successor.candidate_content_sha256 = [0x6B] * 32
+        mux.on_overtake_plan(successor)
+        assert mux.motion_authority_delivery_gap_lease is not None
+
+        mismatched = _command_envelope(
+            stamp_sec=11,
+            command_sequence=2,
+            plan_generation=8,
+            plan=successor,
+        )
+        mismatched.candidate_content_sha256 = [0x7C] * 32
+        _set_mux_ros_time_for_envelope(mux, 11)
+        mux.on_pure_pursuit_command_envelope(mismatched)
+
+        assert mux.motion_authority_delivery_gap_lease is None
+        record = mux.motion_authority_delivery_gap_revoke_pending
+        assert record is not None
+        assert record.reason == DeliveryGapRevokeReason.N1_ENVELOPE_RELATION_INVALID
+        assert mux.motion_authority_delivery_gap_stop_pending
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        ("identity", DeliveryGapRevokeReason.N1_ENVELOPE_IDENTITY_MISMATCH),
+        ("schema", DeliveryGapRevokeReason.N1_ENVELOPE_SCHEMA_INVALID),
+        ("generation", DeliveryGapRevokeReason.N1_ENVELOPE_GENERATION_MISMATCH),
+        ("relation", DeliveryGapRevokeReason.N1_ENVELOPE_RELATION_INVALID),
+        ("unusable", DeliveryGapRevokeReason.N1_ENVELOPE_UNUSABLE_OR_STALE),
+    ],
+)
+def test_delivery_gap_envelope_reason_classifier_is_branch_specific(
+    mutation, expected_reason
+):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        successor = _authorized_passing_plan(stamp_sec=11, generation=8)
+        successor.race_arm_epoch = 1
+        successor.planner_instance_id = 41
+        successor.attempt_id = 3
+        successor.target_vehicle_id = "grid_d2"
+        successor.pass_direction = -1
+        successor.connector_transaction_id = 9
+        successor.aw2_identity_schema_version = 1
+        successor.candidate_revision = 5
+        successor.candidate_content_sha256 = [0x5A] * 32
+        envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=2,
+            plan_generation=8,
+            plan=successor,
+        )
+        identity = mux._pure_pursuit_envelope_identity(envelope)
+        record = (
+            mux._pure_pursuit_envelope_fingerprint(envelope),
+            mux.now_sec(),
+            True,
+            "valid",
+            envelope,
+        )
+        expected_identity = mux._pure_pursuit_envelope_plan_identity(envelope)
+        if mutation == "identity":
+            identity = (*identity[:1], identity[1] + 1, *identity[2:])
+        elif mutation == "schema":
+            envelope.schema_version = 1
+        elif mutation == "generation":
+            envelope.plan_generation = 9
+            identity = mux._pure_pursuit_envelope_identity(envelope)
+        elif mutation == "relation":
+            envelope.candidate_revision += 1
+        elif mutation == "unusable":
+            record = (*record[:2], False, "invalid", envelope)
+        assert mux._delivery_gap_successor_envelope_revoke_reason(
+            lease,
+            identity=identity,
+            record=record,
+            expected_generation=8,
+            expected_successor_stamp_ns=11_000_000_000,
+            expected_plan_identity=expected_identity,
+            now_sec=mux.now_sec(),
+        ) == expected_reason
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        ("schema", DeliveryGapRevokeReason.N1_ENVELOPE_SCHEMA_INVALID),
+        ("relation", DeliveryGapRevokeReason.N1_ENVELOPE_RELATION_INVALID),
+    ],
+)
+def test_delivery_gap_envelope_callback_preserves_branch_specific_first_reason(
+    mutation, expected_reason
+):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        successor = _authorized_passing_plan(stamp_sec=11, generation=8)
+        successor.race_arm_epoch = 1
+        successor.planner_instance_id = 41
+        successor.attempt_id = 3
+        successor.target_vehicle_id = "grid_d2"
+        successor.pass_direction = -1
+        successor.connector_transaction_id = 9
+        successor.aw2_identity_schema_version = 1
+        successor.candidate_revision = 5
+        successor.candidate_content_sha256 = [0x5A] * 32
+        envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=2,
+            plan_generation=8,
+            plan=successor,
+        )
+        if mutation == "schema":
+            envelope.schema_version = 3
+        elif mutation == "relation":
+            envelope.candidate_revision += 1
+        _set_mux_ros_time_for_envelope(mux, 11)
+
+        mux.on_pure_pursuit_command_envelope(envelope)
+
+        first = mux.motion_authority_delivery_gap_revoke_pending
+        assert first is not None
+        assert first.reason == expected_reason
+        assert first.origin == "envelope_callback"
+        assert first.lease_generation == 7
+        assert first.observed_generation == 8
+        assert mux.motion_authority_delivery_gap_stop_pending
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_clock_starts_on_first_successor_preview_not_n_commit():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        now_sec = mux.now_sec()
+        mux.motion_authority_delivery_gap_lease = replace(
+            lease,
+            acquired_steady_time_sec=(
+                now_sec
+                - mux._motion_authority_delivery_gap_lease_timeout_sec()
+                - 1.0e-3
+            ),
+            gap_started_steady_time_sec=None,
+        )
+
+        sample = mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=now_sec,
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                now_sec,
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        )
+        assert sample is not None
+        started = mux.motion_authority_delivery_gap_lease
+        assert started is not None
+        assert started.gap_started_steady_time_sec == pytest.approx(now_sec)
+        assert started.acquired_steady_time_sec < now_sec
+
+        second_tick = now_sec + 0.5 * (
+            mux._motion_authority_delivery_gap_lease_timeout_sec()
+        )
+        sample = mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=second_tick,
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                second_tick,
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        )
+        assert sample is not None
+        assert (
+            mux.motion_authority_delivery_gap_lease.gap_started_steady_time_sec
+            == pytest.approx(now_sec)
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_committed_passing_delivery_gap_lease_cannot_refresh_preaged_inputs():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        aged = mux.now_sec()
+        lease = replace(
+            lease,
+            plan_receipt_time_sec=aged - mux.overtake_plan_timeout_sec - 1.0e-3,
+            constraint_receipt_time_sec=(
+                aged - mux.safety_constraint_timeout_sec - 1.0e-3
+            ),
+            tracking_receipt_time_sec=(
+                aged - mux.pure_pursuit_tracking_status_timeout_sec - 1.0e-3
+            ),
+            envelope_receipt_time_sec=(
+                aged - mux.pure_pursuit_envelope_timeout_sec - 1.0e-3
+            ),
+            command_receipt_time_sec=(
+                aged - mux.pure_pursuit_cmd_timeout_sec - 1.0e-3
+            ),
+            acquired_steady_time_sec=aged,
+        )
+        mux.motion_authority_delivery_gap_lease = lease
+        assert mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=aged,
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                aged,
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        ) is None
+        assert mux.motion_authority_delivery_gap_lease is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "committed_value", "mutated_value"),
+    (
+        ("speed_limit_mps", 1.0, 1.1),
+        ("required_brake_decel_mps2", 1.0, 0.5),
+        ("reason", "", "same_stamp_payload_mutation"),
+    ),
+)
+def test_delivery_gap_lease_revokes_same_stamp_valid_constraint_payload_mutation(
+    field_name, committed_value, mutated_value
+):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(
+            mux,
+            required_brake_decel_mps2=(
+                committed_value
+                if field_name == "required_brake_decel_mps2"
+                else 0.0
+            ),
+        )
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        mutated = _constraint(
+            stamp_sec=10,
+            constraint_generation=1,
+            plan_generation=7,
+            speed_limit_mps=(
+                committed_value
+                if field_name == "speed_limit_mps"
+                else float(lease.constraint.speed_limit_mps)
+            ),
+            reason=(
+                committed_value
+                if field_name == "reason"
+                else str(lease.constraint.reason)
+            ),
+        )
+        mutated.required_brake_decel_mps2 = (
+            committed_value
+            if field_name == "required_brake_decel_mps2"
+            else float(lease.constraint.required_brake_decel_mps2)
+        )
+        setattr(mutated, field_name, mutated_value)
+        mux.on_safety_constraint(mutated)
+        assert mux.motion_authority_delivery_gap_lease is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("age_source", ("header", "command"))
+def test_delivery_gap_lease_rechecks_envelope_age_during_hold(age_source):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        now_sec = mux.now_sec()
+        lease = replace(
+            lease,
+            acquired_steady_time_sec=now_sec,
+            plan_receipt_time_sec=now_sec,
+            constraint_receipt_time_sec=now_sec,
+            tracking_receipt_time_sec=now_sec,
+            envelope_receipt_time_sec=now_sec,
+            command_receipt_time_sec=now_sec,
+        )
+        if age_source == "command":
+            envelope = copy.deepcopy(lease.envelope)
+            envelope.command_age_sec = (
+                mux.pure_pursuit_envelope_timeout_sec - 1.0e-3
+            )
+            lease = replace(lease, envelope=envelope)
+            _set_mux_ros_time_for_envelope(mux, 10)
+        else:
+            # The original receipt remains inside the steady-time lease, but
+            # the ROS header is now older than the envelope timeout.
+            _set_mux_ros_time_for_envelope(mux, 11)
+        mux.motion_authority_delivery_gap_lease = lease
+        assert mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=now_sec + 0.01,
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                now_sec,
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        ) is None
+        assert mux.motion_authority_delivery_gap_lease is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("mutated_speed_mps", (1.5, 3.0))
+def test_same_stamp_successor_constraint_mutation_cannot_promote_cached_release(
+    mutated_speed_mps,
+):
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "race_arm_required:=false",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    controls = []
+
+    class _Recorder:
+        def publish(self, message):
+            controls.append(message)
+
+    mux.control_pub = _Recorder()
+    try:
+        committed_constraint = _install_committed_passing_delivery_gap_lease(
+            mux
+        )
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        mux.on_safety_constraint(committed_constraint)
+        for sequence in (1, 2):
+            n_envelope = copy.deepcopy(lease.envelope)
+            n_envelope.command_sequence = sequence
+            mux.on_pure_pursuit_command_envelope(n_envelope)
+        committed_envelope = copy.deepcopy(lease.envelope)
+        committed_envelope.command_sequence = 2
+        lease = replace(lease, envelope=committed_envelope)
+        mux.motion_authority_delivery_gap_lease = lease
+        mux.on_pure_pursuit_cmd(copy.deepcopy(lease.envelope.command))
+        original_successor = _constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            speed_limit_mps=2.0,
+            stop_requested=False,
+            release_authorized=True,
+            reason="release_authorized",
+        )
+        mux.on_safety_constraint(original_successor)
+        mux.on_timer()
+        assert controls[-1].longitudinal.speed > 0.0
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 7
+        cached = mux.safety_constraint_contract_cache[(8, 11_000_000_000)]
+        assert cached[0].speed_limit_mps == pytest.approx(2.0)
+
+        mutated_successor = copy.deepcopy(original_successor)
+        mutated_successor.speed_limit_mps = mutated_speed_mps
+        mux.on_safety_constraint(mutated_successor)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert (8, 11_000_000_000) not in mux.safety_constraint_contract_cache
+        assert mux.safety_constraint_timestamp_regressed is True
+
+        # The exact N+1 PP tuple arrives after the cache conflict.  It must
+        # remain stopped; the removed original cap=2.0 is never promoted.
+        successor_plan = _authorized_passing_plan(stamp_sec=11, generation=8)
+        successor_plan.race_arm_epoch = 1
+        successor_plan.planner_instance_id = 41
+        successor_plan.attempt_id = 3
+        successor_plan.target_vehicle_id = "grid_d2"
+        successor_plan.pass_direction = -1
+        successor_plan.connector_transaction_id = 9
+        successor_plan.aw2_identity_schema_version = 1
+        successor_plan.candidate_revision = 5
+        successor_plan.candidate_content_sha256 = [0x5A] * 32
+        for sequence in (1, 2):
+            envelope = _command_envelope(
+                stamp_sec=11,
+                command_sequence=sequence,
+                plan_generation=8,
+                plan=successor_plan,
+            )
+            envelope.command = copy.deepcopy(lease.envelope.command)
+            _set_stamp(envelope.command.stamp, 11)
+            _set_stamp(envelope.command.longitudinal.stamp, 11)
+            _set_stamp(envelope.command.lateral.stamp, 11)
+            mux.on_pure_pursuit_command_envelope(envelope)
+        command = copy.deepcopy(lease.envelope.command)
+        _set_stamp(command.stamp, 11)
+        _set_stamp(command.longitudinal.stamp, 11)
+        _set_stamp(command.lateral.stamp, 11)
+        mux.on_pure_pursuit_cmd(command)
+        proof = ControllerTrackingStatus()
+        _set_stamp(proof.header.stamp, 11)
+        proof.header.frame_id = "base_link"
+        proof.plan_generation = 8
+        proof.mpc_horizon_usable = True
+        proof.pp_command_fresh = True
+        proof.trajectory_tracking_usable = True
+        proof.command_age_sec = 0.0
+        proof.reason = "ready"
+        mux.on_pure_pursuit_tracking_status(proof)
+        mux.on_timer()
+        assert controls[-1].longitudinal.speed == pytest.approx(0.0)
+        assert mux.motion_authority_grant_active is False
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 7
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_constraint_first_same_generation_pp_identity_keeps_immutable_lease_snapshot():
+    """A new N PP identity cannot renew the held N delivery-gap lease."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "race_arm_required:=false",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    controls = []
+
+    class _Recorder:
+        def publish(self, message):
+            controls.append(message)
+
+    mux.control_pub = _Recorder()
+    try:
+        committed_constraint = _install_committed_passing_delivery_gap_lease(
+            mux
+        )
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        mux.on_safety_constraint(committed_constraint)
+        # The fixture installs a successor plan for identity checks; emulate
+        # constraint-first transport by keeping N as the active plan.
+        mux.overtake_plan_cache.pop(8, None)
+        mux.overtake_plan_attempt_cache.pop(8, None)
+        mux.overtake_plan_motion_identity_cache.pop(8, None)
+        mux.overtake_plan_trajectory_cache.pop(8, None)
+        mux.overtake_plan_lateral_stop_fingerprint_cache.pop(8, None)
+        mux.overtake_plan_lateral_stop_authority_cache.pop(8, None)
+        for key in tuple(mux.overtake_plan_contract_cache):
+            if int(key[0]) == 8:
+                mux.overtake_plan_contract_cache.pop(key, None)
+        mux.overtake_plan_generation = 7
+        mux.overtake_plan_valid = True
+        mux.overtake_plan_time_sec = mux.now_sec()
+        mux.overtake_plan_header_stamp_ns = 10_000_000_000
+        for sequence in (1, 2):
+            n_envelope = copy.deepcopy(lease.envelope)
+            n_envelope.command_sequence = sequence
+            mux.on_pure_pursuit_command_envelope(n_envelope)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(lease.envelope.command))
+        assert mux.motion_authority_delivery_gap_lease is not None
+        acquired_steady_time_sec = lease.acquired_steady_time_sec
+        held_identity = mux._pure_pursuit_envelope_identity(lease.envelope)
+        old_speed = float(lease.envelope.command.longitudinal.speed)
+        old_steering = float(lease.envelope.command.lateral.steering_tire_angle)
+
+        successor_constraint = _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=2.0,
+                stop_requested=False,
+                release_authorized=True,
+                reason="release_authorized",
+        )
+        assert mux._motion_release_constraint_valid(
+            mux._coerce_safety_constraint_state(successor_constraint),
+            receipt_time_sec=mux.now_sec(),
+            now_sec=mux.now_sec(),
+            expected_generation=8,
+            expected_stamp_ns=11_000_000_000,
+        )
+        mux.on_safety_constraint(successor_constraint)
+        assert mux.motion_authority_delivery_gap_lease is not None, (
+            mux.safety_constraint_timestamp_regressed,
+            mux.safety_constraint,
+            mux.safety_constraint_time_sec,
+            mux.safety_constraint_header_stamp_ns,
+        )
+        mux.on_timer()
+        assert controls[-1].longitudinal.speed == pytest.approx(old_speed)
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert (
+            mux.motion_authority_delivery_gap_lease.acquired_steady_time_sec
+            == acquired_steady_time_sec
+        )
+        assert (
+            mux._pure_pursuit_envelope_identity(
+                mux.motion_authority_delivery_gap_lease.envelope
+            )
+            == held_identity
+        )
+
+        changed = copy.deepcopy(lease.envelope)
+        changed.command_sequence = 3
+        changed.command.longitudinal.speed = old_speed + 0.2
+        changed.command.lateral.steering_tire_angle = old_steering + 0.1
+        mux.on_pure_pursuit_command_envelope(changed)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(changed.command))
+        mux.on_timer()
+
+        held_lease = mux.motion_authority_delivery_gap_lease
+        assert held_lease is not None
+        assert held_lease.acquired_steady_time_sec == acquired_steady_time_sec
+        assert mux._pure_pursuit_envelope_identity(held_lease.envelope) == (
+            held_identity
+        )
+        assert held_lease.envelope.command.longitudinal.speed == pytest.approx(
+            old_speed
+        )
+        assert controls[-1].longitudinal.speed == pytest.approx(old_speed)
+        assert controls[-1].lateral.steering_tire_angle == pytest.approx(
+            old_steering
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_expired_constraint_first_lease_with_changed_same_generation_pp_stops():
+    """An expired N lease cannot fall back to a newer same-generation PP sample."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "race_arm_required:=false",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    controls = []
+
+    class _Recorder:
+        def publish(self, message):
+            controls.append(message)
+
+    mux.control_pub = _Recorder()
+    try:
+        committed_constraint = _install_committed_passing_delivery_gap_lease(
+            mux
+        )
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        mux.on_safety_constraint(committed_constraint)
+        # Keep Plan N active while the valid N+1 constraint arrives first.
+        for cache in (
+            mux.overtake_plan_cache,
+            mux.overtake_plan_attempt_cache,
+            mux.overtake_plan_motion_identity_cache,
+            mux.overtake_plan_trajectory_cache,
+            mux.overtake_plan_lateral_stop_fingerprint_cache,
+            mux.overtake_plan_lateral_stop_authority_cache,
+        ):
+            cache.pop(8, None)
+        for key in tuple(mux.overtake_plan_contract_cache):
+            if int(key[0]) == 8:
+                mux.overtake_plan_contract_cache.pop(key, None)
+        mux.overtake_plan_generation = 7
+        mux.overtake_plan_valid = True
+        mux.overtake_plan_time_sec = mux.now_sec()
+        mux.overtake_plan_header_stamp_ns = 10_000_000_000
+        n_envelope = copy.deepcopy(lease.envelope)
+        n_envelope.command_sequence = 2
+        mux.on_pure_pursuit_command_envelope(n_envelope)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(n_envelope.command))
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=2.0,
+                stop_requested=False,
+                release_authorized=True,
+                reason="release_authorized",
+            )
+        )
+        mux.on_timer()
+        assert controls[-1].longitudinal.speed == pytest.approx(
+            lease.envelope.command.longitudinal.speed
+        )
+        assert mux.motion_authority_delivery_gap_lease is not None
+
+        changed = copy.deepcopy(lease.envelope)
+        changed.command_sequence = 3
+        changed.command.longitudinal.speed += 0.2
+        changed.command.lateral.steering_tire_angle += 0.1
+        mux.on_pure_pursuit_command_envelope(changed)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(changed.command))
+        expired = mux.motion_authority_delivery_gap_lease
+        assert expired is not None
+        mux.motion_authority_delivery_gap_lease = replace(
+            expired,
+            gap_started_steady_time_sec=(
+                mux.now_sec()
+                - mux._motion_authority_delivery_gap_lease_timeout_sec()
+                - 1.0e-3
+            ),
+        )
+        mux.on_timer()
+
+        assert controls[-1].longitudinal.speed == pytest.approx(0.0)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_grant_active is False
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_rate_limited_passing_commit_and_gap_replay_hold_exact_limited_final():
+    """The exact limiter transform may grant and its lease stays immutable."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "race_arm_required:=false",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+            "-p",
+            "enable_steering_rate_limit:=true",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    controls = []
+
+    class _Recorder:
+        def publish(self, message):
+            controls.append(message)
+
+    mux.control_pub = _Recorder()
+    original_limit_steering = mux._limit_steering
+    try:
+        committed_constraint = _install_committed_passing_delivery_gap_lease(
+            mux
+        )
+        seeded_lease = mux.motion_authority_delivery_gap_lease
+        assert seeded_lease is not None
+        # The fixture provides exact N identity and command bytes; this test
+        # starts before the first N commit, with no prior lease/tombstone.
+        mux.motion_authority_delivery_gap_lease = None
+        mux.motion_authority_delivery_gap_tombstone = None
+        mux.overtake_plan_cache.pop(8, None)
+        mux.overtake_plan_attempt_cache.pop(8, None)
+        mux.overtake_plan_motion_identity_cache.pop(8, None)
+        mux.overtake_plan_trajectory_cache.pop(8, None)
+        mux.overtake_plan_lateral_stop_fingerprint_cache.pop(8, None)
+        mux.overtake_plan_lateral_stop_authority_cache.pop(8, None)
+        for key in tuple(mux.overtake_plan_contract_cache):
+            if int(key[0]) == 8:
+                mux.overtake_plan_contract_cache.pop(key, None)
+        mux.overtake_plan_generation = 7
+        mux.overtake_plan_valid = True
+        mux.overtake_plan_time_sec = mux.now_sec()
+        mux.overtake_plan_header_stamp_ns = 10_000_000_000
+        mux.on_safety_constraint(committed_constraint)
+        for sequence in (1, 2):
+            envelope = copy.deepcopy(seeded_lease.envelope)
+            envelope.command_sequence = sequence
+            mux.on_pure_pursuit_command_envelope(envelope)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(seeded_lease.envelope.command))
+
+        def force_coherent_rate_limit(cmd, source, now_sec):
+            if source != "pure_pursuit":
+                return original_limit_steering(cmd, source, now_sec)
+            raw_steering_rad = float(cmd.lateral.steering_tire_angle)
+            limited_steering_rad = -0.02
+            previous_steering_rad = float(
+                mux.steering_limiter.last_steering_rad
+            )
+            cmd.lateral.steering_tire_angle = limited_steering_rad
+            mux.steering_limiter.has_last_steering = True
+            mux.steering_limiter.last_steering_rad = limited_steering_rad
+            mux.steering_limiter.last_time_sec = float(now_sec)
+            mux.steering_limiter.last_source = "pure_pursuit"
+            return SteeringLimitResult(
+                raw_steering_rad=raw_steering_rad,
+                limited_steering_rad=limited_steering_rad,
+                steering_delta_rad=(
+                    limited_steering_rad - previous_steering_rad
+                ),
+                angle_limited=False,
+                rate_limited=True,
+                limiter_reset=False,
+            )
+
+        mux._limit_steering = force_coherent_rate_limit
+        mux.on_timer()
+        assert controls[-1].longitudinal.speed > 0.0
+        assert controls[-1].lateral.steering_tire_angle == pytest.approx(-0.02)
+        coherent_lease = mux.motion_authority_delivery_gap_lease
+        assert coherent_lease is not None
+        assert coherent_lease.steering_result is not None
+        assert coherent_lease.steering_result.rate_limited is True
+        assert coherent_lease.final_command.lateral.steering_tire_angle == (
+            pytest.approx(-0.02)
+        )
+        assert mux.last_published_control_command is not None
+        assert (
+            mux.last_published_control_command.lateral.steering_tire_angle
+            == pytest.approx(-0.02)
+        )
+        acquired_steady_time_sec = coherent_lease.acquired_steady_time_sec
+
+        # Constraint N+1 arrives before Plan/PP N+1.  Replay the immutable
+        # already-limited N final; do not advance again toward the raw command.
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+        mux._limit_steering = original_limit_steering
+        # Simulate mutable limiter progress outside the immutable N cohort.
+        # The publication record still proves that -0.02 was the actual last
+        # actuator output, so replay must atomically realign to that value.
+        mux.steering_limiter.reset(0.03, mux.now_sec(), "pure_pursuit")
+        controls.clear()
+        mux.on_timer()
+        assert controls[-1].longitudinal.speed > 0.0
+        assert controls[-1].lateral.steering_tire_angle == pytest.approx(-0.02)
+        replayed_lease = mux.motion_authority_delivery_gap_lease
+        assert replayed_lease is not None
+        assert replayed_lease.plan_generation == 7
+        assert replayed_lease.acquired_steady_time_sec == acquired_steady_time_sec
+        assert replayed_lease.final_command.lateral.steering_tire_angle == (
+            pytest.approx(-0.02)
+        )
+        assert mux.steering_limiter.last_steering_rad == pytest.approx(-0.02)
+
+        # Repeated timer replay neither renews the lease nor advances the
+        # limiter away from the actually published N final.
+        controls.clear()
+        mux.on_timer()
+        assert controls[-1].longitudinal.speed > 0.0
+        assert controls[-1].lateral.steering_tire_angle == pytest.approx(-0.02)
+        assert mux.steering_limiter.last_steering_rad == pytest.approx(-0.02)
+        assert (
+            mux.motion_authority_delivery_gap_lease.acquired_steady_time_sec
+            == acquired_steady_time_sec
+        )
+    finally:
+        mux._limit_steering = original_limit_steering
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_lease_revokes_on_same_generation_plan_mutation_or_release_withdrawal():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        mutated = _authorized_passing_plan(stamp_sec=10, generation=7)
+        mutated.race_arm_epoch = 1
+        mutated.planner_instance_id = 41
+        mutated.attempt_id = 3
+        mutated.target_vehicle_id = "grid_d2"
+        mutated.pass_direction = -1
+        mutated.connector_transaction_id = 9
+        mutated.aw2_identity_schema_version = 1
+        mutated.candidate_revision = 4
+        mutated.candidate_content_sha256 = [0x5A] * 32
+        mutated.trajectory.points[0].pose.position.x += 0.01
+        mux.on_overtake_plan(mutated)
+        assert mux.motion_authority_delivery_gap_lease is None
+
+        _install_committed_passing_delivery_gap_lease(mux)
+        withdrawn = _constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            release_authorized=False,
+        )
+        mux.on_safety_constraint(withdrawn)
+        assert mux.motion_authority_delivery_gap_lease is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_committed_passing_delivery_gap_lease_revokes_on_successor_identity_change():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        changed = _authorized_passing_plan(stamp_sec=12, generation=8)
+        changed.race_arm_epoch = 1
+        changed.planner_instance_id = 41
+        changed.attempt_id = 3
+        changed.target_vehicle_id = "grid_d2"
+        changed.pass_direction = -1
+        changed.connector_transaction_id = 9
+        changed.aw2_identity_schema_version = 1
+        changed.candidate_revision = 5
+        changed.candidate_content_sha256 = [0x6B] * 32
+        mux.on_overtake_plan(changed)
+        assert mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        ) is None
+        assert mux.motion_authority_delivery_gap_lease is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_lease_rejects_same_xy_digest_changed_trajectory_speed():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        changed = _authorized_passing_plan(stamp_sec=12, generation=8)
+        changed.race_arm_epoch = 1
+        changed.planner_instance_id = 41
+        changed.attempt_id = 3
+        changed.target_vehicle_id = "grid_d2"
+        changed.pass_direction = -1
+        changed.connector_transaction_id = 9
+        changed.aw2_identity_schema_version = 1
+        changed.candidate_revision = 5
+        changed.candidate_content_sha256 = [0x5A] * 32
+        changed.trajectory.points[0].longitudinal_velocity_mps += 0.01
+        mux.on_overtake_plan(changed)
+        assert mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        ) is None
+        assert mux.motion_authority_delivery_gap_lease is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_tombstone_blocks_same_commit_after_revoke():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        lease = mux.motion_authority_delivery_gap_lease
+        mux._commit_motion_authority_delivery_gap_lease(
+            plan_identity=lease.plan_identity,
+            constraint=lease.constraint,
+            envelope=lease.envelope,
+            final_command=lease.final_command,
+            now_sec=mux.now_sec(),
+        )
+        mux._invalidate_motion_authority_delivery_gap_lease()
+        mux._commit_motion_authority_delivery_gap_lease(
+            plan_identity=lease.plan_identity,
+            constraint=lease.constraint,
+            envelope=lease.envelope,
+            final_command=lease.final_command,
+            now_sec=mux.now_sec() + 1.0,
+        )
+        assert mux.motion_authority_delivery_gap_lease is None
+
+        replacement = copy.deepcopy(lease.envelope)
+        replacement.command_sequence += 1
+        mux._commit_motion_authority_delivery_gap_lease(
+            plan_identity=lease.plan_identity,
+            constraint=lease.constraint,
+            envelope=replacement,
+            final_command=lease.final_command,
+            now_sec=mux.now_sec() + 1.0,
+        )
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert (
+            mux.motion_authority_delivery_gap_lease.envelope.command_sequence
+            == replacement.command_sequence
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    ["invalid", "stop", "stamp", "frame", "generation"],
+)
+def test_delivery_gap_lease_rejects_any_received_bad_successor_constraint(mutate):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+        successor_constraint = _constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            speed_limit_mps=1.0,
+            stop_requested=False,
+            release_authorized=True,
+        )
+        if mutate == "invalid":
+            successor_constraint.valid = False
+        elif mutate == "stop":
+            successor_constraint.stop_requested = True
+        elif mutate == "stamp":
+            _set_stamp(successor_constraint.header.stamp, 12)
+        elif mutate == "frame":
+            successor_constraint.header.frame_id = "odom"
+        elif mutate == "generation":
+            successor_constraint.plan_generation = 9
+        mux.on_safety_constraint(successor_constraint)
+        assert mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                previous_constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        ) is None
+        assert mux.motion_authority_delivery_gap_lease is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_lease_applies_stricter_successor_longitudinal_bound():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+        successor_constraint = _constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            speed_limit_mps=0.3,
+            stop_requested=False,
+            release_authorized=True,
+        )
+        successor_constraint.required_brake_decel_mps2 = 0.2
+        mux.on_safety_constraint(successor_constraint)
+        sample = mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                previous_constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        )
+        assert sample is not None
+        assert sample.command.longitudinal.speed == pytest.approx(0.3)
+        assert sample.command.longitudinal.acceleration <= -0.2
+        assert sample.command.lateral.steering_tire_angle == pytest.approx(-0.1)
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert (
+            mux.motion_authority_delivery_gap_lease.final_command.longitudinal.speed
+            == pytest.approx(0.4)
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_delivery_gap_lease_bridges_valid_successor_constraint_until_pp_arrives():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+        successor_constraint = _constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            speed_limit_mps=1.0,
+            stop_requested=False,
+            release_authorized=True,
+        )
+        authority_n = SafetyConstraintState(
+            constraint_generation=previous_constraint.constraint_generation,
+            plan_generation=previous_constraint.plan_generation,
+            valid=previous_constraint.valid,
+            stop_requested=previous_constraint.stop_requested,
+            release_authorized=previous_constraint.release_authorized,
+            speed_limit_mps=previous_constraint.speed_limit_mps,
+            required_brake_decel_mps2=0.0,
+            header_stamp_ns=10_000_000_000,
+            frame_id="map",
+            reason="release_authorized",
+        )
+        authority_now = mux.now_sec()
+        mux.safety_authority.evaluate(
+            authority_n,
+            received_time_sec=authority_now,
+            now_sec=authority_now,
+            active_plan_generation=7,
+        )
+        mux.on_safety_constraint(successor_constraint)
+        sample = mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                previous_constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.EXACT_CURRENT,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        )
+        assert sample is not None
+        assert sample.authority_proof.plan_generation == 7
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 7
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_warmup_proof_survives_only_normal_cross_topic_delivery_gap():
+    assert retain_warmup_proof_in_stop_state(
+        exact_pass_warmup_stop=True,
+        rendezvous_state=SafetyAuthorityRendezvousState.EXACT_CURRENT,
+    )
+    assert retain_warmup_proof_in_stop_state(
+        exact_pass_warmup_stop=False,
+        rendezvous_state=SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+    )
+    for state in (
+        SafetyAuthorityRendezvousState.UNKNOWN,
+        SafetyAuthorityRendezvousState.STALE,
+        SafetyAuthorityRendezvousState.PAYLOAD_MUTATION,
+        SafetyAuthorityRendezvousState.REGRESSION_OR_GAP,
+    ):
+        assert not retain_warmup_proof_in_stop_state(
+            exact_pass_warmup_stop=False,
+            rendezvous_state=state,
+        )
 
 
 def _set_stamp(stamp, sec: int) -> None:
@@ -1448,6 +3348,109 @@ def test_motion_authority_requires_exact_current_generation_envelope():
         assert valid
         assert reason == "ready"
 
+        rate_limited_final = copy.deepcopy(envelope.command)
+        rate_limited_final.lateral.steering_tire_angle = 0.04
+        rate_limited_result = SteeringLimitResult(
+            raw_steering_rad=0.1,
+            limited_steering_rad=0.04,
+            steering_delta_rad=0.04,
+            angle_limited=False,
+            rate_limited=True,
+            limiter_reset=False,
+        )
+        valid, reason, _, _ = mux._motion_authority_grant_eligible(
+            final_command=rate_limited_final,
+            selected_sample=sample,
+            tracking_plan_generation=9,
+            authority_plan_generation=9,
+            authority_constraint=constraint,
+            constraint_decision=decision,
+            decision_source="pure_pursuit",
+            now_sec=now_sec,
+            active_control_fault_reason="",
+            ros_clock_stalled=False,
+            deadline_missed=False,
+            steering_result=rate_limited_result,
+        )
+        assert valid
+        assert reason == "ready"
+
+        inconsistent_result = copy.deepcopy(rate_limited_result)
+        inconsistent_result.rate_limited = False
+        valid, reason, _, _ = mux._motion_authority_grant_eligible(
+            final_command=rate_limited_final,
+            selected_sample=sample,
+            tracking_plan_generation=9,
+            authority_plan_generation=9,
+            authority_constraint=constraint,
+            constraint_decision=decision,
+            decision_source="pure_pursuit",
+            now_sec=now_sec,
+            active_control_fault_reason="",
+            ros_clock_stalled=False,
+            deadline_missed=False,
+            steering_result=inconsistent_result,
+        )
+        assert not valid
+        assert reason == "final_command_binding"
+
+        angle_limited_result = copy.deepcopy(rate_limited_result)
+        angle_limited_result.angle_limited = True
+        valid, reason, _, _ = mux._motion_authority_grant_eligible(
+            final_command=rate_limited_final,
+            selected_sample=sample,
+            tracking_plan_generation=9,
+            authority_plan_generation=9,
+            authority_constraint=constraint,
+            constraint_decision=decision,
+            decision_source="pure_pursuit",
+            now_sec=now_sec,
+            active_control_fault_reason="",
+            ros_clock_stalled=False,
+            deadline_missed=False,
+            steering_result=angle_limited_result,
+        )
+        assert not valid
+        assert reason == "final_command_binding"
+
+        reset_rate_limited_result = copy.deepcopy(rate_limited_result)
+        reset_rate_limited_result.limiter_reset = True
+        valid, reason, _, _ = mux._motion_authority_grant_eligible(
+            final_command=rate_limited_final,
+            selected_sample=sample,
+            tracking_plan_generation=9,
+            authority_plan_generation=9,
+            authority_constraint=constraint,
+            constraint_decision=decision,
+            decision_source="pure_pursuit",
+            now_sec=now_sec,
+            active_control_fault_reason="",
+            ros_clock_stalled=False,
+            deadline_missed=False,
+            steering_result=reset_rate_limited_result,
+        )
+        assert not valid
+        assert reason == "final_command_binding"
+
+        mismatched_final = copy.deepcopy(rate_limited_final)
+        mismatched_final.lateral.steering_tire_angle = 0.05
+        valid, reason, _, _ = mux._motion_authority_grant_eligible(
+            final_command=mismatched_final,
+            selected_sample=sample,
+            tracking_plan_generation=9,
+            authority_plan_generation=9,
+            authority_constraint=constraint,
+            constraint_decision=decision,
+            decision_source="pure_pursuit",
+            now_sec=now_sec,
+            active_control_fault_reason="",
+            ros_clock_stalled=False,
+            deadline_missed=False,
+            steering_result=rate_limited_result,
+        )
+        assert not valid
+        assert reason == "final_command_binding"
+
         saved_warmup_proof = mux.motion_authority_warmup_proof
         mux.motion_authority_warmup_proof = None
         valid, reason, _, _ = mux._motion_authority_grant_eligible(
@@ -1464,8 +3467,8 @@ def test_motion_authority_requires_exact_current_generation_envelope():
             deadline_missed=False,
             steering_result=steering_result,
         )
-        assert not valid
-        assert reason == "warmup_proof_missing"
+        assert valid
+        assert reason == "ready"
         mux.motion_authority_warmup_proof = saved_warmup_proof
 
         stale_identity = (
@@ -1595,7 +3598,7 @@ def test_motion_authority_captures_exact_pass_warmup_proof():
         rclpy.shutdown()
 
 
-def test_motion_authority_rejects_direct_successor_same_xy_changed_digest():
+def test_motion_authority_accepts_exact_current_successor_with_new_safe_digest():
     rclpy.init()
     mux = HybridControlMuxNode()
     mux.timer.cancel()
@@ -1738,9 +3741,11 @@ def test_motion_authority_rejects_direct_successor_same_xy_changed_digest():
             deadline_missed=False,
             steering_result=steering_result,
         )
-        assert not valid
-        assert reason == "warmup_candidate_mutation"
-        assert mux.motion_authority_warmup_proof is None
+        assert valid
+        assert reason == "ready"
+        # Legacy diagnostic evidence may remain cached, but it is not consumed
+        # by current-generation grant eligibility.
+        assert mux.motion_authority_warmup_proof is not None
     finally:
         mux.destroy_node()
         rclpy.shutdown()
@@ -1761,7 +3766,7 @@ def test_motion_authority_rejects_direct_successor_same_xy_changed_digest():
         "motion_stamp",
     ],
 )
-def test_motion_authority_rejects_each_warmup_or_motion_binding_mutation(
+def test_motion_authority_ignores_warmup_history_but_rejects_current_binding_mutation(
     mutation,
 ):
     rclpy.init()
@@ -1916,13 +3921,16 @@ def test_motion_authority_rejects_each_warmup_or_motion_binding_mutation(
             deadline_missed=False,
             steering_result=steering_result,
         )
-        assert not valid
+        if mutation.startswith("warmup_"):
+            assert valid
+        else:
+            assert not valid
     finally:
         mux.destroy_node()
         rclpy.shutdown()
 
 
-def test_motion_authority_publish_precedes_exact_positive_command():
+def test_motion_authority_v2_successor_publish_precedes_positive_command():
     rclpy.init(
         args=[
             "--ros-args",
@@ -2042,7 +4050,7 @@ def test_motion_authority_publish_precedes_exact_positive_command():
 
         _set_mux_ros_time_for_envelope(mux, 11)
         motion_plan = _authorized_lateral_stop_plan(
-            stamp_sec=11, generation=10
+            stamp_sec=11, generation=11
         )
         motion_plan.phase = OvertakePlan.PASSING
         motion_plan.pass_direction = -1
@@ -2052,7 +4060,7 @@ def test_motion_authority_publish_precedes_exact_positive_command():
         motion_plan.attempt_id = 7
         motion_plan.target_vehicle_id = "D2"
         motion_plan.connector_transaction_id = 55
-        motion_plan.candidate_revision = 4
+        motion_plan.candidate_revision = 5
         motion_plan.candidate_content_sha256 = [0x5A] * 32
         motion_plan.lateral_stop_authority_kind = (
             OvertakePlan.LATERAL_STOP_NONE
@@ -2064,7 +4072,7 @@ def test_motion_authority_publish_precedes_exact_positive_command():
             _constraint(
                 stamp_sec=11,
                 constraint_generation=2,
-                plan_generation=10,
+                plan_generation=11,
                 speed_limit_mps=3.0,
                 stop_requested=False,
                 release_authorized=True,
@@ -2074,13 +4082,13 @@ def test_motion_authority_publish_precedes_exact_positive_command():
         motion = _command_envelope(
             stamp_sec=11,
             command_sequence=3,
-            plan_generation=10,
+            plan_generation=11,
             plan=motion_plan,
         )
         mux.on_pure_pursuit_command_envelope(motion)
         mux.on_pure_pursuit_cmd(motion.command)
         _set_stamp(proof.header.stamp, 11)
-        proof.plan_generation = 10
+        proof.plan_generation = 11
         proof.lateral_stop_authority_kind = OvertakePlan.LATERAL_STOP_NONE
         proof.lateral_stop_transaction_pass_direction = 0
         proof.lateral_stop_authority_token = 0
@@ -2119,7 +4127,113 @@ def test_motion_authority_publish_precedes_exact_positive_command():
         assert grant.header.stamp == command.stamp
         assert grant.pp_command_stamp == motion.header.stamp
 
-        valid_grant_sequence = grant.grant_sequence
+        # Plan/constraint N+1 may arrive before its PP tuple.  The timer must
+        # retain the exact positive N command while the shared authority latch
+        # remains on N; no successor preview may relabel that command.
+        committed_lease = mux.motion_authority_delivery_gap_lease
+        assert committed_lease is not None
+        acquired_steady_time_sec = committed_lease.acquired_steady_time_sec
+        next_plan = copy.deepcopy(motion_plan)
+        next_plan.header.stamp.sec = 12
+        next_plan.trajectory.header.stamp.sec = 12
+        next_plan.plan_generation = 12
+        next_plan.candidate_revision = 6
+        next_plan.candidate_content_sha256 = [0x6B] * 32
+        next_plan.trajectory.points[0].pose.position.y += 0.1
+
+        # Constraint N+1 may arrive before Plan N+1.  It is a valid release
+        # preview, but must not advance the shared authority latch ahead of
+        # the exact plan/PP tuple.
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=12,
+                constraint_generation=4,
+                plan_generation=12,
+                speed_limit_mps=3.0,
+                stop_requested=False,
+                release_authorized=True,
+                reason="release_authorized",
+            )
+        )
+        events.clear()
+        mux.on_timer()
+        constraint_first_control = next(
+            msg
+            for name, msg in reversed(events)
+            if name == "control"
+        )
+        assert constraint_first_control.longitudinal.speed > 0.0
+        assert constraint_first_control.longitudinal.speed == pytest.approx(
+            motion.command.longitudinal.speed
+        )
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert mux.motion_authority_delivery_gap_lease.plan_generation == 11
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 11
+
+        # Once Plan N+1 arrives without its PP tuple, the same N hold remains
+        # in force; only the exact PP sample below may advance authority.
+        mux.on_overtake_plan(next_plan)
+        events.clear()
+        mux.on_timer()
+        held_control = next(
+            msg
+            for name, msg in reversed(events)
+            if name == "control"
+        )
+        assert held_control.longitudinal.speed > 0.0
+        assert held_control.longitudinal.speed == pytest.approx(
+            motion.command.longitudinal.speed
+        )
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert mux.motion_authority_delivery_gap_lease.plan_generation == 11
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 11
+
+        # Only the complete exact N+1 PP tuple may switch the positive command
+        # and advance the shared authority generation.
+        _set_mux_ros_time_for_envelope(mux, 12)
+        next_envelope = _command_envelope(
+            stamp_sec=12,
+            command_sequence=4,
+            plan_generation=12,
+            plan=next_plan,
+        )
+        mux.on_pure_pursuit_command_envelope(next_envelope)
+        mux.on_pure_pursuit_cmd(next_envelope.command)
+        next_proof = copy.deepcopy(proof)
+        _set_stamp(next_proof.header.stamp, 12)
+        next_proof.plan_generation = 12
+        mux.on_pure_pursuit_tracking_status(next_proof)
+        events.clear()
+        mux.on_timer()
+        switched_control = next(
+            msg
+            for name, msg in reversed(events)
+            if name == "control"
+        )
+        assert switched_control.longitudinal.speed > 0.0
+        assert switched_control.longitudinal.speed == pytest.approx(
+            next_envelope.command.longitudinal.speed
+        )
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 12
+
+        # Re-entering the timer without a new callback republishes the same
+        # grant but must never extend the direct-successor gap lease.
+        switched_acquired_steady_time_sec = (
+            mux.motion_authority_delivery_gap_lease.acquired_steady_time_sec
+        )
+        assert switched_acquired_steady_time_sec >= acquired_steady_time_sec
+        for _ in range(3):
+            mux.on_timer()
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert (
+            mux.motion_authority_delivery_gap_lease.acquired_steady_time_sec
+            == switched_acquired_steady_time_sec
+        )
+
+        valid_grant_sequence = mux.motion_authority_grant_sequence
         _set_mux_ros_time_for_envelope(mux, 12)
         revoke_plan = _authorized_passing_plan(
             stamp_sec=12,
@@ -2165,6 +4279,1371 @@ def test_motion_authority_publish_precedes_exact_positive_command():
         assert revoke.lease_duration_sec == pytest.approx(0.0)
         assert revoke.grant_sequence == valid_grant_sequence + 1
         assert mux.motion_authority_warmup_proof is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def _delivery_gap_successor_plan(
+    *, stamp_sec: int = 11, generation: int = 8, candidate_revision: int = 5
+) -> OvertakePlan:
+    plan = _authorized_passing_plan(
+        stamp_sec=stamp_sec,
+        generation=generation,
+        attempt_id=3,
+        target_vehicle_id="grid_d2",
+        pass_direction=-1,
+    )
+    plan.race_arm_epoch = 1
+    plan.planner_instance_id = 41
+    plan.connector_transaction_id = 9
+    plan.aw2_identity_schema_version = 1
+    plan.candidate_revision = candidate_revision
+    plan.candidate_content_sha256 = [0x5A] * 32
+    return plan
+
+
+def _prime_committed_delivery_gap_without_successor(mux: HybridControlMuxNode):
+    mux.ros_clock_motion_ready = True
+    previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+    mux.on_safety_constraint(previous_constraint)
+    lease = mux.motion_authority_delivery_gap_lease
+    assert lease is not None
+    lease = replace(
+        lease,
+        successor_plan_identity=None,
+        successor_plan_lateral_stop_fingerprint=None,
+    )
+    mux.motion_authority_delivery_gap_lease = lease
+    # The helper represents a previously committed positive N grant.  Tests
+    # that exercise callback-side revocation must observe the corresponding
+    # invalid-grant publication on the next timer tick.
+    mux.motion_authority_grant_active = True
+    mux.pure_pursuit_envelope_active_producer_instance_id = int(
+        lease.envelope.producer_instance_id
+    )
+    mux.pure_pursuit_envelope_active_sequence = int(
+        lease.envelope.command_sequence
+    )
+    mux.pure_pursuit_envelope_active_stamp_ns = mux._stamp_ns(
+        lease.envelope.header.stamp
+    )
+
+    # The common fixture preloads Plan N+1. Remove only that preview so these
+    # tests exercise a genuinely Plan-absent direct-successor delivery gap.
+    for cache in (
+        mux.overtake_plan_cache,
+        mux.overtake_plan_attempt_cache,
+        mux.overtake_plan_motion_identity_cache,
+        mux.overtake_plan_trajectory_cache,
+        mux.overtake_plan_lateral_stop_fingerprint_cache,
+        mux.overtake_plan_lateral_stop_authority_cache,
+    ):
+        cache.pop(8, None)
+    for key in tuple(mux.overtake_plan_contract_cache):
+        if int(key[0]) == 8:
+            mux.overtake_plan_contract_cache.pop(key, None)
+    mux.overtake_plan_generation = 7
+    mux.overtake_plan_valid = True
+    mux.overtake_plan_time_sec = mux.now_sec()
+    mux.overtake_plan_header_stamp_ns = 10_000_000_000
+    _set_mux_ros_time_for_envelope(mux, 10)
+
+    active_lease = mux.motion_authority_delivery_gap_lease
+    assert active_lease is not None
+    assert active_lease.plan_generation == 7
+    return active_lease
+
+
+def _new_motion_authority_delivery_gap_mux():
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    events = []
+
+    class _Recorder:
+        def __init__(self, name):
+            self.name = name
+
+        def publish(self, message):
+            events.append((self.name, message))
+
+    mux.motion_authority_grant_pub = _Recorder("grant")
+    mux.control_pub = _Recorder("control")
+    mux.ros_clock_motion_ready = True
+    return mux, events
+
+
+def test_motion_authority_v2_plan_first_valid_pp_holds_n_until_constraint():
+    """A valid Plan/PP N+1 preview must not revoke the committed N lease."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    events = []
+
+    class _Recorder:
+        def __init__(self, name):
+            self.name = name
+
+        def publish(self, message):
+            events.append((self.name, message))
+
+    mux.motion_authority_grant_pub = _Recorder("grant")
+    mux.control_pub = _Recorder("control")
+    try:
+        mux.ros_clock_motion_ready = True
+        previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+        mux.on_safety_constraint(previous_constraint)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+
+        # Prime the exact N envelope producer with two immutable N samples.
+        n_first = copy.deepcopy(lease.envelope)
+        n_second = copy.deepcopy(lease.envelope)
+        n_second.command_sequence = 2
+        mux.on_pure_pursuit_command_envelope(n_first)
+        mux.on_pure_pursuit_command_envelope(n_second)
+        mux.on_pure_pursuit_cmd(n_second.command)
+
+        events.clear()
+        mux.on_timer()
+        initial_control = next(
+            msg
+            for name, msg in reversed(events)
+            if name == "control"
+        )
+        assert initial_control.longitudinal.speed > 0.0
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 7
+
+        acquired_steady_time_sec = lease.acquired_steady_time_sec
+        n_command_speed = initial_control.longitudinal.speed
+
+        # Deliver a valid Plan/PP N+1 preview before its exact Constraint.
+        successor_plan = _authorized_passing_plan(stamp_sec=11, generation=8)
+        successor_plan.race_arm_epoch = 1
+        successor_plan.planner_instance_id = 41
+        successor_plan.attempt_id = 3
+        successor_plan.target_vehicle_id = "grid_d2"
+        successor_plan.pass_direction = -1
+        successor_plan.connector_transaction_id = 9
+        successor_plan.aw2_identity_schema_version = 1
+        successor_plan.candidate_revision = 5
+        successor_plan.candidate_content_sha256 = [0x5A] * 32
+        successor_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        successor_envelope.command.longitudinal.speed = 0.6
+        successor_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        _set_mux_ros_time_for_envelope(mux, 11)
+        mux.on_pure_pursuit_command_envelope(successor_envelope)
+        mux.on_pure_pursuit_cmd(successor_envelope.command)
+
+        events.clear()
+        mux.on_timer()
+        held_control = next(
+            msg
+            for name, msg in reversed(events)
+            if name == "control"
+        )
+        assert held_control.longitudinal.speed == pytest.approx(n_command_speed)
+        assert held_control.longitudinal.speed > 0.0
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert (
+            mux.motion_authority_delivery_gap_lease.acquired_steady_time_sec
+            == acquired_steady_time_sec
+        )
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 7
+
+        # The exact non-tightening N+1 Constraint permits the existing switch.
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+        events.clear()
+        mux.on_timer()
+        switched_control = next(
+            msg
+            for name, msg in reversed(events)
+            if name == "control"
+        )
+        assert switched_control.longitudinal.speed == pytest.approx(0.6)
+        assert switched_control.longitudinal.speed > 0.0
+        assert mux.safety_authority._latched is not None
+        assert mux.safety_authority._latched.plan_generation == 8
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_motion_authority_v2_direct_successor_hard_negative_stops_same_tick():
+    """A rejected self-consistent N+1 preview cannot fall back to N+1 motion."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    events = []
+
+    class _Recorder:
+        def __init__(self, name):
+            self.name = name
+
+        def publish(self, message):
+            events.append((self.name, message))
+
+    mux.motion_authority_grant_pub = _Recorder("grant")
+    mux.control_pub = _Recorder("control")
+    try:
+        mux.ros_clock_motion_ready = True
+        previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+        mux.on_safety_constraint(previous_constraint)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+
+        # Keep Plan N active while replacing only the fixture's direct
+        # successor cache.  The replacement is internally coherent, but its
+        # target identity is not the committed N identity.
+        for cache in (
+            mux.overtake_plan_cache,
+            mux.overtake_plan_attempt_cache,
+            mux.overtake_plan_motion_identity_cache,
+            mux.overtake_plan_trajectory_cache,
+            mux.overtake_plan_lateral_stop_fingerprint_cache,
+            mux.overtake_plan_lateral_stop_authority_cache,
+        ):
+            cache.pop(8, None)
+        for key in tuple(mux.overtake_plan_contract_cache):
+            if int(key[0]) == 8:
+                mux.overtake_plan_contract_cache.pop(key, None)
+        mux.overtake_plan_generation = 7
+        mux.overtake_plan_valid = True
+        mux.overtake_plan_time_sec = mux.now_sec()
+        mux.overtake_plan_header_stamp_ns = 10_000_000_000
+        for sequence in (1, 2):
+            n_envelope = copy.deepcopy(lease.envelope)
+            n_envelope.command_sequence = sequence
+            mux.on_pure_pursuit_command_envelope(n_envelope)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(lease.envelope.command))
+
+        events.clear()
+        mux.on_timer()
+        assert events[-1][0] == "control"
+        assert events[-1][1].longitudinal.speed > 0.0
+        assert mux.motion_authority_grant_active
+
+        _set_mux_ros_time_for_envelope(mux, 11)
+        successor_plan = _authorized_passing_plan(
+            stamp_sec=11,
+            generation=8,
+            attempt_id=3,
+            target_vehicle_id="grid_d3",
+        )
+        successor_plan.race_arm_epoch = 1
+        successor_plan.planner_instance_id = 41
+        successor_plan.connector_transaction_id = 9
+        successor_plan.aw2_identity_schema_version = 1
+        successor_plan.candidate_revision = 5
+        successor_plan.candidate_content_sha256 = [0x5A] * 32
+        successor_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        successor_envelope.command.longitudinal.speed = 0.6
+        successor_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_overtake_plan(successor_plan)
+        mux.on_pure_pursuit_command_envelope(successor_envelope)
+        mux.on_pure_pursuit_cmd(successor_envelope.command)
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+
+        events.clear()
+        mux.on_timer()
+        control = next(message for name, message in reversed(events) if name == "control")
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_grant_active is False
+        grants = [message for name, message in events if name == "grant"]
+        assert grants
+        assert grants[-1].valid is False
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_motion_authority_v2_non_direct_generation_stops_same_tick():
+    """An active N lease cannot bridge a non-adjacent tracking generation."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    events = []
+
+    class _Recorder:
+        def __init__(self, name):
+            self.name = name
+
+        def publish(self, message):
+            events.append((self.name, message))
+
+    mux.motion_authority_grant_pub = _Recorder("grant")
+    mux.control_pub = _Recorder("control")
+    try:
+        mux.ros_clock_motion_ready = True
+        previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+        mux.on_safety_constraint(previous_constraint)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        for cache in (
+            mux.overtake_plan_cache,
+            mux.overtake_plan_attempt_cache,
+            mux.overtake_plan_motion_identity_cache,
+            mux.overtake_plan_trajectory_cache,
+            mux.overtake_plan_lateral_stop_fingerprint_cache,
+            mux.overtake_plan_lateral_stop_authority_cache,
+        ):
+            cache.pop(8, None)
+        for key in tuple(mux.overtake_plan_contract_cache):
+            if int(key[0]) == 8:
+                mux.overtake_plan_contract_cache.pop(key, None)
+        mux.overtake_plan_generation = 7
+        mux.overtake_plan_valid = True
+        mux.overtake_plan_time_sec = mux.now_sec()
+        mux.overtake_plan_header_stamp_ns = 10_000_000_000
+        _set_mux_ros_time_for_envelope(mux, 10)
+
+        for sequence in (1, 2):
+            n_envelope = copy.deepcopy(lease.envelope)
+            n_envelope.command_sequence = sequence
+            mux.on_pure_pursuit_command_envelope(n_envelope)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(lease.envelope.command))
+        events.clear()
+        mux.on_timer()
+        assert events[-1][0] == "control"
+        assert events[-1][1].longitudinal.speed > 0.0
+        assert mux.motion_authority_grant_active
+
+        _set_mux_ros_time_for_envelope(mux, 12)
+        skipped_plan = _authorized_passing_plan(
+            stamp_sec=12, generation=9, attempt_id=3
+        )
+        skipped_plan.race_arm_epoch = 1
+        skipped_plan.planner_instance_id = 41
+        skipped_plan.connector_transaction_id = 9
+        skipped_plan.aw2_identity_schema_version = 1
+        skipped_plan.candidate_revision = 6
+        skipped_plan.candidate_content_sha256 = [0x5A] * 32
+        skipped_envelope = _command_envelope(
+            stamp_sec=12,
+            command_sequence=3,
+            plan_generation=9,
+            plan=skipped_plan,
+        )
+        skipped_envelope.command.longitudinal.speed = 0.6
+        skipped_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_overtake_plan(skipped_plan)
+        mux.on_pure_pursuit_command_envelope(skipped_envelope)
+        mux.on_pure_pursuit_cmd(skipped_envelope.command)
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=12,
+                constraint_generation=3,
+                plan_generation=9,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+
+        events.clear()
+        mux.on_timer()
+        control = next(message for name, message in reversed(events) if name == "control")
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_grant_active is False
+        grants = [message for name, message in events if name == "grant"]
+        assert grants
+        assert grants[-1].valid is False
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_motion_authority_v2_successor_envelope_plan_identity_mismatch_stops():
+    """A schema-2 partial envelope must bind to its cached successor Plan."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    controls = []
+
+    class _Recorder:
+        def publish(self, message):
+            controls.append(message)
+
+    mux.control_pub = _Recorder()
+    try:
+        mux.ros_clock_motion_ready = True
+        previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+        mux.on_safety_constraint(previous_constraint)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+        _set_mux_ros_time_for_envelope(mux, 11)
+
+        for sequence in (1, 2):
+            n_envelope = copy.deepcopy(lease.envelope)
+            n_envelope.command_sequence = sequence
+            mux.on_pure_pursuit_command_envelope(n_envelope)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(lease.envelope.command))
+
+        successor_plan = _authorized_passing_plan(stamp_sec=11, generation=8)
+        successor_plan.race_arm_epoch = 1
+        successor_plan.planner_instance_id = 41
+        successor_plan.attempt_id = 3
+        successor_plan.connector_transaction_id = 9
+        successor_plan.aw2_identity_schema_version = 1
+        successor_plan.candidate_revision = 5
+        successor_plan.candidate_content_sha256 = [0x5A] * 32
+        mux.on_overtake_plan(successor_plan)
+        bad_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        bad_envelope.candidate_revision = 6
+        bad_envelope.candidate_content_sha256 = [0x6B] * 32
+        bad_envelope.command.longitudinal.speed = 0.6
+        bad_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_pure_pursuit_command_envelope(bad_envelope)
+        mux.on_pure_pursuit_cmd(bad_envelope.command)
+
+        controls.clear()
+        mux.on_timer()
+        assert controls[-1].longitudinal.speed == pytest.approx(0.0)
+        assert mux.motion_authority_delivery_gap_lease is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_motion_authority_v2_callback_revoke_pending_cannot_be_masked():
+    """An invalid N+1 callback followed by valid data still stops once."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "safety_constraint_timeout_sec:=1.0",
+            "-p",
+            "overtake_plan_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p",
+            "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p",
+            "control_loop_max_gap_sec:=10.0",
+            "-p",
+            "ros_clock_stall_timeout_sec:=10.0",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    events = []
+
+    class _Recorder:
+        def __init__(self, name):
+            self.name = name
+
+        def publish(self, message):
+            events.append((self.name, message))
+
+    mux.motion_authority_grant_pub = _Recorder("grant")
+    mux.control_pub = _Recorder("control")
+    try:
+        mux.ros_clock_motion_ready = True
+        previous_constraint = _install_committed_passing_delivery_gap_lease(mux)
+        mux.on_safety_constraint(previous_constraint)
+        lease = mux.motion_authority_delivery_gap_lease
+        assert lease is not None
+
+        for cache in (
+            mux.overtake_plan_cache,
+            mux.overtake_plan_attempt_cache,
+            mux.overtake_plan_motion_identity_cache,
+            mux.overtake_plan_trajectory_cache,
+            mux.overtake_plan_lateral_stop_fingerprint_cache,
+            mux.overtake_plan_lateral_stop_authority_cache,
+        ):
+            cache.pop(8, None)
+        for key in tuple(mux.overtake_plan_contract_cache):
+            if int(key[0]) == 8:
+                mux.overtake_plan_contract_cache.pop(key, None)
+        mux.overtake_plan_generation = 7
+        mux.overtake_plan_valid = True
+        mux.overtake_plan_time_sec = mux.now_sec()
+        mux.overtake_plan_header_stamp_ns = 10_000_000_000
+        for sequence in (1, 2):
+            n_envelope = copy.deepcopy(lease.envelope)
+            n_envelope.command_sequence = sequence
+            mux.on_pure_pursuit_command_envelope(n_envelope)
+        mux.on_pure_pursuit_cmd(copy.deepcopy(lease.envelope.command))
+        events.clear()
+        mux.on_timer()
+        assert events[-1][0] == "control"
+        assert events[-1][1].longitudinal.speed > 0.0
+        assert mux.motion_authority_grant_active
+
+        _set_mux_ros_time_for_envelope(mux, 11)
+        successor_plan = _authorized_passing_plan(stamp_sec=11, generation=8)
+        successor_plan.race_arm_epoch = 1
+        successor_plan.planner_instance_id = 41
+        successor_plan.attempt_id = 3
+        successor_plan.connector_transaction_id = 9
+        successor_plan.aw2_identity_schema_version = 1
+        successor_plan.candidate_revision = 5
+        successor_plan.candidate_content_sha256 = [0x5A] * 32
+        mux.on_overtake_plan(successor_plan)
+        invalid_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            trajectory_tracking_usable=False,
+            plan=successor_plan,
+        )
+        mux.on_pure_pursuit_command_envelope(invalid_envelope)
+        valid_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=4,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        valid_envelope.command.longitudinal.speed = 0.6
+        valid_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_pure_pursuit_command_envelope(valid_envelope)
+        mux.on_pure_pursuit_cmd(valid_envelope.command)
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+
+        events.clear()
+        mux.on_timer()
+        control = next(message for name, message in reversed(events) if name == "control")
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_grant_active is False
+        assert any(
+            name == "grant" and not message.valid for name, message in events
+        )
+
+        # The callback marker is one-shot; a fresh complete cohort may use the
+        # normal exact-current path on the following tick.
+        next_envelope = copy.deepcopy(valid_envelope)
+        next_envelope.command_sequence = 5
+        mux.on_pure_pursuit_command_envelope(next_envelope)
+        mux.on_pure_pursuit_cmd(next_envelope.command)
+        events.clear()
+        mux.on_timer()
+        next_control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert next_control.longitudinal.speed == pytest.approx(0.6)
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert mux.motion_authority_delivery_gap_lease.plan_generation == 8
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("arrival_order", ["constraint_first", "envelope_first"])
+def test_motion_authority_v2_plan_absent_coherent_successor_envelope_holds_n(
+    arrival_order,
+):
+    """A coherent Constraint/PP preview may hold immutable N until Plan joins."""
+    mux, events = _new_motion_authority_delivery_gap_mux()
+    try:
+        lease = _prime_committed_delivery_gap_without_successor(mux)
+        original_receipts = (
+            lease.acquired_steady_time_sec,
+            lease.plan_receipt_time_sec,
+            lease.constraint_receipt_time_sec,
+            lease.tracking_receipt_time_sec,
+            lease.envelope_receipt_time_sec,
+            lease.command_receipt_time_sec,
+        )
+        original_active_sequence = mux.pure_pursuit_envelope_active_sequence
+        events.clear()
+
+        _set_mux_ros_time_for_envelope(mux, 11)
+        successor_plan = _delivery_gap_successor_plan()
+        successor_constraint = _constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            speed_limit_mps=1.0,
+            stop_requested=False,
+            release_authorized=True,
+        )
+        successor_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        successor_envelope.command.longitudinal.speed = 0.6
+        successor_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        if arrival_order == "constraint_first":
+            mux.on_safety_constraint(successor_constraint)
+            mux.on_pure_pursuit_command_envelope(successor_envelope)
+        elif arrival_order == "envelope_first":
+            mux.on_pure_pursuit_command_envelope(successor_envelope)
+            assert mux.motion_authority_delivery_gap_lease is not None
+            assert not mux.motion_authority_delivery_gap_stop_pending
+            mux.on_safety_constraint(successor_constraint)
+        else:
+            raise AssertionError(f"unknown arrival order: {arrival_order}")
+        mux.on_pure_pursuit_cmd(successor_envelope.command)
+        assert not mux.motion_authority_delivery_gap_stop_pending
+        staged_lease = mux.motion_authority_delivery_gap_lease
+        assert staged_lease is not None
+        assert staged_lease.successor_envelope_preview_identity is not None
+        assert staged_lease.gap_started_steady_time_sec is not None
+        staged_gap_start = staged_lease.gap_started_steady_time_sec
+        assert (
+            mux.pure_pursuit_envelope_active_sequence
+            == original_active_sequence
+        )
+        # Partial equality is never promotion.  Even if mutable active state
+        # later matches producer/sequence, the staged record's different
+        # stamp/generation keeps it non-authoritative until a post-Plan
+        # normally validated Envelope is received.
+        mux.pure_pursuit_envelope_active_sequence = int(
+            successor_envelope.command_sequence
+        )
+        assert mux._pure_pursuit_envelope_is_unpromoted_successor_preview(
+            tuple(staged_lease.successor_envelope_preview_identity)
+        )
+        mux.pure_pursuit_envelope_active_sequence = original_active_sequence
+
+        # A second Plan-absent preview replaces only the lease's latest
+        # binding identity.  Every older staged preview must remain excluded
+        # from watermark and normal selection after Plan arrives.
+        older_staged_identity = tuple(
+            staged_lease.successor_envelope_preview_identity
+        )
+        successor_envelope.command_sequence += 1
+        mux.on_pure_pursuit_command_envelope(successor_envelope)
+        staged_lease = mux.motion_authority_delivery_gap_lease
+        assert staged_lease is not None
+        assert tuple(staged_lease.successor_envelope_preview_identity) != (
+            older_staged_identity
+        )
+        assert staged_lease.gap_started_steady_time_sec == staged_gap_start
+        assert (
+            mux.pure_pursuit_envelope_active_sequence
+            == original_active_sequence
+        )
+
+        events.clear()
+        mux.on_timer()
+        held_control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert held_control.longitudinal.speed == pytest.approx(
+            lease.final_command.longitudinal.speed
+        )
+        assert mux.motion_authority_grant_active
+        held_lease = mux.motion_authority_delivery_gap_lease
+        assert held_lease is not None
+        assert held_lease.plan_generation == 7
+        assert held_lease.gap_started_steady_time_sec == staged_gap_start
+        assert (
+            mux.pure_pursuit_envelope_active_sequence
+            == original_active_sequence
+        )
+        assert (
+            held_lease.acquired_steady_time_sec,
+            held_lease.plan_receipt_time_sec,
+            held_lease.constraint_receipt_time_sec,
+            held_lease.tracking_receipt_time_sec,
+            held_lease.envelope_receipt_time_sec,
+            held_lease.command_receipt_time_sec,
+        ) == original_receipts
+
+        mux.on_overtake_plan(successor_plan)
+        # Plan N+1 alone must not promote the staged Envelope into normal
+        # selection.  The intermediate timer still holds exact committed N.
+        events.clear()
+        mux.on_timer()
+        plan_only_control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert plan_only_control.longitudinal.speed == pytest.approx(
+            lease.final_command.longitudinal.speed
+        )
+        assert mux.motion_authority_grant_active
+        plan_only_lease = mux.motion_authority_delivery_gap_lease
+        assert plan_only_lease is not None
+        assert plan_only_lease.plan_generation == 7
+        assert plan_only_lease.gap_started_steady_time_sec == staged_gap_start
+        assert (
+            mux.pure_pursuit_envelope_active_sequence
+            == original_active_sequence
+        )
+        watermark = mux.pure_pursuit_envelope_watermark
+        assert watermark is None or int(watermark[0][3]) == 7
+
+        # Replaying an exact staged identity remains a duplicate preview and
+        # cannot become authority merely because Plan N+1 now exists.
+        staged_identity = tuple(
+            plan_only_lease.successor_envelope_preview_identity
+        )
+        staged_record = mux.pure_pursuit_envelope_cache[staged_identity]
+        assert staged_record[3] == "delivery_gap_successor_preview"
+        mux._update_pure_pursuit_envelope_watermark(
+            staged_identity, staged_record
+        )
+        assert mux.pure_pursuit_envelope_watermark is None or (
+            mux.pure_pursuit_envelope_watermark[1][3]
+            != "delivery_gap_successor_preview"
+        )
+        mux.on_pure_pursuit_command_envelope(staged_record[4])
+        assert mux.pure_pursuit_envelope_cache[staged_identity][3] == (
+            "delivery_gap_successor_preview"
+        )
+
+        # PP publishes every control cycle.  Once Plan N+1 exists, the next
+        # exact Envelope upgrades the earlier preview to the normal selector
+        # path and completes N+1.
+        successor_envelope.command_sequence += 1
+        mux.on_pure_pursuit_command_envelope(successor_envelope)
+        successor_identity = mux._pure_pursuit_envelope_identity(
+            successor_envelope
+        )
+        assert mux.pure_pursuit_envelope_cache[successor_identity][3] == "valid"
+        events.clear()
+        mux.on_timer()
+        switched_control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert switched_control.longitudinal.speed == pytest.approx(0.6)
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert mux.motion_authority_delivery_gap_lease.plan_generation == 8
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_motion_authority_plan_absent_successor_preview_expires_to_stop():
+    mux, events = _new_motion_authority_delivery_gap_mux()
+    try:
+        lease = _prime_committed_delivery_gap_without_successor(mux)
+        _set_mux_ros_time_for_envelope(mux, 11)
+        successor_plan = _delivery_gap_successor_plan()
+        successor_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        successor_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_pure_pursuit_command_envelope(successor_envelope)
+        staged = mux.motion_authority_delivery_gap_lease
+        assert staged is not None
+        assert staged.gap_started_steady_time_sec is not None
+        mux.motion_authority_delivery_gap_lease = replace(
+            staged,
+            gap_started_steady_time_sec=(
+                mux.now_sec()
+                - mux._motion_authority_delivery_gap_lease_timeout_sec()
+                - 0.001
+            ),
+        )
+
+        events.clear()
+        mux.on_timer()
+        control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert not mux.motion_authority_grant_active
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("mutation", ["target", "stamp", "revision"])
+def test_motion_authority_v2_plan_absent_successor_envelope_mismatch_stops(
+    mutation,
+):
+    """Known N+1 identity mismatches must survive a valid replacement."""
+    mux, events = _new_motion_authority_delivery_gap_mux()
+    try:
+        lease = _prime_committed_delivery_gap_without_successor(mux)
+        events.clear()
+        _set_mux_ros_time_for_envelope(mux, 11)
+        successor_plan = _delivery_gap_successor_plan()
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+        mismatched = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        mismatched.command.longitudinal.speed = 0.6
+        mismatched.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        if mutation == "target":
+            mismatched.plan_sample_key.target_vehicle_id = "evil_target"
+        elif mutation == "stamp":
+            _set_stamp(mismatched.plan_sample_key.plan_stamp, 12)
+        elif mutation == "revision":
+            mismatched.candidate_revision += 1
+        else:
+            raise AssertionError(f"unknown mutation: {mutation}")
+        assert mux._validate_pure_pursuit_envelope(mismatched) == (
+            True,
+            "valid",
+        )
+
+        mux.on_pure_pursuit_command_envelope(mismatched)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_delivery_gap_stop_pending
+
+        valid_replacement = _command_envelope(
+            stamp_sec=11,
+            command_sequence=4,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        valid_replacement.command.longitudinal.speed = 0.6
+        valid_replacement.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_pure_pursuit_command_envelope(valid_replacement)
+        mux.on_pure_pursuit_cmd(valid_replacement.command)
+        assert mux.motion_authority_delivery_gap_stop_pending
+
+        events.clear()
+        mux.on_timer()
+        control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert control.lateral.steering_tire_angle == pytest.approx(0.0)
+        assert not mux.motion_authority_grant_active
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert any(
+            name == "grant" and not message.valid
+            for name, message in events
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_motion_authority_v2_successor_constraint_rejects_envelope_stamp():
+    """A later Constraint must reject an already-seen mismatched Plan stamp."""
+    mux, events = _new_motion_authority_delivery_gap_mux()
+    try:
+        lease = _prime_committed_delivery_gap_without_successor(mux)
+        events.clear()
+        _set_mux_ros_time_for_envelope(mux, 12)
+        future_plan = _delivery_gap_successor_plan(stamp_sec=12)
+        future_envelope = _command_envelope(
+            stamp_sec=12,
+            command_sequence=3,
+            plan_generation=8,
+            plan=future_plan,
+        )
+        future_envelope.command.longitudinal.speed = 0.6
+        future_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_pure_pursuit_command_envelope(future_envelope)
+        mux.on_pure_pursuit_cmd(future_envelope.command)
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert not mux.motion_authority_delivery_gap_stop_pending
+
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_delivery_gap_stop_pending
+        assert mux.motion_authority_delivery_gap_last_revoke is not None
+        assert (
+            mux.motion_authority_delivery_gap_last_revoke.reason
+            == DeliveryGapRevokeReason.N1_ENVELOPE_RELATION_INVALID
+        )
+        assert (
+            mux.motion_authority_delivery_gap_last_revoke.origin
+            == "constraint_callback"
+        )
+
+        events.clear()
+        mux.on_timer()
+        control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert control.lateral.steering_tire_angle == pytest.approx(0.0)
+        assert not mux.motion_authority_grant_active
+        assert any(
+            name == "grant" and not message.valid
+            for name, message in events
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("arrival_order", ["plan_first", "constraint_first"])
+def test_motion_authority_v2_successor_plan_constraint_stamp_mismatch_stops(
+    arrival_order,
+):
+    """Plan/Constraint N+1 stamp mismatch must stop in either arrival order."""
+    mux, events = _new_motion_authority_delivery_gap_mux()
+    try:
+        _prime_committed_delivery_gap_without_successor(mux)
+        events.clear()
+        _set_mux_ros_time_for_envelope(mux, 12)
+        successor_plan = _delivery_gap_successor_plan(stamp_sec=12)
+        successor_constraint = _constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            speed_limit_mps=1.0,
+            stop_requested=False,
+            release_authorized=True,
+        )
+
+        if arrival_order == "plan_first":
+            mux.on_overtake_plan(successor_plan)
+            assert mux.motion_authority_delivery_gap_lease is not None
+            assert not mux.motion_authority_delivery_gap_stop_pending
+            mux.on_safety_constraint(successor_constraint)
+        elif arrival_order == "constraint_first":
+            mux.on_safety_constraint(successor_constraint)
+            assert mux.motion_authority_delivery_gap_lease is not None
+            assert not mux.motion_authority_delivery_gap_stop_pending
+            mux.on_overtake_plan(successor_plan)
+        else:
+            raise AssertionError(f"unknown arrival order: {arrival_order}")
+
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_delivery_gap_stop_pending
+        events.clear()
+        mux.on_timer()
+        control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert control.lateral.steering_tire_angle == pytest.approx(0.0)
+        assert not mux.motion_authority_grant_active
+        assert any(
+            name == "grant" and not message.valid
+            for name, message in events
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_motion_authority_v2_invalid_successor_plan_cannot_be_masked():
+    """An invalid direct Plan followed by a valid peer still stops once."""
+    mux, events = _new_motion_authority_delivery_gap_mux()
+    try:
+        lease = _prime_committed_delivery_gap_without_successor(mux)
+        events.clear()
+        _set_mux_ros_time_for_envelope(mux, 11)
+        valid_plan = _delivery_gap_successor_plan()
+        invalid_plan = copy.deepcopy(valid_plan)
+        invalid_plan.header.frame_id = "odom"
+        mux.on_overtake_plan(invalid_plan)
+        assert not mux.overtake_plan_valid
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_delivery_gap_stop_pending
+
+        mux.on_overtake_plan(valid_plan)
+        assert mux.overtake_plan_valid
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_delivery_gap_stop_pending
+
+        successor_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            plan=valid_plan,
+        )
+        successor_envelope.command.longitudinal.speed = 0.6
+        successor_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_pure_pursuit_command_envelope(successor_envelope)
+        mux.on_pure_pursuit_cmd(successor_envelope.command)
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+
+        events.clear()
+        mux.on_timer()
+        control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert control.lateral.steering_tire_angle == pytest.approx(0.0)
+        assert not mux.motion_authority_grant_active
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert any(
+            name == "grant" and not message.valid
+            for name, message in events
+        )
+
+        next_envelope = copy.deepcopy(successor_envelope)
+        next_envelope.command_sequence = 4
+        mux.on_pure_pursuit_command_envelope(next_envelope)
+        mux.on_pure_pursuit_cmd(next_envelope.command)
+        events.clear()
+        mux.on_timer()
+        recovered_control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert recovered_control.longitudinal.speed == pytest.approx(0.6)
+        assert not mux.motion_authority_delivery_gap_stop_pending
+        assert mux.motion_authority_grant_active
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert mux.motion_authority_delivery_gap_lease.plan_generation == 8
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_motion_authority_v2_non_direct_plan_cannot_be_masked_by_successor():
+    """A seen N+2 Plan must stop once even if exact N+1 arrives before timer."""
+    mux, events = _new_motion_authority_delivery_gap_mux()
+    try:
+        lease = _prime_committed_delivery_gap_without_successor(mux)
+        events.clear()
+        _set_mux_ros_time_for_envelope(mux, 11)
+
+        skipped_plan = _delivery_gap_successor_plan(
+            generation=9, candidate_revision=6
+        )
+        mux.on_overtake_plan(skipped_plan)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_delivery_gap_stop_pending
+
+        successor_plan = _delivery_gap_successor_plan()
+        mux.on_overtake_plan(successor_plan)
+        successor_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        successor_envelope.command.longitudinal.speed = 0.6
+        successor_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_pure_pursuit_command_envelope(successor_envelope)
+        mux.on_pure_pursuit_cmd(successor_envelope.command)
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+        assert mux.motion_authority_delivery_gap_stop_pending
+
+        events.clear()
+        mux.on_timer()
+        control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert control.lateral.steering_tire_angle == pytest.approx(0.0)
+        assert not mux.motion_authority_grant_active
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert any(
+            name == "grant" and not message.valid
+            for name, message in events
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize("delivery_kind", ["new", "cached_duplicate"])
+def test_motion_authority_v2_non_direct_envelope_cannot_be_masked_by_successor(
+    delivery_kind,
+):
+    """A seen N+2 envelope must stop once even if exact N+1 joins pre-timer."""
+    mux, events = _new_motion_authority_delivery_gap_mux()
+    try:
+        lease = _prime_committed_delivery_gap_without_successor(mux)
+        events.clear()
+        _set_mux_ros_time_for_envelope(mux, 11)
+
+        skipped_plan = _delivery_gap_successor_plan(
+            generation=9, candidate_revision=6
+        )
+        skipped_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=3,
+            plan_generation=9,
+            plan=skipped_plan,
+        )
+        skipped_envelope.command.longitudinal.speed = 0.6
+        skipped_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        assert mux._validate_pure_pursuit_envelope(skipped_envelope) == (
+            True,
+            "valid",
+        )
+        if delivery_kind == "cached_duplicate":
+            identity = mux._pure_pursuit_envelope_identity(skipped_envelope)
+            mux.pure_pursuit_envelope_cache[identity] = (
+                mux._pure_pursuit_envelope_fingerprint(skipped_envelope),
+                mux.now_sec(),
+                True,
+                "valid",
+                copy.deepcopy(skipped_envelope),
+            )
+        elif delivery_kind != "new":
+            raise AssertionError(f"unknown delivery kind: {delivery_kind}")
+        mux.on_pure_pursuit_command_envelope(skipped_envelope)
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert mux.motion_authority_delivery_gap_stop_pending
+        assert not mux.pure_pursuit_envelope_last_valid
+        assert (
+            mux.pure_pursuit_envelope_last_reason
+            == "delivery_gap_non_direct_generation"
+        )
+
+        successor_plan = _delivery_gap_successor_plan()
+        mux.on_overtake_plan(successor_plan)
+        successor_envelope = _command_envelope(
+            stamp_sec=11,
+            command_sequence=4,
+            plan_generation=8,
+            plan=successor_plan,
+        )
+        successor_envelope.command.longitudinal.speed = 0.6
+        successor_envelope.command.lateral.steering_tire_angle = (
+            lease.final_command.lateral.steering_tire_angle
+        )
+        mux.on_pure_pursuit_command_envelope(successor_envelope)
+        mux.on_pure_pursuit_cmd(successor_envelope.command)
+        mux.on_safety_constraint(
+            _constraint(
+                stamp_sec=11,
+                constraint_generation=2,
+                plan_generation=8,
+                speed_limit_mps=1.0,
+                stop_requested=False,
+                release_authorized=True,
+            )
+        )
+        assert mux.motion_authority_delivery_gap_stop_pending
+
+        events.clear()
+        mux.on_timer()
+        control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert control.longitudinal.speed == pytest.approx(0.0)
+        assert control.lateral.steering_tire_angle == pytest.approx(0.0)
+        assert not mux.motion_authority_grant_active
+        assert mux.motion_authority_delivery_gap_lease is None
+        assert any(
+            name == "grant" and not message.valid
+            for name, message in events
+        )
+
+        fresh_envelope = copy.deepcopy(successor_envelope)
+        fresh_envelope.command_sequence = 5
+        mux.on_pure_pursuit_command_envelope(fresh_envelope)
+        mux.on_pure_pursuit_cmd(fresh_envelope.command)
+        events.clear()
+        mux.on_timer()
+        recovered_control = next(
+            message for name, message in reversed(events) if name == "control"
+        )
+        assert recovered_control.longitudinal.speed == pytest.approx(0.6)
+        assert not mux.motion_authority_delivery_gap_stop_pending
+        assert mux.motion_authority_grant_active
+        assert mux.motion_authority_delivery_gap_lease is not None
+        assert mux.motion_authority_delivery_gap_lease.plan_generation == 8
     finally:
         mux.destroy_node()
         rclpy.shutdown()
@@ -2331,6 +5810,209 @@ def test_typed_lateral_stop_authority_requires_exact_pp_proof(
             now_sec=mux.now_sec(),
         )
     finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_pass_warmup_acquisition_is_zero_speed_authority_not_motion_proof():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        plan = _authorized_lateral_stop_plan(stamp_sec=10, generation=7)
+        plan.phase = OvertakePlan.PASSING
+        plan.pass_direction = -1
+        plan.lateral_stop_authority_kind = (
+            OvertakePlan.LATERAL_STOP_PASS_WARMUP
+        )
+        plan.lateral_stop_transaction_pass_direction = -1
+        plan.lateral_stop_authority_token = 0x700000001
+        mux.on_overtake_plan(plan)
+        constraint = SafetyConstraintState(
+            constraint_generation=1,
+            plan_generation=7,
+            valid=True,
+            stop_requested=True,
+            release_authorized=False,
+            speed_limit_mps=0.0,
+            required_brake_decel_mps2=1.5,
+            header_stamp_ns=10_000_000_000,
+            reason="release_pending_safe_cycles",
+        )
+        proof = ControllerTrackingStatus()
+        proof.plan_generation = 7
+        proof.trajectory_tracking_usable = False
+        proof.pass_warmup_steering_acquisition_active = True
+        proof.pass_warmup_requested_steering_limited = True
+        proof.pass_warmup_measured_steering_converged = True
+        proof.pass_warmup_motion_ready = False
+        proof.lateral_stop_authority_kind = (
+            OvertakePlan.LATERAL_STOP_PASS_WARMUP
+        )
+        proof.lateral_stop_transaction_pass_direction = -1
+        proof.lateral_stop_authority_token = plan.lateral_stop_authority_token
+
+        assert mux._lateral_stop_plan_authorized(
+            plan_generation=7,
+            constraint=constraint,
+            tracking_status=proof,
+            now_sec=mux.now_sec(),
+        )
+
+        proof.pass_warmup_steering_acquisition_active = False
+        assert not mux._lateral_stop_plan_authorized(
+            plan_generation=7,
+            constraint=constraint,
+            tracking_status=proof,
+            now_sec=mux.now_sec(),
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_pass_warmup_holds_verified_steering_across_replanned_geometry():
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p", "primary_source:=pure_pursuit",
+            "-p", "require_safety_constraint:=true",
+            "-p", "safety_constraint_timeout_sec:=1.0",
+            "-p", "overtake_plan_timeout_sec:=1.0",
+            "-p", "pure_pursuit_cmd_timeout_sec:=1.0",
+            "-p", "pure_pursuit_tracking_status_timeout_sec:=1.0",
+            "-p", "control_loop_max_gap_sec:=10.0",
+            "-p", "ros_clock_stall_timeout_sec:=10.0",
+            "-p", "race_arm_required:=false",
+            "-p", "enable_steering_rate_limit:=false",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    observer = Node("pass_warmup_rejected_relaxation_observer")
+    received = []
+    observer.create_subscription(
+        AckermannControlCommand,
+        "output/control_cmd",
+        lambda msg: received.append(msg),
+        10,
+    )
+
+    def pass_plan(stamp_sec, generation):
+        plan = _authorized_lateral_stop_plan(
+            stamp_sec=stamp_sec, generation=generation
+        )
+        plan.phase = OvertakePlan.PASSING
+        plan.pass_direction = -1
+        plan.lateral_stop_authority_kind = (
+            OvertakePlan.LATERAL_STOP_PASS_WARMUP
+        )
+        plan.lateral_stop_authority_token = 77
+        plan.race_arm_epoch = 1
+        plan.planner_instance_id = 41
+        plan.connector_transaction_id = 9
+        plan.candidate_revision = generation
+        plan.candidate_content_sha256 = [0x5A] * 32
+        plan.aw2_identity_schema_version = 1
+        return plan
+
+    command = AckermannControlCommand()
+    command.longitudinal.speed = 0.2
+    command.longitudinal.acceleration = 0.0
+    command.lateral.steering_tire_angle = -0.25
+    proof = ControllerTrackingStatus()
+    proof.header.frame_id = "base_link"
+    proof.pp_command_fresh = True
+    proof.trajectory_tracking_usable = True
+    proof.lateral_stop_authority_kind = (
+        OvertakePlan.LATERAL_STOP_PASS_WARMUP
+    )
+    proof.lateral_stop_transaction_pass_direction = -1
+    proof.lateral_stop_authority_token = 77
+    proof.command_age_sec = 0.0
+    proof.reason = "ready"
+
+    executor = SingleThreadedExecutor()
+    executor.add_node(mux)
+    executor.add_node(observer)
+    try:
+        first_plan = pass_plan(10, 7)
+        mux.on_overtake_plan(first_plan)
+        mux.on_safety_constraint(_constraint(
+            stamp_sec=10,
+            constraint_generation=1,
+            plan_generation=7,
+            speed_limit_mps=0.5,
+            stop_requested=True,
+            release_authorized=False,
+            reason="release_pending_safe_cycles",
+        ))
+        _set_stamp(command.stamp, 20)
+        _set_stamp(proof.header.stamp, 20)
+        proof.plan_generation = 7
+        mux.on_pure_pursuit_cmd(command)
+        mux.on_pure_pursuit_tracking_status(proof)
+        _bind_envelope_from_legacy(mux, command, proof, sequence=1)
+        mux.on_timer()
+        assert _spin_until(executor, lambda: bool(received))
+        assert received[-1].longitudinal.speed == pytest.approx(0.0)
+        assert received[-1].lateral.steering_tire_angle == pytest.approx(-0.25)
+
+        next_plan = pass_plan(11, 8)
+        next_plan.candidate_content_sha256 = [0x6B] * 32
+        next_plan.trajectory.points[0].pose.position.x += 0.001
+        mux.on_overtake_plan(next_plan)
+        mux.on_safety_constraint(_constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            speed_limit_mps=0.6,
+            stop_requested=True,
+            release_authorized=False,
+            reason="release_pending_safe_cycles",
+        ))
+        _set_stamp(command.stamp, 21)
+        _set_stamp(proof.header.stamp, 21)
+        proof.plan_generation = 8
+        proof.trajectory_tracking_usable = False
+        proof.pass_warmup_steering_acquisition_active = False
+        proof.reason = "override_contract_missing_or_stale"
+        mux.on_pure_pursuit_cmd(command)
+        mux.on_pure_pursuit_tracking_status(proof)
+        _bind_envelope_from_legacy(mux, command, proof, sequence=3)
+        previous_count = len(received)
+        mux.on_timer()
+        assert _spin_until(executor, lambda: len(received) > previous_count)
+        assert received[-1].longitudinal.speed == pytest.approx(0.0)
+        assert received[-1].lateral.steering_tire_angle == pytest.approx(-0.25)
+
+        changed_transaction_plan = pass_plan(12, 9)
+        changed_transaction_plan.connector_transaction_id = 10
+        mux.on_overtake_plan(changed_transaction_plan)
+        mux.on_safety_constraint(_constraint(
+            stamp_sec=12,
+            constraint_generation=3,
+            plan_generation=9,
+            speed_limit_mps=0.4,
+            stop_requested=True,
+            release_authorized=False,
+            reason="release_pending_safe_cycles",
+        ))
+        _set_stamp(command.stamp, 22)
+        _set_stamp(proof.header.stamp, 22)
+        proof.plan_generation = 9
+        mux.on_pure_pursuit_cmd(command)
+        mux.on_pure_pursuit_tracking_status(proof)
+        _bind_envelope_from_legacy(mux, command, proof, sequence=5)
+        previous_count = len(received)
+        mux.on_timer()
+        assert _spin_until(executor, lambda: len(received) > previous_count)
+        assert received[-1].longitudinal.speed == pytest.approx(0.0)
+        assert received[-1].lateral.steering_tire_angle == pytest.approx(0.0)
+    finally:
+        executor.remove_node(observer)
+        executor.remove_node(mux)
+        observer.destroy_node()
         mux.destroy_node()
         rclpy.shutdown()
 
@@ -2577,6 +6259,37 @@ def test_observed_usable_proof_never_becomes_motion_authority():
 
         mux.on_timer()
         assert mux.last_source == "stop"
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_legacy_sample_with_active_envelope_producer_does_not_crash():
+    """The optional legacy snapshot may inspect an already-bound producer."""
+    rclpy.init(
+        args=[
+            "--ros-args",
+            "-p",
+            "primary_source:=pure_pursuit",
+            "-p",
+            "require_safety_constraint:=true",
+            "-p",
+            "race_arm_required:=false",
+        ]
+    )
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        mux.on_overtake_plan(_valid_plan(stamp_sec=10, generation=2))
+        mux.pure_pursuit_envelope_active_producer_instance_id = 17
+        mux.pure_pursuit_envelope_cache[(17, 1, 10_000_000_000, 2)] = None
+        mux.on_pure_pursuit_cmd(_matching_legacy_command(11))
+
+        sample = mux._select_legacy_pp_motion_sample(
+            tracking_plan_generation=2
+        )
+
+        assert sample is not None
     finally:
         mux.destroy_node()
         rclpy.shutdown()
@@ -2956,6 +6669,155 @@ def test_u2_selector_missing_current_generation_may_bridge_fresh_n_minus_1():
         assert sample is not None
         assert sample.authority_proof is not None
         assert sample.authority_proof.plan_generation == 8
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_u2_selector_rejects_unusable_current_envelope_as_hard_negative():
+    """Selector cache never turns a received PP rejection into a bridge."""
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    try:
+        _set_mux_ros_time_for_envelope(mux, 100)
+        previous_plan = _authorized_passing_plan(
+            stamp_sec=98, generation=8
+        )
+        current_plan = _authorized_passing_plan(
+            stamp_sec=100, generation=10
+        )
+        for plan in (previous_plan, current_plan):
+            plan.aw2_identity_schema_version = 1
+            plan.race_arm_epoch = 1
+            plan.planner_instance_id = 41
+            plan.connector_transaction_id = 51
+            plan.candidate_revision = plan.plan_generation
+            plan.candidate_content_sha256 = [1] * 32
+        mux.on_overtake_plan(previous_plan)
+        mux.on_overtake_plan(current_plan)
+        _bind_envelope_producer_for_selector(mux, previous_generation=8)
+
+        delivery_gap = _command_envelope(
+            stamp_sec=100,
+            plan_generation=10,
+            command_sequence=3,
+            trajectory_tracking_usable=False,
+        )
+        delivery_gap.reason = "override_contract_missing_or_stale"
+        mux.on_pure_pursuit_command_envelope(delivery_gap)
+        sample = mux._select_bound_envelope_pp_motion_sample(
+            tracking_plan_generation=10,
+            now_sec=mux.now_sec(),
+            ros_clock_stalled=False,
+        )
+        assert sample is None
+
+        # The same unusable bit with a substantive controller reason remains
+        # a hard negative and cannot borrow the older command.
+        substantive_failure = copy.deepcopy(delivery_gap)
+        substantive_failure.command_sequence = 4
+        substantive_failure.reason = (
+            "authorized_trajectory_requires_steering_saturation"
+        )
+        mux.on_pure_pursuit_command_envelope(substantive_failure)
+        assert mux._select_bound_envelope_pp_motion_sample(
+            tracking_plan_generation=10,
+            now_sec=mux.now_sec(),
+            ros_clock_stalled=False,
+        ) is None
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+def test_pass_warmup_selector_admits_only_bound_zero_speed_acquisition_sample():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    try:
+        _set_mux_ros_time_for_envelope(mux, 100)
+        plan = _valid_plan(stamp_sec=100, generation=9)
+        plan.pass_direction = -1
+        plan.attempt_id = 1
+        plan.target_vehicle_id = "grid_d2"
+        plan.aw2_identity_schema_version = 1
+        plan.race_arm_epoch = 1
+        plan.planner_instance_id = 41
+        plan.connector_transaction_id = 51
+        plan.candidate_revision = 1
+        plan.candidate_content_sha256 = [1] * 32
+        plan.lateral_stop_authority_kind = OvertakePlan.LATERAL_STOP_PASS_WARMUP
+        plan.lateral_stop_transaction_pass_direction = plan.pass_direction
+        plan.lateral_stop_authority_token = 77
+        envelope = _command_envelope(
+            stamp_sec=100,
+            plan_generation=9,
+            command_sequence=1,
+            trajectory_tracking_usable=False,
+            plan=plan,
+        )
+        envelope.lateral_stop_authority_kind = plan.lateral_stop_authority_kind
+        envelope.lateral_stop_transaction_pass_direction = plan.pass_direction
+        envelope.lateral_stop_authority_token = plan.lateral_stop_authority_token
+        envelope.reason = "authorized_trajectory_requires_steering_saturation"
+        assert mux._validate_pure_pursuit_envelope(
+            envelope, allow_tracking_unusable=True
+        ) == (True, "valid")
+        mux.on_pure_pursuit_command_envelope(envelope)
+        second_envelope = copy.deepcopy(envelope)
+        second_envelope.command_sequence = 2
+        mux.on_pure_pursuit_command_envelope(second_envelope)
+
+        status = ControllerTrackingStatus()
+        status.header = copy.deepcopy(envelope.header)
+        status.plan_generation = envelope.plan_generation
+        status.pp_command_fresh = True
+        status.trajectory_tracking_usable = False
+        status.pass_warmup_steering_acquisition_active = True
+        status.pass_warmup_motion_ready = False
+        status.lateral_stop_authority_kind = envelope.lateral_stop_authority_kind
+        status.lateral_stop_transaction_pass_direction = (
+            envelope.lateral_stop_transaction_pass_direction
+        )
+        status.lateral_stop_authority_token = envelope.lateral_stop_authority_token
+        status.pp_command_binding_valid = True
+        status.pp_command_speed_mps = envelope.command.longitudinal.speed
+        status.pp_command_acceleration_mps2 = envelope.command.longitudinal.acceleration
+        status.pp_command_steering_tire_angle_rad = (
+            envelope.command.lateral.steering_tire_angle
+        )
+        status.command_age_sec = 0.0
+        status.reason = envelope.reason
+        mux.on_pure_pursuit_tracking_status(status)
+        status_key = (mux._stamp_ns(status.header.stamp), status.plan_generation)
+        assert mux.pure_pursuit_tracking_status_cache[status_key][2]
+        assert mux._tracking_status_binds_pure_pursuit_command(
+            status, envelope.command
+        )
+
+        assert mux._select_bound_envelope_pp_motion_sample(
+            tracking_plan_generation=9,
+            now_sec=mux.now_sec(),
+            ros_clock_stalled=False,
+        ) is None
+        sample = mux._select_pass_warmup_acquisition_sample(
+            tracking_plan_generation=9,
+            now_sec=mux.now_sec(),
+            ros_clock_stalled=False,
+        )
+        assert sample is not None
+        assert mux.pure_pursuit_envelope_active_producer_instance_id is None
+        assert sample.authority_proof is not None
+        assert sample.authority_proof.pass_warmup_steering_acquisition_active
+        assert not sample.authority_proof.trajectory_tracking_usable
+
+        status.pass_warmup_steering_acquisition_active = False
+        mux.pure_pursuit_tracking_status_cache.clear()
+        mux.on_pure_pursuit_tracking_status(status)
+        assert mux._select_pass_warmup_acquisition_sample(
+            tracking_plan_generation=9,
+            now_sec=mux.now_sec(),
+            ros_clock_stalled=False,
+        ) is None
     finally:
         mux.destroy_node()
         rclpy.shutdown()
@@ -7009,17 +10871,50 @@ def test_constraint_stop_keeps_only_exact_authorized_pp_lateral_tracking():
         assert received[-1].lateral.steering_tire_angle == pytest.approx(0.31)
         assert mux.steering_limiter.last_steering_rad == pytest.approx(0.31)
 
-        # A same-generation plan with a different stamp is not the exact
-        # SafetyEvaluator bundle and must fall back to the ordinary stop.
-        mismatched_plan = _authorized_lateral_stop_plan(
-            stamp_sec=11, generation=7
+        # A newer exact STOP may propose a looser longitudinal cap while
+        # release remains unauthorized. SafetyAuthority retains the older,
+        # stricter cap; that conservative latch must not revoke the separate
+        # exact lateral STOP authority.
+        relaxed_plan = _authorized_lateral_stop_plan(
+            stamp_sec=11, generation=8
         )
-        mux.on_overtake_plan(mismatched_plan)
+        mux.on_overtake_plan(relaxed_plan)
+        relaxed_constraint = _constraint(
+            stamp_sec=11,
+            constraint_generation=2,
+            plan_generation=8,
+            speed_limit_mps=0.6,
+            stop_requested=True,
+            release_authorized=False,
+            reason="maneuver_transaction_tracking_stop",
+        )
+        mux.on_safety_constraint(relaxed_constraint)
         _set_stamp(command.stamp, 21)
         mux.on_pure_pursuit_cmd(command)
         _set_stamp(proof.header.stamp, 21)
+        proof.plan_generation = 8
+        proof.lateral_stop_authority_token = (
+            relaxed_plan.lateral_stop_authority_token
+        )
         mux.on_pure_pursuit_tracking_status(proof)
         _bind_envelope_from_legacy(mux, command, proof, sequence=3)
+        previous_count = len(received)
+        mux.on_timer()
+        assert _spin_until(executor, lambda: len(received) > previous_count)
+        assert received[-1].longitudinal.speed == pytest.approx(0.0)
+        assert received[-1].lateral.steering_tire_angle == pytest.approx(0.31)
+
+        # A same-generation plan with a different stamp is not the exact
+        # SafetyEvaluator bundle and must fall back to the ordinary stop.
+        mismatched_plan = _authorized_lateral_stop_plan(
+            stamp_sec=12, generation=8
+        )
+        mux.on_overtake_plan(mismatched_plan)
+        _set_stamp(command.stamp, 22)
+        mux.on_pure_pursuit_cmd(command)
+        _set_stamp(proof.header.stamp, 22)
+        mux.on_pure_pursuit_tracking_status(proof)
+        _bind_envelope_from_legacy(mux, command, proof, sequence=5)
         previous_count = len(received)
         mux.on_timer()
         assert _spin_until(executor, lambda: len(received) > previous_count)
@@ -7028,37 +10923,9 @@ def test_constraint_stop_keeps_only_exact_authorized_pp_lateral_tracking():
 
         # Even a new exact plan/constraint bundle cannot override an unusable
         # tracking proof.
-        next_plan = _authorized_lateral_stop_plan(stamp_sec=12, generation=8)
+        next_plan = _authorized_lateral_stop_plan(stamp_sec=13, generation=9)
         mux.on_overtake_plan(next_plan)
         next_constraint = _constraint(
-            stamp_sec=12,
-            constraint_generation=2,
-            plan_generation=8,
-            speed_limit_mps=0.5,
-            stop_requested=True,
-            release_authorized=False,
-            reason="maneuver_transaction_tracking_stop",
-        )
-        next_constraint.required_brake_decel_mps2 = 1.5
-        mux.on_safety_constraint(next_constraint)
-        _set_stamp(command.stamp, 22)
-        mux.on_pure_pursuit_cmd(command)
-        _set_stamp(proof.header.stamp, 22)
-        proof.plan_generation = 8
-        proof.lateral_stop_authority_token = next_plan.lateral_stop_authority_token
-        proof.trajectory_tracking_usable = False
-        mux.on_pure_pursuit_tracking_status(proof)
-        _bind_envelope_from_legacy(mux, command, proof, sequence=5)
-        previous_count = len(received)
-        mux.on_timer()
-        assert _spin_until(executor, lambda: len(received) > previous_count)
-        assert received[-1].lateral.steering_tire_angle == pytest.approx(0.0)
-
-        # External safety remains a higher-priority fail-closed authority even
-        # when every planner/tracking proof is otherwise valid.
-        final_plan = _authorized_lateral_stop_plan(stamp_sec=13, generation=9)
-        mux.on_overtake_plan(final_plan)
-        final_constraint = _constraint(
             stamp_sec=13,
             constraint_generation=3,
             plan_generation=9,
@@ -7067,16 +10934,44 @@ def test_constraint_stop_keeps_only_exact_authorized_pp_lateral_tracking():
             release_authorized=False,
             reason="maneuver_transaction_tracking_stop",
         )
-        final_constraint.required_brake_decel_mps2 = 1.5
-        mux.on_safety_constraint(final_constraint)
+        next_constraint.required_brake_decel_mps2 = 1.5
+        mux.on_safety_constraint(next_constraint)
         _set_stamp(command.stamp, 23)
         mux.on_pure_pursuit_cmd(command)
         _set_stamp(proof.header.stamp, 23)
         proof.plan_generation = 9
+        proof.lateral_stop_authority_token = next_plan.lateral_stop_authority_token
+        proof.trajectory_tracking_usable = False
+        mux.on_pure_pursuit_tracking_status(proof)
+        _bind_envelope_from_legacy(mux, command, proof, sequence=7)
+        previous_count = len(received)
+        mux.on_timer()
+        assert _spin_until(executor, lambda: len(received) > previous_count)
+        assert received[-1].lateral.steering_tire_angle == pytest.approx(0.0)
+
+        # External safety remains a higher-priority fail-closed authority even
+        # when every planner/tracking proof is otherwise valid.
+        final_plan = _authorized_lateral_stop_plan(stamp_sec=14, generation=10)
+        mux.on_overtake_plan(final_plan)
+        final_constraint = _constraint(
+            stamp_sec=14,
+            constraint_generation=4,
+            plan_generation=10,
+            speed_limit_mps=0.5,
+            stop_requested=True,
+            release_authorized=False,
+            reason="maneuver_transaction_tracking_stop",
+        )
+        final_constraint.required_brake_decel_mps2 = 1.5
+        mux.on_safety_constraint(final_constraint)
+        _set_stamp(command.stamp, 24)
+        mux.on_pure_pursuit_cmd(command)
+        _set_stamp(proof.header.stamp, 24)
+        proof.plan_generation = 10
         proof.lateral_stop_authority_token = final_plan.lateral_stop_authority_token
         proof.trajectory_tracking_usable = True
         mux.on_pure_pursuit_tracking_status(proof)
-        _bind_envelope_from_legacy(mux, command, proof, sequence=7)
+        _bind_envelope_from_legacy(mux, command, proof, sequence=9)
         mux.external_stop_latched = True
         previous_count = len(received)
         mux.on_timer()

@@ -158,6 +158,12 @@ if(BUILD_TESTING)
   )
 
   ament_add_gtest(
+    test_pass_warmup_acquisition
+    test/test_pass_warmup_acquisition.cpp
+  )
+  target_include_directories(test_pass_warmup_acquisition PUBLIC include)
+
+  ament_add_gtest(
     test_pp_callback_span_recorder
     test/test_pp_callback_span_recorder.cpp
     test/pp_callback_span_recorder.cpp

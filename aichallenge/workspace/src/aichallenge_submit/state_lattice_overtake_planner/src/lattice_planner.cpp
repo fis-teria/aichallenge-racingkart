@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <string_view>
@@ -816,11 +817,14 @@ LatticePlanner::LatticePlanner(PlannerConfig config, const FrenetFrame *frame,
       detector_(config_), early_aware_selector_(config_) {}
 
 std::vector<TrajectoryPoint>
-LatticePlanner::denseSamples(const ParametricQuintic &polynomial) const {
+LatticePlanner::denseSamples(const ParametricQuintic &polynomial,
+                             int coarse_intervals) const {
+  coarse_intervals = std::max(1, coarse_intervals);
   std::vector<TrajectoryPoint> coarse;
-  coarse.reserve(101U);
-  for (int i = 0; i <= 100; ++i) {
-    coarse.push_back(polynomial.sample(static_cast<double>(i) / 100.0));
+  coarse.reserve(static_cast<std::size_t>(coarse_intervals + 1));
+  for (int i = 0; i <= coarse_intervals; ++i) {
+    coarse.push_back(polynomial.sample(static_cast<double>(i) /
+                                       static_cast<double>(coarse_intervals)));
   }
   std::vector<TrajectoryPoint> dense;
   dense.push_back(coarse.front());
@@ -844,12 +848,11 @@ LatticePlanner::denseSamples(const ParametricQuintic &polynomial) const {
 
 std::vector<CandidateTrajectory> LatticePlanner::generateCandidates(
     const EgoState &ego, const std::vector<OpponentState> &opponents) const {
-  return generateCandidatesInternal(ego, opponents, nullptr);
+  return generateCandidatesInternal(ego, opponents);
 }
 
 std::vector<CandidateTrajectory> LatticePlanner::generateCandidatesInternal(
-    const EgoState &ego, const std::vector<OpponentState> &opponents,
-    const PassContinuationLatch *continuation) const {
+    const EgoState &ego, const std::vector<OpponentState> &opponents) const {
   std::vector<CandidateTrajectory> candidates;
   const double reference_start_curvature =
       sanitizedCurvature(frame_->interpolate(ego.frenet.s).kappa, config_);
@@ -964,16 +967,10 @@ std::vector<CandidateTrajectory> LatticePlanner::generateCandidatesInternal(
       goal_d = std::clamp(goal_d, -config_.max_adaptive_lateral_offset_m,
                           config_.max_adaptive_lateral_offset_m);
     }
-    double terminal_distance = requiredLateralTransitionDistance(
+    const double nominal_terminal_distance = requiredLateralTransitionDistance(
         config_, ego.speed_mps, ego.frenet.d, goal_d);
-    const bool exact_continuation_candidate =
-        continuation != nullptr && blocking_opponent != nullptr &&
-        blocking_opponent->id == continuation->target_id &&
-        ((goal_d > 0.0 ? 1 : -1) == continuation->side) &&
-        lateral == continuation->lateral_index &&
-        std::abs(goal_d - continuation->goal_d_m) <= config_.tie_break_epsilon;
+    double terminal_distance = nominal_terminal_distance;
     if (obstacle_within_lattice && !already_pass_clear &&
-        !exact_continuation_candidate &&
         std::isfinite(pre_obstacle_terminal_distance)) {
       terminal_distance =
           std::min(terminal_distance,
@@ -1027,6 +1024,171 @@ std::vector<CandidateTrajectory> LatticePlanner::generateCandidatesInternal(
       }
       candidate.dense = denseSamples(polynomial);
       evaluateTrajectory(&candidate, opponents, std::abs(ego.speed_mps));
+      const bool legacy_trackability_failure =
+          candidate.rejection_reason == "maximum_curvature" ||
+          candidate.rejection_reason == "curve_speed_below_safe_stop" ||
+          candidate.rejection_reason == "steering_rate_below_safe_stop";
+      // A continuation latch identifies the selected lattice branch, not the
+      // intermediate quintic that preceded deterministic clearance-profile
+      // recovery. Re-run the same transition-distance and recovery pipeline
+      // on every cycle so a latched recovered branch is evaluated with the
+      // same geometry and safety checks as its first selection.
+      const bool may_try_clearance_profile =
+          !candidate.feasible && legacy_trackability_failure &&
+          blocking_is_forward && obstacle_within_lattice &&
+          blocking_opponent != nullptr && !already_pass_clear &&
+          passCapableGoal(goal_d, *blocking_opponent, config_) &&
+          std::isfinite(blocking_forward_gap) &&
+          blocking_forward_gap >
+              config_.minimum_obstacle_transition_distance_m +
+                  config_.tie_break_epsilon &&
+          nominal_terminal_distance >
+              blocking_forward_gap + config_.tie_break_epsilon;
+      if (may_try_clearance_profile) {
+        std::optional<CandidateTrajectory> best_clearance_profile;
+        const double lateral_direction = goal_d >= ego.frenet.d ? 1.0 : -1.0;
+        for (const double join_fraction : {0.50, 0.65, 0.80}) {
+          if (best_clearance_profile.has_value()) {
+            break;
+          }
+          const double join_distance = blocking_forward_gap * join_fraction;
+          const double join_d =
+              ego.frenet.d + join_fraction * (goal_d - ego.frenet.d);
+          const auto join_reference =
+              frame_->interpolate(ego.frenet.s + join_distance);
+          const auto join_point = frame_->frenetToCartesian(
+              ego.frenet.s + join_distance, join_d);
+          const double join_denominator =
+              1.0 - join_d * join_reference.kappa;
+          if (!std::isfinite(join_denominator) ||
+              join_denominator <= 1.0e-3) {
+            continue;
+          }
+          const double join_curvature = sanitizedCurvature(
+              join_reference.kappa / join_denominator, config_);
+          for (const double yaw_magnitude : {0.4, 0.6, 0.8}) {
+            if (best_clearance_profile.has_value()) {
+              break;
+            }
+            const Pose2d join_pose{
+                join_point.x, join_point.y,
+                join_reference.yaw + lateral_direction * yaw_magnitude};
+            const auto clearance_reference =
+                frame_->interpolate(ego.frenet.s + blocking_forward_gap);
+            const auto clearance_point = frame_->frenetToCartesian(
+                ego.frenet.s + blocking_forward_gap, goal_d);
+            const double clearance_denominator =
+                1.0 - goal_d * clearance_reference.kappa;
+            if (!std::isfinite(clearance_denominator) ||
+                clearance_denominator <= 1.0e-3) {
+              continue;
+            }
+            const Pose2d clearance_pose{clearance_point.x, clearance_point.y,
+                                        clearance_reference.yaw};
+            const double clearance_curvature = sanitizedCurvature(
+                clearance_reference.kappa / clearance_denominator, config_);
+            const auto hold_reference = frame_->interpolate(
+                ego.frenet.s + nominal_terminal_distance);
+            const auto hold_point = frame_->frenetToCartesian(
+                ego.frenet.s + nominal_terminal_distance, goal_d);
+            const double hold_denominator =
+                1.0 - goal_d * hold_reference.kappa;
+            if (!std::isfinite(hold_denominator) ||
+                hold_denominator <= 1.0e-3) {
+              continue;
+            }
+            const Pose2d hold_pose{hold_point.x, hold_point.y,
+                                   hold_reference.yaw};
+            const double hold_curvature = sanitizedCurvature(
+                hold_reference.kappa / hold_denominator, config_);
+
+            ParametricQuintic approach;
+            ParametricQuintic clearance;
+            ParametricQuintic hold;
+            if (!approach.configure(ego, start_curvature, join_pose,
+                                    join_curvature,
+                                    candidate.tangent_scale) ||
+                !clearance.configure(join_pose, join_curvature, clearance_pose,
+                                     clearance_curvature,
+                                     candidate.tangent_scale) ||
+                !hold.configure(clearance_pose, clearance_curvature, hold_pose,
+                                hold_curvature, candidate.tangent_scale)) {
+              continue;
+            }
+
+            CandidateTrajectory trial;
+            trial.lateral_index = lateral;
+            trial.tangent_index = tangent;
+            trial.goal_d_m = goal_d;
+            trial.tangent_scale = candidate.tangent_scale;
+            trial.required_arc_m = nominal_terminal_distance;
+            // Preserve the legacy 100-interval geometric sampling budget over
+            // the complete path. Giving every segment 100 intervals creates
+            // more than the fixed 256-point Cartesian transport can carry,
+            // even though the path itself is only one planning horizon. The
+            // existing distance/yaw refinement below denseSamples() remains
+            // authoritative and can still add samples wherever required.
+            constexpr int kWholePathCoarseIntervals = 100;
+            constexpr int kMinimumSegmentIntervals = 8;
+            const double hold_distance =
+                nominal_terminal_distance - blocking_forward_gap;
+            const int hold_intervals = std::clamp(
+                static_cast<int>(std::lround(
+                    kWholePathCoarseIntervals * hold_distance /
+                    nominal_terminal_distance)),
+                kMinimumSegmentIntervals,
+                kWholePathCoarseIntervals - 2 * kMinimumSegmentIntervals);
+            const int passing_intervals =
+                kWholePathCoarseIntervals - hold_intervals;
+            const int approach_intervals = std::clamp(
+                static_cast<int>(std::lround(
+                    passing_intervals * join_distance /
+                    blocking_forward_gap)),
+                kMinimumSegmentIntervals,
+                passing_intervals - kMinimumSegmentIntervals);
+            const int clearance_intervals =
+                passing_intervals - approach_intervals;
+            trial.dense = denseSamples(approach, approach_intervals);
+            auto clearance_dense =
+                denseSamples(clearance, clearance_intervals);
+            auto hold_dense = denseSamples(hold, hold_intervals);
+            if (trial.dense.empty() || clearance_dense.size() < 2U ||
+                hold_dense.size() < 2U) {
+              continue;
+            }
+            trial.dense.insert(trial.dense.end(),
+                               std::next(clearance_dense.begin()),
+                               clearance_dense.end());
+            trial.dense.insert(trial.dense.end(), std::next(hold_dense.begin()),
+                               hold_dense.end());
+            for (std::size_t i = 0U; i < trial.dense.size(); ++i) {
+              trial.dense[i].u =
+                  static_cast<double>(i) /
+                  static_cast<double>(trial.dense.size() - 1U);
+            }
+            for (int i = 0; i < config_.sampling_points; ++i) {
+              const std::size_t index =
+                  static_cast<std::size_t>(i) * (trial.dense.size() - 1U) /
+                  static_cast<std::size_t>(config_.sampling_points - 1);
+              trial.representative.push_back(trial.dense[index]);
+            }
+            evaluateTrajectory(&trial, opponents, std::abs(ego.speed_mps));
+            if (!trial.feasible) {
+              continue;
+            }
+            // The search order is deliberate: earlier join fractions and
+            // smaller heading offsets establish lateral clearance sooner.
+            // Retain the first fully evaluated feasible profile rather than
+            // trading clearance timing for a higher speed limit.
+            if (!best_clearance_profile.has_value()) {
+              best_clearance_profile = std::move(trial);
+            }
+          }
+        }
+        if (best_clearance_profile.has_value()) {
+          candidate = std::move(best_clearance_profile.value());
+        }
+      }
       candidates.push_back(std::move(candidate));
     }
   }
@@ -2147,10 +2309,12 @@ bool LatticePlanner::evaluateTrajectory(
   }
 
   std::vector<int> costs;
+  std::vector<int> safety_costs;
   std::vector<int> reference_costs;
   std::vector<int> wall_costs;
   std::vector<int> object_costs;
   costs.reserve(candidate->representative.size());
+  safety_costs.reserve(candidate->representative.size());
   reference_costs.reserve(candidate->representative.size());
   wall_costs.reserve(candidate->representative.size());
   object_costs.reserve(candidate->representative.size());
@@ -2171,6 +2335,7 @@ bool LatticePlanner::evaluateTrajectory(
     point.time_sec = timeAtU(candidate->dense, point.u);
     const auto cost = poseCostBreakdown(point, opponents);
     costs.push_back(cost.total_cost);
+    safety_costs.push_back(cost.safety_cost);
     reference_costs.push_back(cost.reference_cost);
     wall_costs.push_back(cost.wall_cost);
     object_costs.push_back(cost.object_cost);
@@ -2217,6 +2382,7 @@ bool LatticePlanner::evaluateTrajectory(
     }
   }
   candidate->total_cost = trajectoryCost(costs);
+  candidate->safety_cost = trajectoryCost(safety_costs);
   candidate->reference_cost = trajectoryCost(reference_costs);
   candidate->wall_cost = trajectoryCost(wall_costs);
   candidate->object_cost = trajectoryCost(object_costs);
@@ -2237,6 +2403,7 @@ LatticePlanner::PoseCostBreakdown LatticePlanner::poseCostBreakdown(
       config_.cost_levels[static_cast<std::size_t>(reference_level)];
   if (!config_.safety_evaluation_enabled) {
     breakdown.total_cost = breakdown.reference_cost;
+    breakdown.safety_cost = config_.cost_levels.front();
     return breakdown;
   }
   const auto nominal_footprint = nominalFootprint(config_);
@@ -2312,6 +2479,9 @@ LatticePlanner::PoseCostBreakdown LatticePlanner::poseCostBreakdown(
   breakdown.total_cost =
       config_.cost_levels[static_cast<std::size_t>(mergeCostLevels(
           reference_level, mergeCostLevels(wall_level, object_level)))];
+  breakdown.safety_cost =
+      config_.cost_levels[static_cast<std::size_t>(
+          mergeCostLevels(wall_level, object_level))];
   return breakdown;
 }
 
@@ -2548,6 +2718,171 @@ int LatticePlanner::rearCost(const std::vector<TrajectoryPoint> &path,
   return trajectoryCost(costs);
 }
 
+std::optional<CandidateTrajectory>
+LatticePlanner::boundedExactCartesianExecution(
+    const CandidateTrajectory &candidate,
+    const std::vector<OpponentState> &opponents, std::size_t maximum_points,
+    OutputHorizonDiagnostic *diagnostic) const {
+  if (maximum_points < 2U || candidate.dense.size() < 2U) {
+    if (diagnostic != nullptr) {
+      *diagnostic = OutputHorizonDiagnostic{};
+      diagnostic->failure = OutputHorizonFailure::INVALID_CONTRACT;
+    }
+    return std::nullopt;
+  }
+
+  CandidateTrajectory execution = candidate;
+  if (execution.dense.size() > maximum_points) {
+    const auto &source = candidate.dense;
+    execution.dense.clear();
+    execution.dense.reserve(maximum_points);
+    for (std::size_t output_index = 0U; output_index < maximum_points;
+         ++output_index) {
+      const std::size_t source_index =
+          output_index * (source.size() - 1U) / (maximum_points - 1U);
+      execution.dense.push_back(source[source_index]);
+    }
+  }
+  if (!validateExactCartesianHorizon(execution, opponents, diagnostic)) {
+    return std::nullopt;
+  }
+  return execution;
+}
+
+bool LatticePlanner::validateExactCartesianHorizon(
+    const CandidateTrajectory &candidate,
+    const std::vector<OpponentState> &opponents,
+    OutputHorizonDiagnostic *diagnostic) const {
+  if (diagnostic != nullptr) {
+    *diagnostic = OutputHorizonDiagnostic{};
+  }
+  if (!config_.safety_evaluation_enabled || !candidate.feasible ||
+      candidate.dense.size() < 2U || map_ == nullptr ||
+      !map_->initialized()) {
+    if (diagnostic != nullptr) {
+      diagnostic->failure = OutputHorizonFailure::INVALID_CONTRACT;
+    }
+    return false;
+  }
+
+  const double maximum_curvature = maximumPlannerCurvature(config_);
+  for (std::size_t i = 0U; i < candidate.dense.size(); ++i) {
+    const auto &point = candidate.dense[i];
+    if (!finitePoint(point) || point.time_sec < -1.0e-9 ||
+        (i > 0U &&
+         point.time_sec < candidate.dense[i - 1U].time_sec - 1.0e-9)) {
+      if (diagnostic != nullptr) {
+        diagnostic->failure = i > 0U ? OutputHorizonFailure::NON_POSITIVE_DT
+                                     : OutputHorizonFailure::INVALID_POINT;
+        diagnostic->waypoint_index = static_cast<int>(i);
+      }
+      return false;
+    }
+    if (std::abs(point.kappa) > maximum_curvature + 1.0e-6) {
+      if (diagnostic != nullptr) {
+        diagnostic->failure = OutputHorizonFailure::CURVATURE;
+        diagnostic->waypoint_index = static_cast<int>(i);
+        diagnostic->curvature_radpm = point.kappa;
+      }
+      return false;
+    }
+    if (map_->footprintHitsWall(point, wallFootprint(config_, true))) {
+      if (diagnostic != nullptr) {
+        diagnostic->failure = OutputHorizonFailure::WAYPOINT_WALL_COLLISION;
+        diagnostic->waypoint_index = static_cast<int>(i);
+      }
+      return false;
+    }
+    if (opponentCollision(point, opponents)) {
+      bool exempt = i == 0U;
+      for (const auto &opponent : opponents) {
+        if (opponentCollisionDiagnostic(point, {opponent}).collision() &&
+            !currentPoseRearOnlyExemptionApplies(point, opponent)) {
+          exempt = false;
+          break;
+        }
+      }
+      if (!exempt) {
+        if (diagnostic != nullptr) {
+          diagnostic->failure =
+              OutputHorizonFailure::WAYPOINT_OPPONENT_COLLISION;
+          diagnostic->waypoint_index = static_cast<int>(i);
+        }
+        return false;
+      }
+    }
+    if (i == 0U) {
+      continue;
+    }
+
+    const auto &previous = candidate.dense[i - 1U];
+    const double distance = std::hypot(point.x - previous.x,
+                                       point.y - previous.y);
+    const double yaw_delta =
+        std::abs(normalizeAngle(point.yaw - previous.yaw));
+    const int samples = std::max(
+        1, static_cast<int>(std::ceil(std::max(
+               distance / config_.collision_max_step_m,
+               yaw_delta / config_.collision_max_yaw_step_rad))));
+    const double dt = point.time_sec - previous.time_sec;
+    if (dt <= 1.0e-9) {
+      const bool identical_join = distance <= 1.0e-9 &&
+                                  yaw_delta <= 1.0e-9 &&
+                                  std::abs(point.kappa - previous.kappa) <=
+                                      1.0e-9;
+      if (identical_join) {
+        continue;
+      }
+      if (diagnostic != nullptr) {
+        diagnostic->failure = OutputHorizonFailure::NON_POSITIVE_DT;
+        diagnostic->waypoint_index = static_cast<int>(i);
+      }
+      return false;
+    }
+    const double previous_steer =
+        std::atan(config_.wheel_base_m * previous.kappa);
+    const double current_steer = std::atan(config_.wheel_base_m * point.kappa);
+    if (std::abs(current_steer - previous_steer) / dt >
+        config_.max_steer_rate_radps + 1.0e-6) {
+      if (diagnostic != nullptr) {
+        diagnostic->failure = OutputHorizonFailure::STEERING_RATE;
+        diagnostic->waypoint_index = static_cast<int>(i);
+      }
+      return false;
+    }
+    for (int sample = 1; sample < samples; ++sample) {
+      const double ratio = static_cast<double>(sample) / samples;
+      TrajectoryPoint interpolated = previous;
+      interpolated.x = lerp(previous.x, point.x, ratio);
+      interpolated.y = lerp(previous.y, point.y, ratio);
+      interpolated.yaw = normalizeAngle(
+          previous.yaw +
+          ratio * normalizeAngle(point.yaw - previous.yaw));
+      interpolated.kappa = lerp(previous.kappa, point.kappa, ratio);
+      interpolated.time_sec = lerp(previous.time_sec, point.time_sec, ratio);
+      interpolated.speed_mps =
+          lerp(previous.speed_mps, point.speed_mps, ratio);
+      if (map_->footprintHitsWall(interpolated, wallFootprint(config_, true))) {
+        if (diagnostic != nullptr) {
+          diagnostic->failure =
+              OutputHorizonFailure::INTERPOLATED_WALL_COLLISION;
+          diagnostic->waypoint_index = static_cast<int>(i);
+        }
+        return false;
+      }
+      if (opponentCollision(interpolated, opponents)) {
+        if (diagnostic != nullptr) {
+          diagnostic->failure =
+              OutputHorizonFailure::INTERPOLATED_OPPONENT_COLLISION;
+          diagnostic->waypoint_index = static_cast<int>(i);
+        }
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 bool LatticePlanner::outputHorizon(const EgoState &ego,
                                    const CandidateTrajectory &candidate,
                                    const std::vector<OpponentState> &opponents,
@@ -2705,42 +3040,121 @@ bool LatticePlanner::outputHorizon(const EgoState &ego,
                                         output_ego.s) < output_ego.s - 1.0e-6) {
     ++first_forward_source;
   }
-  double previous_x = ego.x;
-  double previous_y = ego.y;
-  double accumulated_arc_m = 0.0;
+  double previous_reference_x = ego.x;
+  double previous_reference_y = ego.y;
+  double candidate_arc_m = 0.0;
+  double previous_output_s = output_ego.s;
+  double previous_projected_reference_x = ego.x;
+  double previous_projected_reference_y = ego.y;
+  std::optional<double> terminal_output_d;
+  TrajectoryPoint previous_desired = profile.front();
   for (int i = 0; i < config_.horizon_points; ++i) {
-    const double output_s =
-        i == 0 ? output_ego.s
-               : output_frame_->unwrappedIndexS(first_forward_source + i,
-                                                output_nearest, output_ego.s);
-    ReferencePoint reference = output_frame_->interpolate(output_s);
-    if (i > 0) {
-      accumulated_arc_m +=
-          std::hypot(reference.x - previous_x, reference.y - previous_y);
-      previous_x = reference.x;
-      previous_y = reference.y;
+    if (i == 0) {
+      d->push_back(output_ego.d);
+      speed->push_back(
+          std::max(config_.safe_stop_speed_mps, profile.front().speed_mps));
+      longitudinal_offsets_m->push_back(0.0);
+      continue;
     }
-    const auto desired =
-        i == 0 ? profile.front() : sample_profile(accumulated_arc_m);
-    const double dx = desired.x - reference.x;
-    const double dy = desired.y - reference.y;
-    const double tangential_residual_m =
-        dx * std::cos(reference.yaw) + dy * std::sin(reference.yaw);
-    if (i > 0 && std::abs(tangential_residual_m) >
-                     config_.projection_follow_half_width_m) {
+    const double nominal_output_s = output_frame_->unwrappedIndexS(
+        first_forward_source + i, output_nearest, output_ego.s);
+    const auto nominal_reference = output_frame_->interpolate(nominal_output_s);
+    const double nominal_step_m =
+        std::hypot(nominal_reference.x - previous_reference_x,
+                   nominal_reference.y - previous_reference_y);
+    candidate_arc_m += nominal_step_m;
+    previous_reference_x = nominal_reference.x;
+    previous_reference_y = nominal_reference.y;
+    const auto desired = sample_profile(candidate_arc_m);
+
+    double accepted_output_s = previous_output_s;
+    double output_d_m = 0.0;
+    if (terminal_output_d.has_value()) {
+      // Once the finite candidate transition ends, continue its accepted
+      // terminal lateral offset along the controller reference.  Reusing the
+      // terminal Cartesian point would create duplicate stations and only
+      // appear to fill the controller horizon.
+      if (!std::isfinite(nominal_step_m) || nominal_step_m <= 1.0e-6) {
+        if (diagnostic != nullptr) {
+          diagnostic->failure = OutputHorizonFailure::INVALID_INPUT;
+          diagnostic->waypoint_index = i;
+          diagnostic->observed_value = nominal_step_m;
+          diagnostic->limit_value = 1.0e-6;
+        }
+        return false;
+      }
+      accepted_output_s = previous_output_s + nominal_step_m;
+      output_d_m = terminal_output_d.value();
+    } else {
+      // Preserve the candidate's actual Cartesian arc, then continuously
+      // project that point into the controller reference near its expected
+      // forward station. Advancing both references by the same nominal arc
+      // accumulates their different parameterizations and eventually compares
+      // unrelated points (runtime-10 generation 489).
+      const double candidate_step_m = std::hypot(
+          desired.x - previous_desired.x, desired.y - previous_desired.y);
+      if (!std::isfinite(candidate_step_m) || candidate_step_m <= 1.0e-6) {
+        if (diagnostic != nullptr) {
+          diagnostic->failure = OutputHorizonFailure::INVALID_INPUT;
+          diagnostic->waypoint_index = i;
+          diagnostic->observed_value = candidate_step_m;
+          diagnostic->limit_value = 1.0e-6;
+        }
+        return false;
+      }
+      const double expected_output_s = previous_output_s + candidate_step_m;
+      const auto projected = output_frame_->projectContinuousUnique(
+          desired.x, desired.y, desired.yaw, expected_output_s,
+          config_.projection_follow_half_width_m);
+      if (!projected.valid) {
+        if (diagnostic != nullptr) {
+          diagnostic->failure = OutputHorizonFailure::INVALID_INPUT;
+          diagnostic->waypoint_index = i;
+          diagnostic->observed_value =
+              std::numeric_limits<double>::quiet_NaN();
+          diagnostic->limit_value = config_.projection_follow_half_width_m;
+        }
+        return false;
+      }
+      const double raw_forward_delta_m = projected.s - previous_output_s;
+      if (!std::isfinite(raw_forward_delta_m) ||
+          raw_forward_delta_m < -config_.projection_max_backward_m) {
+        if (diagnostic != nullptr) {
+          diagnostic->failure = OutputHorizonFailure::INVALID_INPUT;
+          diagnostic->waypoint_index = i;
+          diagnostic->observed_value = raw_forward_delta_m;
+          diagnostic->limit_value = config_.projection_max_backward_m;
+        }
+        return false;
+      }
+      accepted_output_s = std::max(previous_output_s, projected.s);
+      output_d_m = projected.d;
+      if (candidate_arc_m >= profile_arc_m.back() - 1.0e-6) {
+        terminal_output_d = output_d_m;
+      }
+    }
+    const auto accepted_reference =
+        output_frame_->interpolate(accepted_output_s);
+    const double forward_arc_delta_m = std::hypot(
+        accepted_reference.x - previous_projected_reference_x,
+        accepted_reference.y - previous_projected_reference_y);
+    if (!std::isfinite(forward_arc_delta_m)) {
       if (diagnostic != nullptr) {
         diagnostic->failure = OutputHorizonFailure::INVALID_INPUT;
         diagnostic->waypoint_index = i;
-        diagnostic->observed_value = tangential_residual_m;
+        diagnostic->observed_value = forward_arc_delta_m;
         diagnostic->limit_value = config_.projection_follow_half_width_m;
       }
       return false;
     }
-    const double output_d_m =
-        -dx * std::sin(reference.yaw) + dy * std::cos(reference.yaw);
-    d->push_back(i == 0 ? output_ego.d : output_d_m);
+    d->push_back(output_d_m);
     speed->push_back(std::max(config_.safe_stop_speed_mps, desired.speed_mps));
-    longitudinal_offsets_m->push_back(accumulated_arc_m);
+    longitudinal_offsets_m->push_back(longitudinal_offsets_m->back() +
+                                      forward_arc_delta_m);
+    previous_output_s = accepted_output_s;
+    previous_projected_reference_x = accepted_reference.x;
+    previous_projected_reference_y = accepted_reference.y;
+    previous_desired = desired;
   }
   return validateResampledHorizon(ego, opponents, *d, *speed,
                                   *longitudinal_offsets_m, diagnostic);
@@ -3755,7 +4169,7 @@ PlannerOutput LatticePlanner::update(
                    return opponent.id != peer.id;
                  });
     candidates_ =
-        generateCandidatesInternal(ego, generation_opponents, nullptr);
+        generateCandidatesInternal(ego, generation_opponents);
     auto straight_corridor =
         roleCorridorCandidate(ego, ego.frenet.d, generation_opponents);
     if (straight_corridor.has_value()) {
@@ -4099,10 +4513,7 @@ PlannerOutput LatticePlanner::update(
   }
 
   const auto candidate_generation_started = std::chrono::steady_clock::now();
-  const PassContinuationLatch *continuation_for_generation =
-      continuation_target_matches ? &pass_continuation_latch_.value() : nullptr;
-  candidates_ = generateCandidatesInternal(ego, planning_opponents,
-                                           continuation_for_generation);
+  candidates_ = generateCandidatesInternal(ego, planning_opponents);
   std::vector<OpponentState> parallel_opponents;
   for (std::size_t i = 0U; i < output.front_detection_diagnostic.opponent_count;
        ++i) {
@@ -4238,7 +4649,7 @@ PlannerOutput LatticePlanner::update(
   }
 
   const auto is_sub_stop_cost = [this](const auto *candidate) {
-    return candidate->total_cost < config_.stop_cost;
+    return candidate->safety_cost < config_.stop_cost;
   };
   const auto is_pass_class = [](const auto *candidate) {
     return std::abs(candidate->goal_d_m) > 0.05;
@@ -4791,6 +5202,7 @@ PlannerOutput LatticePlanner::update(
     double requested_speed_mps{0.0};
     double command_speed_mps{0.0};
     double acceleration_mps2{0.0};
+    bool exact_cartesian_execution{false};
     std::vector<double> lateral_offsets_m;
     std::vector<double> speed_caps_mps;
     std::vector<double> longitudinal_offsets_m;
@@ -4809,7 +5221,7 @@ PlannerOutput LatticePlanner::update(
     plan.safe_stop_latched = safe_stop_latched_;
     plan.safe_stop_release_count = safe_stop_release_count_;
     const bool fresh_cost_stop = config_.safety_evaluation_enabled &&
-                                 candidate->total_cost >= config_.stop_cost;
+                                 candidate->safety_cost >= config_.stop_cost;
     if (fresh_cost_stop) {
       plan.safe_stop_latched = true;
       plan.safe_stop_release_count = 0;
@@ -4819,7 +5231,7 @@ PlannerOutput LatticePlanner::update(
       candidate_plan->logical_stop = logical_stop;
       double desired_speed =
           logical_stop ? config_.safe_stop_speed_mps
-                       : targetSpeedForCost(candidate->total_cost, config_);
+                       : targetSpeedForCost(candidate->safety_cost, config_);
       if (target_missing_recovery) {
         desired_speed =
             std::min(desired_speed, config_.target_missing_recovery_speed_mps);
@@ -4842,15 +5254,45 @@ PlannerOutput LatticePlanner::update(
         candidate_plan->command_speed_mps = config_.safe_stop_speed_mps;
       }
       OutputHorizonDiagnostic diagnostic;
-      if (!timed_output_horizon(*candidate, candidate_plan->command_speed_mps,
-                                &candidate_plan->lateral_offsets_m,
-                                &candidate_plan->speed_caps_mps,
-                                &candidate_plan->longitudinal_offsets_m,
-                                &diagnostic)) {
+      candidate_plan->exact_cartesian_execution =
+          config_.exact_cartesian_execution_enabled && !logical_stop;
+      const bool valid_output = candidate_plan->exact_cartesian_execution
+                                    ? validateExactCartesianHorizon(
+                                          *candidate, planning_opponents,
+                                          &diagnostic)
+                                    : timed_output_horizon(
+                                          *candidate,
+                                          candidate_plan->command_speed_mps,
+                                          &candidate_plan->lateral_offsets_m,
+                                          &candidate_plan->speed_caps_mps,
+                                          &candidate_plan
+                                               ->longitudinal_offsets_m,
+                                          &diagnostic);
+      if (!valid_output) {
         if (remember_failure) {
           remember_output_horizon_failure(std::move(diagnostic), *candidate);
         }
         return false;
+      }
+      if (candidate_plan->exact_cartesian_execution) {
+        double exact_arc_m = 0.0;
+        for (std::size_t i = 1U; i < candidate->dense.size(); ++i) {
+          exact_arc_m += std::hypot(candidate->dense[i].x -
+                                        candidate->dense[i - 1U].x,
+                                    candidate->dense[i].y -
+                                        candidate->dense[i - 1U].y);
+        }
+        if (!std::isfinite(exact_arc_m) || exact_arc_m <= 1.0e-6) {
+          return false;
+        }
+        // V4 remains the authority heartbeat. Its bounded zero-lateral
+        // profile is never execution geometry when the exact kind is set;
+        // PP selects the same-generation BindingStore Cartesian payload.
+        candidate_plan->lateral_offsets_m = {0.0, 0.0};
+        candidate_plan->speed_caps_mps = {
+            candidate_plan->command_speed_mps,
+            candidate_plan->command_speed_mps};
+        candidate_plan->longitudinal_offsets_m = {0.0, exact_arc_m};
       }
       return true;
     };
@@ -4869,7 +5311,7 @@ PlannerOutput LatticePlanner::update(
       }
     }
     if (config_.safety_evaluation_enabled && plan.safe_stop_latched) {
-      if (candidate->total_cost <= config_.safe_stop_release_cost) {
+      if (candidate->safety_cost <= config_.safe_stop_release_cost) {
         ++plan.safe_stop_release_count;
       } else {
         plan.safe_stop_release_count = 0;
@@ -4881,7 +5323,7 @@ PlannerOutput LatticePlanner::update(
     }
     plan.logical_stop =
         config_.safety_evaluation_enabled &&
-        (plan.safe_stop_latched || candidate->total_cost >= config_.stop_cost);
+        (plan.safe_stop_latched || candidate->safety_cost >= config_.stop_cost);
     if (!populate_plan(&plan, plan.logical_stop, true)) {
       return std::nullopt;
     }
@@ -4928,6 +5370,10 @@ PlannerOutput LatticePlanner::update(
   output.speed_caps_mps = std::move(chosen_plan->speed_caps_mps);
   output.longitudinal_offsets_m =
       std::move(chosen_plan->longitudinal_offsets_m);
+  output.execution_geometry_kind =
+      chosen_plan->exact_cartesian_execution
+          ? ExecutionGeometryKind::EXACT_CARTESIAN
+          : ExecutionGeometryKind::LEGACY_OFFSETS;
   output.spatial_profile_shadow_only =
       config_.experimental_exact_spatial_follow_shadow_enabled &&
       !output.longitudinal_offsets_m.empty();
@@ -4952,7 +5398,7 @@ PlannerOutput LatticePlanner::update(
     std::fill(output.speed_caps_mps.begin(), output.speed_caps_mps.end(),
               config_.safe_stop_speed_mps);
     output.emergency_stop = true;
-    output.reason = choice->total_cost >= config_.stop_cost
+    output.reason = choice->safety_cost >= config_.stop_cost
                         ? "cost_stop_threshold"
                         : "cost_stop_latched";
   } else if (target_missing_recovery) {

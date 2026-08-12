@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -18,6 +20,7 @@ from aic_test.v4_pp_mux_driver import (
 )
 from aic_test.v4_pp_mux_observer import (
     CAUSAL_WINDOW_S,
+    CAPTURE_CLOSE_QUIET_SEC,
     DIAGNOSTIC_COUNTER_MAX,
     MuxStopPayload,
     Stage2Evidence,
@@ -35,12 +38,27 @@ from aic_test.v4_pp_mux_observer import (
     _normalize_mux_stop_payload,
     _same_sign,
     _valid_v4_payload,
+    _capture_close_ready,
+    _first_valid_marker_observed_at,
+    classify_latest_sample_capture,
+    classify_latest_sample_artifacts,
+    write_latest_sample_selector_manifest,
     _validate_private_root as observer_private_root_valid,
 )
 from aic_test.v4_pp_mux_stage2_runner import (
+    ACCEPTABLE_LATEST_SAMPLE_TERMINALS,
+    _claim_fields,
+    _build_observer_command,
     _setsid_command,
     _terminate_owned_group,
     _validate_fixture_commands,
+)
+from aic_test.installed_artifact_attestation import (
+    REQUIRED_STAGE2_ROLES,
+    InstalledRoleSpec,
+    attest_stage2_installed_snapshot,
+    attest_installed_roles,
+    inspect_host_installed_snapshot,
 )
 
 
@@ -196,6 +214,318 @@ def test_runner_accepts_only_bound_private_fixture_commands() -> None:
     assert not _validate_fixture_commands(
         observer, [*launch[:-1], "topic_token:=other"], driver, "run_03"
     )
+    capture_path = Path("/tmp/aic-test/mux.json")
+    assert _validate_fixture_commands(
+        observer,
+        [
+            *launch,
+            f"mux_capture_output_path:={capture_path}",
+            "mux_selector_manifest_sha256:=" + "a" * 64,
+            "mux_capture_epoch_nonce:=" + "b" * 32,
+            "mux_capture_epoch:=1",
+        ],
+        driver,
+        "run_03",
+        capture_path,
+        "a" * 64,
+        "b" * 32,
+        1,
+    )
+
+
+def test_observer_command_keeps_nonce_and_close_marker_distinct(tmp_path: Path) -> None:
+    nonce = "a" * 32
+    marker = tmp_path / "driver-complete.json"
+    command = _build_observer_command(
+        ["python3", "/repo/v4_pp_mux_observer.py"],
+        "/aic_test/v4_pp_mux_stage2/run_03",
+        20.0,
+        tmp_path / "observer.json",
+        tmp_path / "ready.json",
+        nonce,
+        marker,
+    )
+    assert command[command.index("--capture-epoch-nonce") + 1] == nonce
+    assert command[command.index("--capture-close-marker") + 1] == str(marker)
+
+
+def test_capture_close_drain_waits_for_pending_envelopes_after_marker() -> None:
+    marker_at = 10.0
+    assert _first_valid_marker_observed_at(
+        None, marker_valid=True, now_sec=marker_at
+    ) == marker_at
+    assert _first_valid_marker_observed_at(
+        marker_at, marker_valid=True, now_sec=10.05
+    ) == marker_at
+    assert not _capture_close_ready(
+        marker_observed_at=marker_at, last_envelope_at=None, now_sec=marker_at
+    )
+    assert not _capture_close_ready(
+        marker_observed_at=marker_at, last_envelope_at=10.08, now_sec=10.15
+    )
+    assert _capture_close_ready(
+        marker_observed_at=marker_at,
+        last_envelope_at=10.08,
+        now_sec=10.08 + CAPTURE_CLOSE_QUIET_SEC + 0.001,
+    )
+    assert _capture_close_ready(
+        marker_observed_at=marker_at,
+        last_envelope_at=None,
+        now_sec=marker_at + CAPTURE_CLOSE_QUIET_SEC + 0.001,
+    )
+
+
+def test_target_agnostic_capture_classification_is_manifest_hash_bound(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "selector.json"
+    mux_path = tmp_path / "mux.json"
+    pp_path = tmp_path / "pp.json"
+    root = "/aic_test/v4_pp_mux_stage2/run_03"
+    nonce = "a" * 32
+    manifest_sha256 = write_latest_sample_selector_manifest(
+        manifest_path, root, nonce
+    )
+    target = [7, 10, 100, 3]
+    successor = [7, 11, 110, 3]
+    mux_path.write_text(
+        json.dumps(
+            {
+                "latest_sample_schema_version": 1,
+                "latest_sample_observability_enabled": True,
+                "sealed": True,
+                "measurement_faults": 0,
+                "overflow": False,
+                "callback_overflow": False,
+                "cycle_overflow": False,
+                "latest_sample_capture": {
+                    "closed": True,
+                    "late_entry": False,
+                    "selector_manifest_sha256": manifest_sha256,
+                    "capture_epoch_nonce": nonce,
+                    "epoch": 1,
+                    "expected_capture_epoch": 1,
+                },
+                "latest_sample_callback_records": [
+                    [1, 1, target, True, "ok", "inserted", None, target, "advanced", False],
+                    [2, 2, successor, True, "ok", "inserted", target, successor, "advanced", False],
+                ],
+                "latest_sample_cycle_records": [
+                    [1, 3, successor, successor, "selected", "stop", "timeout", False, False]
+                ],
+            }
+        )
+    )
+    pp_path.write_text(
+        json.dumps(
+            {
+                "private_root": root,
+                "capture_epoch_nonce": nonce,
+                "evidence": {
+                    "selector_candidate_window_closed": True,
+                    "selector_capture_close_marker_observed": True,
+                    "selector_candidate_window_opened_at": 1.0,
+                    "target_published_after_arm": True,
+                    "selector_candidate_overflow": False,
+                    "selector_candidate_duplicate_conflict": False,
+                    "selector_eligible_candidate_count": 1,
+                    "selector_eligible_candidates": [
+                        {
+                            "identity": target,
+                            "payload_sha256": "b" * 64,
+                            "published_after_arm": True,
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    result = classify_latest_sample_artifacts(
+        selector_manifest_path=manifest_path, mux_capture_path=mux_path, pp_result_path=pp_path
+    )
+    assert result["terminal"] == "HOLD_SOURCE_HASH_UNBOUND"
+    assert result["selector_manifest_sha256"] == manifest_sha256
+
+    manifest = json.loads(manifest_path.read_text())
+    manifest["expected_source_hashes"] = {"fixture": "c" * 64}
+    manifest_path.write_text(json.dumps(manifest))
+    capture = json.loads(mux_path.read_text())
+    capture["latest_sample_capture"]["selector_manifest_sha256"] = (
+        hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    mux_path.write_text(json.dumps(capture))
+    pp_result = json.loads(pp_path.read_text())
+    assert classify_latest_sample_capture(
+        selector_manifest=manifest, mux_capture=capture, pp_result=pp_result
+    ) == "RECEIVED_AND_SUPERSEDED"
+
+    capture["latest_sample_capture"]["selector_manifest_sha256"] = "0" * 64
+    mux_path.write_text(json.dumps(capture))
+    assert classify_latest_sample_artifacts(
+        selector_manifest_path=manifest_path, mux_capture_path=mux_path, pp_result_path=pp_path
+    )["terminal"] == "INDETERMINATE_TRACE_LOSS"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        (lambda manifest, capture, result: result["evidence"].update({"selector_eligible_candidate_count": 0, "selector_eligible_candidates": []}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: result["evidence"].update({"selector_eligible_candidate_count": 2, "selector_eligible_candidates": result["evidence"]["selector_eligible_candidates"] * 2}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: result["evidence"].update({"selector_candidate_duplicate_conflict": True}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: result.update({"private_root": "/aic_test/v4_pp_mux_stage2/other"}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: capture["latest_sample_capture"].update({"capture_epoch_nonce": "b" * 32}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: capture["latest_sample_capture"].update({"epoch": 2}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: capture.update({"sealed": False}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: result["evidence"].update({"selector_capture_close_marker_observed": False}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: capture.update({"latest_sample_callback_records": [[2, 1, [7, 10, 100, 3], True, "ok", "inserted", None, [7, 10, 100, 3], "advanced", False]]}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: capture.update({"latest_sample_callback_records": [[1, 1]]}), "INDETERMINATE_TRACE_LOSS"),
+        (lambda manifest, capture, result: capture.update({"latest_sample_callback_records": [[1, 1, [7, 10, 100, 3], True, "duplicate_conflict", "duplicate_conflict", None, [7, 10, 100, 3], "unchanged", False]]}), "INDETERMINATE_TRACE_LOSS"),
+    ],
+)
+def test_target_selector_fails_closed_for_ambiguous_or_incomplete_artifacts(mutation, expected) -> None:
+    root = "/aic_test/v4_pp_mux_stage2/run_04"
+    nonce = "d" * 32
+    target = [7, 10, 100, 3]
+    manifest = {
+        "schema_version": 1, "private_root": root,
+        "selector_rule": "first_invalid_zero_envelope_after_invalid_v4",
+        "selector_source": "pp_observer", "capture_epoch_nonce": nonce,
+    }
+    capture = {
+        "latest_sample_schema_version": 1, "latest_sample_observability_enabled": True,
+        "sealed": True, "measurement_faults": 0, "overflow": False,
+        "callback_overflow": False, "cycle_overflow": False,
+        "latest_sample_capture": {"closed": True, "late_entry": False, "selector_manifest_sha256": "a" * 64, "capture_epoch_nonce": nonce, "epoch": 1, "expected_capture_epoch": 1},
+        "latest_sample_callback_records": [[1, 1, target, True, "ok", "inserted", None, target, "advanced", False]],
+        "latest_sample_cycle_records": [[1, 2, target, target, "selected", "stop", "x", False, False]],
+    }
+    result = {
+        "private_root": root, "capture_epoch_nonce": nonce,
+        "evidence": {
+            "selector_candidate_window_closed": True, "target_published_after_arm": True,
+            "selector_capture_close_marker_observed": True,
+            "selector_candidate_window_opened_at": 1.0,
+            "selector_candidate_overflow": False, "selector_candidate_duplicate_conflict": False,
+            "selector_eligible_candidate_count": 1,
+            "selector_eligible_candidates": [{"identity": target, "payload_sha256": "e" * 64, "published_after_arm": True}],
+        },
+    }
+    mutation(manifest, capture, result)
+    assert classify_latest_sample_capture(
+        selector_manifest=manifest, mux_capture=capture, pp_result=result
+    ) == expected
+
+
+def test_selector_is_pp_only_and_runner_terminal_allowlist_is_conservative(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "selector.json"
+    write_latest_sample_selector_manifest(
+        manifest_path, "/aic_test/v4_pp_mux_stage2/run_05", "f" * 32
+    )
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["selector_source"] == "pp_observer"
+    assert "mux" not in manifest["selector_rule"]
+    assert ACCEPTABLE_LATEST_SAMPLE_TERMINALS == {"RECEIVED_AND_EVALUATED"}
+    assert "NOT_OBSERVED_IN_COMPLETE_MUX_TRACE" not in ACCEPTABLE_LATEST_SAMPLE_TERMINALS
+    assert "NONQUALIFYING" not in ACCEPTABLE_LATEST_SAMPLE_TERMINALS
+
+
+@pytest.mark.parametrize(
+    ("terminal", "runner_success", "evaluated"),
+    [
+        ("RECEIVED_AND_EVALUATED", True, True),
+        ("RECEIVED_AND_SUPERSEDED", False, False),
+        ("NONQUALIFYING", False, False),
+    ],
+)
+def test_runner_claims_never_upgrade_superseded_receipt(
+    terminal: str, runner_success: bool, evaluated: bool
+) -> None:
+    claims = _claim_fields(terminal)
+    assert claims["runner_success"] is runner_success
+    assert claims["pp_command_evaluated"] is evaluated
+    assert claims["final_mux_use_proven"] is False
+    assert claims["vehicle_control_proven"] is False
+    assert claims["stage2_style_pass"] is False
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("configure", "expected"),
+    [
+        (lambda root, path, digest: ([InstalledRoleSpec("role", path, root, "unknown", digest, "installed_bytes")]), "HOLD_UNKNOWN_ARTIFACT_KIND"),
+        (lambda root, path, digest: ([InstalledRoleSpec("role", path, root, "installed_script", None, None)]), "HOLD_SOURCE_HASH_UNBOUND"),
+        (lambda root, path, digest: ([InstalledRoleSpec("role", path, root, "installed_script", digest, "workspace_source")]), "HOLD_SOURCE_HASH_UNBOUND"),
+        (lambda root, path, digest: ([InstalledRoleSpec("role", root / "missing", root, "installed_script", digest, "installed_bytes")]), "HOLD_MISSING_ARTIFACT"),
+        (lambda root, path, digest: ([InstalledRoleSpec("role", root / "escape", root, "installed_script", digest, "installed_bytes")]), "HOLD_ROOT_ESCAPE"),
+        (lambda root, path, digest: ([InstalledRoleSpec("role", root / "cycle", root, "installed_script", digest, "installed_bytes")]), "HOLD_SYMLINK_CYCLE"),
+        (lambda root, path, digest: ([InstalledRoleSpec("role", path, root, "installed_script", "0" * 64, "installed_bytes")]), "HOLD_DIGEST_MISMATCH"),
+        (lambda root, path, digest: ([InstalledRoleSpec("role_a", path, root, "installed_script", digest, "installed_bytes"), InstalledRoleSpec("role_b", path, root, "installed_script", digest, "installed_bytes")]), "HOLD_DUPLICATE_CANONICAL_ROLE"),
+        (lambda root, path, digest: ([InstalledRoleSpec("role", path, root, "executable", digest, "installed_bytes")]), "HOLD_BINARY_KIND_MISUSE"),
+    ],
+)
+def test_installed_attestation_rejects_unbound_or_ambiguous_roles(
+    tmp_path: Path, configure, expected: str
+) -> None:
+    root = tmp_path / "install"
+    root.mkdir()
+    artifact = root / "entry.py"
+    artifact.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    (root / "escape").symlink_to(tmp_path / "outside")
+    (root / "cycle").symlink_to("cycle")
+    result = attest_installed_roles(configure(root, artifact, _digest(artifact)))
+    assert result["terminal"] == expected
+    assert all(role["terminal"] == "MATCH" or role["terminal"].startswith("HOLD_") for role in result["roles"])
+
+
+def test_installed_attestation_resolves_bounded_alias_to_real_host_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "install"
+    root.mkdir()
+    artifact = root / "entry.py"
+    artifact.write_text("#!/usr/bin/env python3\nprint('installed')\n", encoding="utf-8")
+    alias = root / "entry"
+    alias.symlink_to(artifact.name)
+    spec = InstalledRoleSpec("mux_entry", alias, root, "installed_script", _digest(artifact), "installed_bytes")
+    result = inspect_host_installed_snapshot([spec])
+    assert result["read_only"] is True
+    assert result["terminal"] == "READY_FOR_EXTERNAL_REVIEW_ONLY"
+    assert result["roles"][0]["canonical_path"] == str(artifact)
+
+
+def test_workspace_source_is_recorded_but_cannot_attest_an_installed_role(tmp_path: Path) -> None:
+    source = tmp_path / "source.py"
+    source.write_text("print('source')\n", encoding="utf-8")
+    result = inspect_host_installed_snapshot([
+        InstalledRoleSpec("mux_source", source, tmp_path, "workspace_source", _digest(source), "workspace_source")
+    ])
+    assert result["terminal"] == "HOLD_SOURCE_HASH_UNBOUND"
+    assert result["roles"][0]["terminal"] == "SOURCE_ONLY_MATCH"
+    assert result["roles"][0]["binding_scope"] == "workspace_source_only"
+
+
+def test_unbound_role_retains_observed_host_digest_and_terminal_order_is_stable(tmp_path: Path) -> None:
+    root = tmp_path / "install"
+    root.mkdir()
+    artifact = root / "entry.py"
+    artifact.write_text("print('installed')\n", encoding="utf-8")
+    unbound = InstalledRoleSpec("script", artifact, root, "installed_script", None, None)
+    mismatch = InstalledRoleSpec("mismatch", artifact, root, "installed_script", "0" * 64, "installed_bytes")
+    forward = attest_installed_roles([unbound, mismatch])
+    reverse = attest_installed_roles([mismatch, unbound])
+    assert forward["roles"][0]["canonical_path"] == str(artifact)
+    assert forward["roles"][0]["observed_digest"] == _digest(artifact)
+    assert forward["terminal"] == reverse["terminal"] == "HOLD_DUPLICATE_CANONICAL_ROLE"
+
+
+def test_stage2_preflight_requires_complete_role_set_and_preserves_missing_primary(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact.py"
+    artifact.write_text("x\n", encoding="utf-8")
+    subset = [InstalledRoleSpec("mux_entry", artifact, tmp_path, "installed_script", _digest(artifact), "installed_bytes")]
+    assert attest_stage2_installed_snapshot(subset)["terminal"] == "HOLD_SOURCE_HASH_UNBOUND"
+    specs = [InstalledRoleSpec(role, tmp_path / role, tmp_path, "installed_script", "0" * 64, "installed_bytes") for role in REQUIRED_STAGE2_ROLES]
+    assert attest_stage2_installed_snapshot(specs)["terminal"] == "HOLD_MISSING_ARTIFACT"
 
 
 def test_runner_terminates_owned_group_with_child() -> None:
@@ -496,6 +826,9 @@ def test_test_only_launch_is_private_and_enables_exact_stage2_gate() -> None:
     assert 'value="/aic_test/v4_pp_mux_stage2/$(var topic_token)"' in text
     assert '<param name="primary_source" value="pure_pursuit"/>' in text
     assert '<param name="require_safety_constraint" value="true"/>' in text
+    assert '<param name="mux_runtime_measurement_enabled" value="false"/>' in text
+    assert '<param name="latest_sample_observability_enabled" value="true"/>' in text
+    assert "latest_sample_target_" not in text
     assert (
         '<arg name="state_lattice_v4_poc_command_activation_enabled" value="true"/>'
         in text

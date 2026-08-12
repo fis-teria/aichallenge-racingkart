@@ -4,6 +4,11 @@ project(aichallenge_submit_launch)
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
+install(
+  PROGRAMS scripts/test_only_steering_actuator.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(
@@ -57,6 +62,13 @@ if(BUILD_TESTING)
     COMMAND
       ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/test/test_state_lattice_nonlive_contract.py
+  )
+  add_test(
+    NAME test_test_only_steering_actuator
+    COMMAND
+      ${Python3_EXECUTABLE}
+      -m pytest -q
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/test_test_only_steering_actuator.py
   )
   add_test(
     NAME test_state_lattice_test_only_observer_contract

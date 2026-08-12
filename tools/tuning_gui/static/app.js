@@ -160,9 +160,12 @@ function readSavedRunSettings() {
 function restoreRunSettings() {
   const saved = readSavedRunSettings();
   for (const id of RUN_SETTING_IDS) {
-    if (id === "safetyGate") continue;
     const el = $(id);
     if (!el || !(id in saved)) continue;
+    if (id === "safetyGate") {
+      el.dataset.selectedGate = String(saved[id] || "");
+      continue;
+    }
     if (el.type === "checkbox") {
       el.checked = Boolean(saved[id]);
     } else {
@@ -174,7 +177,6 @@ function restoreRunSettings() {
 function saveRunSettings() {
   const payload = {};
   for (const id of RUN_SETTING_IDS) {
-    if (id === "safetyGate") continue;
     const el = $(id);
     if (!el) continue;
     payload[id] = el.type === "checkbox" ? el.checked : el.value;
@@ -231,6 +233,16 @@ function renderSafetyGates(data) {
     select.value = select.options[0].value;
   }
   select.dataset.selectedGate = select.value;
+  renderGateRunButtons();
+}
+
+function renderGateRunButtons() {
+  const selected = inputValue("safetyGate");
+  const label = selected ? `run ${selected}` : "run gate";
+  const mainButton = $("runGate");
+  const settingsButton = $("runSelectedGate");
+  if (mainButton) mainButton.textContent = label;
+  if (settingsButton) settingsButton.textContent = label;
 }
 
 function setSettingsTab(tab) {
@@ -1563,6 +1575,9 @@ async function run(action) {
   if (action === "gate" && !safetyGate) {
     throw new Error("Safety Gateを選んでね");
   }
+  if (action === "gate") {
+    setRunSettingsMenu(false);
+  }
   const payload = {
     action,
     control_method: method,
@@ -1953,6 +1968,7 @@ function bind() {
     el.addEventListener(el.tagName === "INPUT" ? "input" : "change", () => {
       if (id === "safetyGate") {
         el.dataset.selectedGate = el.value;
+        renderGateRunButtons();
       }
       saveRunSettings();
       updateRunSettingsAvailability(commandIsRunning());
@@ -2014,6 +2030,7 @@ function bind() {
   $("runBuild").addEventListener("click", () => run("build").catch((e) => toast(e.message)));
   $("runDev").addEventListener("click", () => run("dev").catch((e) => toast(e.message)));
   $("runGate").addEventListener("click", () => run("gate").catch((e) => toast(e.message)));
+  $("runSelectedGate").addEventListener("click", () => run("gate").catch((e) => toast(e.message)));
   $("runEval").addEventListener("click", () => run("eval").catch((e) => toast(e.message)));
   $("runQuickEval").addEventListener("click", () => run("quick-eval").catch((e) => toast(e.message)));
   $("runIngest").addEventListener("click", () => run("ingest").catch((e) => toast(e.message)));

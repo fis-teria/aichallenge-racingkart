@@ -12,6 +12,7 @@
 #include <multi_purpose_mpc_ros_msgs/msg/overtake_plan.hpp>
 #include <overtake_planner/cartesian_trackability_evaluator.hpp>
 #include <overtake_planner/pp_core_exact_snapshot.hpp>
+#include <overtake_transport_contract/c002ay0_canonical.hpp>
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rosidl_runtime_cpp/traits.hpp>
 
@@ -53,6 +54,104 @@ struct V4PocCommandSelection {
   double first_shifted_y_m{0.0};
   double steering_tire_angle_rad{0.0};
 };
+
+struct V4PocTrackingIdentity {
+  std::uint32_t plan_generation{0U};
+  bool tracking_usable{false};
+  std::string reason;
+};
+
+struct V4RendezvousState {
+  std::uint32_t active_generation{0U};
+  std::uint32_t pending_generation{0U};
+  bool bounded_gap{false};
+};
+
+multi_purpose_mpc_ros_msgs::msg::AuthorizedCartesianTrajectoryV2
+validStateLatticeV2Proposal(std::uint64_t generation) {
+  namespace canonical = overtake_transport_contract::c002ay0;
+  multi_purpose_mpc_ros_msgs::msg::AuthorizedCartesianTrajectoryV2 result;
+  result.schema_version = result.SCHEMA_V2_NON_AUTHORITATIVE;
+  result.header.frame_id = "map";
+  result.header.stamp.sec = 23;
+  result.identity.producer_instance_id = "4101";
+  result.identity.session_id = "1";
+  result.identity.proposal_sequence = generation;
+  result.identity.plan_generation = generation;
+  result.identity.source_generation = 4U;
+  result.identity.source_stamp.sec = 22;
+  result.identity.frame_id = "map";
+  auto &trajectory = result.proposal;
+  trajectory.schema_version = trajectory.SCHEMA_V1_SHADOW;
+  trajectory.authority_eligible = false;
+  trajectory.plan_stamp = result.header.stamp;
+  trajectory.frame_id = "map";
+  trajectory.plan_sample_key.race_arm_epoch = 1U;
+  trajectory.plan_sample_key.planner_instance_id = 4101U;
+  trajectory.plan_sample_key.attempt_id = generation;
+  trajectory.plan_sample_key.target_vehicle_id = "d2";
+  trajectory.plan_sample_key.pass_direction = 1;
+  trajectory.plan_sample_key.connector_transaction_id = generation;
+  trajectory.plan_sample_key.plan_stamp = trajectory.plan_stamp;
+  trajectory.plan_sample_key.plan_generation = generation;
+  trajectory.candidate_revision = generation;
+  trajectory.authority_token = generation;
+  trajectory.candidate_type = trajectory.CANDIDATE_PASS_LEFT;
+  trajectory.phase = trajectory.PHASE_PASSING;
+  trajectory.authorization_state = trajectory.AUTHORIZATION_AUTHORIZED;
+  trajectory.source_controller_instance_id = 4201U;
+  trajectory.source_controller_sequence = generation;
+  trajectory.base_lease_id = 1U;
+  trajectory.base_lease_valid_until.sec = 24;
+  trajectory.base_source_kind = trajectory.SOURCE_MPC_HORIZON;
+  trajectory.base_source_stamp = result.identity.source_stamp;
+  trajectory.base_source_generation = 4U;
+  trajectory.base_original_point_count = 2U;
+  trajectory.base_first_source_index = 0U;
+  trajectory.base_last_source_index = 1U;
+  trajectory.base_nearest_source_index = 0U;
+  trajectory.base_source_digest_state = trajectory.BASE_SOURCE_DIGEST_COMPLETE;
+  trajectory.canonical_algorithm_version = 1U;
+  trajectory.base_geometry_sha256.fill(0x11U);
+  trajectory.base_source_sha256.fill(0x21U);
+  trajectory.base_snapshot_sha256.fill(0x31U);
+  for (std::uint32_t i = 0U; i < 3U; ++i) {
+    multi_purpose_mpc_ros_msgs::msg::CandidateExecutionPoint point;
+    point.time_from_start.nanosec = i * 25000000U;
+    point.position_x_m = 0.20 * static_cast<double>(i);
+    point.position_y_m = 0.05 * static_cast<double>(i);
+    point.orientation_w = 1.0;
+    point.longitudinal_velocity_mps = 1.0F;
+    trajectory.points.push_back(point);
+  }
+  trajectory.original_candidate_point_count = 3U;
+  trajectory.total_arc_length_m = 0.4123105625617661;
+  trajectory.required_spatial_horizon_m = 0.2;
+  trajectory.join_end_arc_length_m = 0.20;
+  trajectory.post_join_arc_length_m =
+      trajectory.total_arc_length_m - trajectory.join_end_arc_length_m;
+  trajectory.safety_snapshot_id = generation;
+  trajectory.safety_evaluation_result = trajectory.SAFETY_PASSED;
+  trajectory.safety_evaluation_stamp.sec = 23;
+  trajectory.safety_valid_until.sec = 24;
+  trajectory.world_safety_snapshot_sha256.fill(0x51U);
+  trajectory.safety_evaluator_implementation_sha256.fill(0x61U);
+  trajectory.safety_evaluator_config_sha256.fill(0x71U);
+  trajectory.controller_implementation_sha256.fill(0x31U);
+  trajectory.controller_config_sha256.fill(0x41U);
+  trajectory.candidate_start_control_pose.orientation.w = 1.0;
+  trajectory.candidate_start_control_pose_stamp = trajectory.plan_stamp;
+  trajectory.geometry_sha256 =
+      canonical::canonicalizeGeometryV1(
+          trajectory.points, "C002AY0_AUTHORIZED_GEOMETRY_V1").sha256;
+  auto encoded = canonical::canonicalizeAuthorizedTrajectoryV1(trajectory);
+  trajectory.candidate_start_control_pose_sha256 = encoded.control_pose_sha256;
+  trajectory.safety_proof_sha256 = encoded.safety_proof_sha256;
+  encoded = canonical::canonicalizeAuthorizedTrajectoryV1(trajectory);
+  trajectory.payload_sha256 = encoded.sha256;
+  result.identity.canonical_sha256 = encoded.sha256;
+  return result;
+}
 
 class PurePursuitExactGoldenAccess {
 public:
@@ -126,7 +225,7 @@ public:
       const std::optional<
           multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity> &identity,
       std::uint32_t base_source_generation, double contract_time_sec,
-      double now_sec) {
+      double now_sec, const Trajectory *cartesian = nullptr) {
     node.trajectory_ = std::make_shared<Trajectory>(base);
     node.overtake_speed_only_latch_.observeValid(contract);
     node.applyReceivedOvertakeOverride(contract);
@@ -137,6 +236,16 @@ public:
         contract.kind == OvertakeOverrideContractKind::INACTIVE;
     node.reference_source_generation_ = base_source_generation;
     node.state_lattice_v4_poc_identity_ = identity;
+    node.state_lattice_v2_control_trajectory_cache_.reset();
+    if (identity.has_value() && cartesian != nullptr) {
+      SimplePurePursuit::StateLatticeV2ControlTrajectoryCache cache;
+      cache.identity = identity.value();
+      auto proposal = std::make_shared<AuthorizedCartesianTrajectoryV2>();
+      proposal->identity = identity.value();
+      cache.proposal = std::move(proposal);
+      cache.trajectory = std::make_shared<Trajectory>(*cartesian);
+      node.state_lattice_v2_control_trajectory_cache_ = std::move(cache);
+    }
     node.odometry_ = std::make_shared<Odometry>();
     node.odometry_->twist.twist.linear.x = 1.0;
 
@@ -166,9 +275,150 @@ public:
     };
   }
 
+  static V4PocCommandSelection selectV4PocCommandFromBindingCycle(
+      SimplePurePursuit &node, const Trajectory &base,
+      const OvertakeOverrideContract &contract,
+      const overtake_transport_contract::state_lattice_v2::CycleResult &cycle,
+      double now_sec) {
+    node.trajectory_ = std::make_shared<Trajectory>(base);
+    node.overtake_speed_only_latch_.observeValid(contract);
+    node.applyReceivedOvertakeOverride(contract);
+    node.last_overtake_override_sec_ = now_sec;
+    node.last_valid_override_contract_sec_ = now_sec;
+    node.last_valid_override_contract_received_ = true;
+    node.last_valid_override_contract_inactive_ = false;
+    node.last_valid_override_contract_generation_ = contract.generation;
+    node.reference_source_generation_ = 4U;
+    node.applyStateLatticeV2CycleResult(cycle);
+    node.odometry_ = std::make_shared<Odometry>();
+    node.odometry_->twist.twist.linear.x = 1.0;
+    SimplePurePursuit::ControlPosePrediction pose;
+    pose.position = base.points.front().pose.position;
+    HorizonFreshnessResult horizon;
+    const auto context = node.selectControlTrajectory(pose, now_sec, horizon);
+    double steering_tire_angle_rad = 0.0;
+    if (context.valid && context.trajectory != nullptr) {
+      SimplePurePursuit::LongitudinalCommand longitudinal;
+      longitudinal.target_speed_mps = 1.0;
+      longitudinal.current_speed_mps = 1.0;
+      steering_tire_angle_rad =
+          node.computeLateralCommand(context, pose, longitudinal)
+              .steering_tire_angle_rad;
+    }
+    return {node.v4PocCommandContractReady(now_sec),
+            context.valid,
+            context.v4_poc_geometry_applied,
+            context.source,
+            context.invalid_reason,
+            context.trajectory != nullptr && context.trajectory->points.size() > 1U
+                ? context.trajectory->points[1].pose.position.y
+                : 0.0,
+            steering_tire_angle_rad};
+  }
+
+  static V4PocTrackingIdentity trackingIdentityFromBindingCycle(
+      SimplePurePursuit &node, const Trajectory &base,
+      const OvertakeOverrideContract &contract,
+      const overtake_transport_contract::state_lattice_v2::CycleResult &cycle,
+      const OvertakePlan &unrelated_plan, double now_sec) {
+    node.trajectory_ = std::make_shared<Trajectory>(base);
+    node.overtake_speed_only_latch_.observeValid(contract);
+    node.applyReceivedOvertakeOverride(contract);
+    node.last_overtake_override_sec_ = now_sec;
+    node.last_valid_override_contract_sec_ = now_sec;
+    node.last_valid_override_contract_received_ = true;
+    node.last_valid_override_contract_inactive_ = false;
+    node.last_valid_override_contract_generation_ = contract.generation;
+    node.reference_source_generation_ = 4U;
+    node.applyStateLatticeV2CycleResult(cycle);
+    SimplePurePursuit::ControlPosePrediction pose;
+    pose.position = base.points.front().pose.position;
+    HorizonFreshnessResult horizon;
+    const auto context = node.selectControlTrajectory(pose, now_sec, horizon);
+    AckermannControlCommand command;
+    command.stamp.sec = 24;
+    command.longitudinal.speed = 1.0;
+    command.longitudinal.acceleration = 0.0;
+    command.lateral.steering_tire_angle = 0.1;
+    SimplePurePursuit::LongitudinalCommand longitudinal;
+    SimplePurePursuit::LateralCommand lateral;
+    lateral.steering_limits_valid = true;
+    lateral.steering_angle_limited = false;
+    lateral.steering_rate_limited = false;
+    ControlCyclePlanSnapshot plan_snapshot;
+    plan_snapshot.plan = std::make_shared<OvertakePlan>(unrelated_plan);
+    const auto status = node.publishControllerTrackingStatus(
+        rclcpp::Time(command.stamp), &context, &command, &longitudinal,
+        &lateral, now_sec, &plan_snapshot);
+    return {status.plan_generation, status.trajectory_tracking_usable,
+            status.reason};
+  }
+
   static bool v4PocCommandContractAvailable(SimplePurePursuit &node,
                                              double now_sec) {
     return node.v4PocCommandContractAvailable(now_sec);
+  }
+
+  static V4RendezvousState stageV4Contract(
+      SimplePurePursuit &node, const std::vector<float> &payload) {
+    auto message = std::make_shared<Float32MultiArray>();
+    message->data = payload;
+    node.onOvertakeOverride(message);
+    return {
+        node.overtake_override_generation_,
+        node.pending_state_lattice_v4_contract_.has_value()
+            ? node.pending_state_lattice_v4_contract_->contract.generation
+            : 0U,
+        node.stateLatticeV4RendezvousPending(),
+    };
+  }
+
+  static V4RendezvousState activateV4Contract(
+      SimplePurePursuit &node,
+      const multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity
+          &identity) {
+    (void)node.activatePendingStateLatticeV4Contract(identity);
+    return {
+        node.overtake_override_generation_,
+        node.pending_state_lattice_v4_contract_.has_value()
+            ? node.pending_state_lattice_v4_contract_->contract.generation
+            : 0U,
+        node.stateLatticeV4RendezvousPending(),
+    };
+  }
+
+  static bool v2FirstRendezvousGap(SimplePurePursuit &node,
+                                   std::uint32_t active_generation,
+                                   std::uint32_t cached_generation,
+                                   double age_sec = 0.001) {
+    node.pending_state_lattice_v4_contract_.reset();
+    node.overtake_override_generation_ = active_generation;
+    SimplePurePursuit::StateLatticeV2ControlTrajectoryCache cache;
+    cache.identity.plan_generation = cached_generation;
+    cache.trajectory = std::make_shared<Trajectory>();
+    cache.receive_steady_sec = node.steadyNowSec() - age_sec;
+    node.state_lattice_v2_control_trajectory_cache_ = std::move(cache);
+    return node.stateLatticeV4RendezvousPending();
+  }
+
+  static std::string deliveryGapTrackingReason(SimplePurePursuit &node,
+                                                bool bounded_gap) {
+    const auto stamp = node.get_clock()->now();
+    return node
+        .publishControllerTrackingStatus(stamp, nullptr, nullptr, nullptr,
+                                         nullptr, 0.0, nullptr, bounded_gap)
+        .reason;
+  }
+
+  static bool v4FirstRendezvousGap(SimplePurePursuit &node,
+                                   std::uint32_t active_generation,
+                                   const std::vector<float> &payload) {
+    node.state_lattice_v2_control_trajectory_cache_.reset();
+    node.overtake_override_generation_ = active_generation;
+    auto message = std::make_shared<Float32MultiArray>();
+    message->data = payload;
+    node.onOvertakeOverride(message);
+    return node.stateLatticeV4RendezvousPending();
   }
 
   static void publishStaleStop(SimplePurePursuit &node,
@@ -274,7 +524,7 @@ TEST(V4PocIdentityGate, AppliesOnlyExactIdentityTuple) {
 
   auto mismatched = base;
   auto wrong_identity = identity;
-  wrong_identity.source_generation = 5U;
+  wrong_identity.plan_generation = 10U;
   EXPECT_FALSE(
       simple_pure_pursuit::PurePursuitExactGoldenAccess::applyV4PocOverride(
           *node, mismatched, contract, wrong_identity, 4U, &reason));
@@ -286,6 +536,91 @@ TEST(V4PocIdentityGate, AppliesOnlyExactIdentityTuple) {
       simple_pure_pursuit::PurePursuitExactGoldenAccess::applyV4PocOverride(
           *node, missing, contract, std::nullopt, 4U, &reason));
   EXPECT_EQ(reason, "v4_poc_identity_mismatch");
+}
+
+TEST(V4PocIdentityGate, V4HeartbeatWaitsForMatchingCartesianIdentity) {
+  int argc = 0;
+  char **argv = nullptr;
+  if (!rclcpp::ok()) {
+    rclcpp::init(argc, argv);
+  }
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("aw2_shadow_transport_enabled", false),
+      rclcpp::Parameter("c002ay0_shadow_capture_enabled", false),
+      rclcpp::Parameter("free_run_live_exact_ack_enabled", false),
+      rclcpp::Parameter("pp_core_exact_snapshot_enabled", false),
+      rclcpp::Parameter("use_overtake_reference_override", true),
+      rclcpp::Parameter("state_lattice_v4_poc_identity_gate_enabled", true),
+      rclcpp::Parameter("state_lattice_v4_poc_command_activation_enabled",
+                        true),
+  });
+  auto node = std::make_shared<simple_pure_pursuit::SimplePurePursuit>(options);
+  const std::vector<float> wire = {
+      1.0F, 7.0F, 3.0F, 0.8F, 0.6F, 0.2F, 1.0F, 1.0F,
+      1.0F, 0.0F, 0.4F, 1.2F, 4.0F, 7.0F, 2.0F};
+
+  const auto staged =
+      simple_pure_pursuit::PurePursuitExactGoldenAccess::stageV4Contract(
+          *node, wire);
+  EXPECT_EQ(staged.active_generation, 0U);
+  EXPECT_EQ(staged.pending_generation, 7U);
+  EXPECT_FALSE(staged.bounded_gap);
+
+  multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity wrong;
+  wrong.plan_generation = 8U;
+  const auto still_pending =
+      simple_pure_pursuit::PurePursuitExactGoldenAccess::activateV4Contract(
+          *node, wrong);
+  EXPECT_EQ(still_pending.active_generation, 0U);
+  EXPECT_EQ(still_pending.pending_generation, 7U);
+  EXPECT_FALSE(still_pending.bounded_gap);
+
+  auto matching = wrong;
+  matching.plan_generation = 7U;
+  const auto activated =
+      simple_pure_pursuit::PurePursuitExactGoldenAccess::activateV4Contract(
+          *node, matching);
+  EXPECT_EQ(activated.active_generation, 7U);
+  EXPECT_EQ(activated.pending_generation, 0U);
+  EXPECT_FALSE(activated.bounded_gap);
+  EXPECT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  v2FirstRendezvousGap(*node, 6U, 7U));
+  EXPECT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  v2FirstRendezvousGap(*node, 6U, 8U));
+  EXPECT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  v2FirstRendezvousGap(*node, 6U, 9U));
+  EXPECT_FALSE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                   v2FirstRendezvousGap(*node, 6U, 6U));
+  EXPECT_FALSE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                   v2FirstRendezvousGap(*node, 6U, 5U));
+  EXPECT_FALSE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                   v2FirstRendezvousGap(*node, 6U, 9U, 1.0));
+
+  EXPECT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  v2FirstRendezvousGap(*node, 7U, 11U));
+  auto v2_first_wire = wire;
+  v2_first_wire[1] = 11.0F;
+  v2_first_wire[13] = 11.0F;
+  const auto v2_first_activated =
+      simple_pure_pursuit::PurePursuitExactGoldenAccess::stageV4Contract(
+          *node, v2_first_wire);
+  EXPECT_EQ(v2_first_activated.active_generation, 11U);
+  EXPECT_EQ(v2_first_activated.pending_generation, 0U);
+
+  auto v4_first_wire = wire;
+  v4_first_wire[1] = 12.0F;
+  v4_first_wire[13] = 12.0F;
+  EXPECT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  v4FirstRendezvousGap(*node, 11U, v4_first_wire));
+
+  EXPECT_EQ(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                deliveryGapTrackingReason(*node, true),
+            "override_contract_missing_or_stale");
+  EXPECT_EQ(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                deliveryGapTrackingReason(*node, false),
+            "command_missing_or_nonfinite");
+
 }
 
 TEST(V4PocCommandActivation,
@@ -364,14 +699,17 @@ TEST(V4PocCommandActivation,
   EXPECT_NEAR(no_identity.first_shifted_y_m, -0.5, 1.0e-6);
   EXPECT_LT(no_identity.steering_tire_angle_rad, 0.0);
 
+  auto cartesian = base;
+  cartesian.points[1].pose.position.y = -0.25;
+  cartesian.points[2].pose.position.y = -0.75;
   const auto exact = simple_pure_pursuit::PurePursuitExactGoldenAccess::
       selectV4PocCommandTrajectory(*node, base, contract, identity, 4U, 10.0,
-                                   10.0);
+                                   10.0, &cartesian);
   EXPECT_TRUE(exact.contract_ready);
   EXPECT_TRUE(exact.valid);
   EXPECT_TRUE(exact.geometry_applied);
-  EXPECT_EQ(exact.source, "trajectory_overtake_override");
-  EXPECT_NEAR(exact.first_shifted_y_m, -0.5, 1.0e-6);
+  EXPECT_EQ(exact.source, "state_lattice_v4_cartesian");
+  EXPECT_NEAR(exact.first_shifted_y_m, -0.25, 1.0e-6);
 
   const auto missing_identity =
       simple_pure_pursuit::PurePursuitExactGoldenAccess::
@@ -392,6 +730,16 @@ TEST(V4PocCommandActivation,
   EXPECT_FALSE(mismatched.valid);
   EXPECT_EQ(mismatched.invalid_reason, "state_lattice_v4_unavailable");
 
+  auto newer_base = base;
+  newer_base.header.stamp.sec = 13;
+  const auto baseline_advanced =
+      simple_pure_pursuit::PurePursuitExactGoldenAccess::
+          selectV4PocCommandTrajectory(*node, newer_base, contract, identity,
+                                       5U, 10.0, 10.0, &cartesian);
+  EXPECT_TRUE(baseline_advanced.contract_ready);
+  EXPECT_TRUE(baseline_advanced.valid);
+  EXPECT_EQ(baseline_advanced.source, "state_lattice_v4_cartesian");
+
   const auto stale = simple_pure_pursuit::PurePursuitExactGoldenAccess::
       selectV4PocCommandTrajectory(*node, base, contract, identity, 4U, 8.0,
                                    10.0);
@@ -407,7 +755,7 @@ TEST(V4PocCommandActivation,
       simple_pure_pursuit::PurePursuitExactGoldenAccess::
           selectV4PocCommandTrajectory(*node, base, unavailable_geometry,
                                        identity, 4U, 10.0, 10.0);
-  EXPECT_TRUE(application_failure.contract_ready);
+  EXPECT_FALSE(application_failure.contract_ready);
   EXPECT_FALSE(application_failure.valid);
   EXPECT_FALSE(application_failure.geometry_applied);
   EXPECT_EQ(application_failure.invalid_reason,
@@ -441,11 +789,144 @@ TEST(V4PocCommandActivation,
       simple_pure_pursuit::PurePursuitExactGoldenAccess::
           selectV4PocCommandTrajectory(*conflict_node, base, contract, identity,
                                        4U, 10.0, 10.0);
-  EXPECT_TRUE(conflicting_activation.contract_ready);
+  EXPECT_FALSE(conflicting_activation.contract_ready);
   EXPECT_FALSE(conflicting_activation.valid);
   EXPECT_FALSE(conflicting_activation.geometry_applied);
   EXPECT_EQ(conflicting_activation.invalid_reason,
             "state_lattice_v4_unavailable");
+}
+
+TEST(V4PocCommandActivation,
+     BindingCycleSelectsExactCartesianAndMissingAvailabilityClearsIt) {
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("aw2_shadow_transport_enabled", false),
+      rclcpp::Parameter("c002ay0_shadow_capture_enabled", false),
+      rclcpp::Parameter("free_run_live_exact_ack_enabled", false),
+      rclcpp::Parameter("pp_core_exact_snapshot_enabled", false),
+      rclcpp::Parameter("use_overtake_reference_override", true),
+      rclcpp::Parameter("state_lattice_v4_poc_identity_gate_enabled", true),
+      rclcpp::Parameter("state_lattice_v4_poc_command_activation_enabled",
+                        true),
+      rclcpp::Parameter("state_lattice_v2_live_proposal_accept_enabled", true),
+      rclcpp::Parameter("state_lattice_v2_expected_producer_instance_id",
+                        "4101"),
+      rclcpp::Parameter("state_lattice_v2_base_attestation_publish_enabled",
+                        true),
+      rclcpp::Parameter(
+          "state_lattice_v2_base_attestation_producer_instance_id", "4201"),
+      rclcpp::Parameter("state_lattice_v2_base_attestation_session_id", "1"),
+      rclcpp::Parameter("overtake_spatial_horizon_min_arc_m", 0.5),
+      rclcpp::Parameter("overtake_spatial_horizon_min_time_sec", 0.75),
+  });
+  auto node = std::make_shared<simple_pure_pursuit::SimplePurePursuit>(options);
+  Trajectory base;
+  base.header.frame_id = "map";
+  base.header.stamp.sec = 22;
+  for (std::size_t index = 0U; index < 20U; ++index) {
+    base.points.push_back(
+        makePointWithSpeed(static_cast<double>(index), 0.0, 0.0, 1.0));
+  }
+  simple_pure_pursuit::OvertakeOverrideContract contract;
+  contract.kind = simple_pure_pursuit::OvertakeOverrideContractKind::
+      SPATIAL_LATERAL_AND_SPEED_V4;
+  contract.mode_id = 2;
+  contract.generation = 7U;
+  contract.lateral_offsets = {0.0, 0.0};
+  contract.speed_caps = {1.0, 1.0};
+  contract.longitudinal_offsets_m = {0.0, 2.0};
+
+  const auto proposal =
+      simple_pure_pursuit::validStateLatticeV2Proposal(7U);
+  ASSERT_EQ(overtake_transport_contract::c002ay0::
+                validateAuthorizedTrajectoryV1(proposal.proposal),
+            overtake_transport_contract::c002ay0::ValidationError::NONE);
+  ASSERT_TRUE(simple_pure_pursuit::stateLatticeV2ProposalToTrajectory(proposal)
+                  .has_value());
+  overtake_transport_contract::state_lattice_v2::CycleResult accepted;
+  accepted.accepted = proposal;
+  accepted.availability_present = true;
+  accepted.availability_identity = proposal.identity;
+  const auto selected =
+      simple_pure_pursuit::PurePursuitExactGoldenAccess::
+          selectV4PocCommandFromBindingCycle(*node, base, contract, accepted,
+                                             10.0);
+  EXPECT_TRUE(selected.contract_ready);
+  EXPECT_TRUE(selected.valid) << selected.invalid_reason;
+  EXPECT_TRUE(selected.geometry_applied);
+  EXPECT_EQ(selected.source, "state_lattice_v4_cartesian");
+  EXPECT_NEAR(selected.first_shifted_y_m, 0.05, 1.0e-9);
+  EXPECT_NE(selected.steering_tire_angle_rad, 0.0);
+
+  overtake_transport_contract::state_lattice_v2::CycleResult missing;
+  const auto cleared =
+      simple_pure_pursuit::PurePursuitExactGoldenAccess::
+          selectV4PocCommandFromBindingCycle(*node, base, contract, missing,
+                                             10.0);
+  EXPECT_FALSE(cleared.contract_ready);
+  EXPECT_FALSE(cleared.valid);
+  EXPECT_FALSE(cleared.geometry_applied);
+  EXPECT_EQ(cleared.invalid_reason, "state_lattice_v4_unavailable");
+}
+
+TEST(V4PocCommandActivation,
+     TrackingIdentityFollowsSelectedCartesianNotUnrelatedPlan) {
+  int argc = 0;
+  char **argv = nullptr;
+  if (!rclcpp::ok()) {
+    rclcpp::init(argc, argv);
+  }
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("aw2_shadow_transport_enabled", false),
+      rclcpp::Parameter("c002ay0_shadow_capture_enabled", false),
+      rclcpp::Parameter("free_run_live_exact_ack_enabled", false),
+      rclcpp::Parameter("pp_core_exact_snapshot_enabled", false),
+      rclcpp::Parameter("use_overtake_reference_override", true),
+      rclcpp::Parameter("state_lattice_v4_poc_identity_gate_enabled", true),
+      rclcpp::Parameter("state_lattice_v4_poc_command_activation_enabled",
+                        true),
+      rclcpp::Parameter("state_lattice_v2_live_proposal_accept_enabled", true),
+      rclcpp::Parameter("state_lattice_v2_expected_producer_instance_id",
+                        "4101"),
+      rclcpp::Parameter("state_lattice_v2_base_attestation_publish_enabled",
+                        true),
+      rclcpp::Parameter(
+          "state_lattice_v2_base_attestation_producer_instance_id", "4201"),
+      rclcpp::Parameter("state_lattice_v2_base_attestation_session_id", "1"),
+  });
+  auto node = std::make_shared<simple_pure_pursuit::SimplePurePursuit>(options);
+  Trajectory base;
+  base.header.frame_id = "map";
+  base.header.stamp.sec = 22;
+  for (std::size_t index = 0U; index < 20U; ++index) {
+    base.points.push_back(
+        makePointWithSpeed(static_cast<double>(index), 0.0, 0.0, 1.0));
+  }
+  simple_pure_pursuit::OvertakeOverrideContract contract;
+  contract.kind = simple_pure_pursuit::OvertakeOverrideContractKind::
+      SPATIAL_LATERAL_AND_SPEED_V4;
+  contract.mode_id = 2;
+  contract.generation = 7U;
+  contract.lateral_offsets = {0.0, 0.0};
+  contract.speed_caps = {1.0, 1.0};
+  contract.longitudinal_offsets_m = {0.0, 2.0};
+  const auto proposal =
+      simple_pure_pursuit::validStateLatticeV2Proposal(7U);
+  overtake_transport_contract::state_lattice_v2::CycleResult accepted;
+  accepted.accepted = proposal;
+  accepted.availability_present = true;
+  accepted.availability_identity = proposal.identity;
+  multi_purpose_mpc_ros_msgs::msg::OvertakePlan unrelated;
+  unrelated.plan_generation = 99U;
+
+  const auto tracking =
+      simple_pure_pursuit::PurePursuitExactGoldenAccess::
+          trackingIdentityFromBindingCycle(*node, base, contract, accepted,
+                                           unrelated, 10.0);
+  EXPECT_EQ(tracking.plan_generation, proposal.identity.plan_generation);
+  EXPECT_TRUE(tracking.tracking_usable) << tracking.reason;
+  EXPECT_EQ(tracking.reason, "ready");
 }
 
 TEST(V4PocCommandActivation, FreshExplicitInactiveUsesBaseTrajectory) {
@@ -1303,6 +1784,72 @@ TEST(ControllerCommandEnvelope, V1ShadowSampleBindsFullCommandAndProof) {
   EXPECT_DOUBLE_EQ(envelope.command.lateral.steering_tire_rotation_rate, 0.0);
 }
 
+TEST(ControllerCommandEnvelope,
+     SelectedStateLatticeCartesianIdentityOverridesUnrelatedTypedPlan) {
+  const auto selected = simple_pure_pursuit::validStateLatticeV2Proposal(7U);
+  autoware_auto_control_msgs::msg::AckermannControlCommand command;
+  command.stamp.sec = 24;
+  command.longitudinal.stamp = command.stamp;
+  command.lateral.stamp = command.stamp;
+  multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus status;
+  status.header.stamp = command.stamp;
+  status.header.frame_id = "base_link";
+  status.plan_generation = selected.identity.plan_generation;
+
+  multi_purpose_mpc_ros_msgs::msg::OvertakePlan unrelated;
+  unrelated.aw2_identity_schema_version = 1U;
+  unrelated.header.stamp.sec = 23;
+  unrelated.plan_generation = selected.identity.plan_generation;
+  unrelated.planner_instance_id = 9001U;
+  unrelated.race_arm_epoch = 1U;
+  unrelated.attempt_id = 81U;
+  unrelated.target_vehicle_id = "other";
+  unrelated.pass_direction = -1;
+  unrelated.connector_transaction_id = 82U;
+  unrelated.candidate_revision = 83U;
+  unrelated.candidate_content_sha256.fill(0xEEU);
+
+  const auto envelope = simple_pure_pursuit::makeControllerCommandEnvelopeV1(
+      command, status, 99U, 1U, &unrelated, &selected);
+
+  EXPECT_EQ(envelope.schema_version, 2U);
+  EXPECT_EQ(envelope.plan_sample_key, selected.proposal.plan_sample_key);
+  EXPECT_EQ(envelope.candidate_revision,
+            selected.proposal.candidate_revision);
+  EXPECT_EQ(envelope.candidate_content_sha256,
+            selected.proposal.geometry_sha256);
+  EXPECT_NE(envelope.plan_sample_key.planner_instance_id,
+            unrelated.planner_instance_id);
+  EXPECT_NE(envelope.candidate_content_sha256,
+            unrelated.candidate_content_sha256);
+}
+
+TEST(ControllerCommandEnvelope,
+     RefreshedLeaseKeepsStableCartesianCandidateDigest) {
+  const auto first = simple_pure_pursuit::validStateLatticeV2Proposal(7U);
+  const auto successor = simple_pure_pursuit::validStateLatticeV2Proposal(8U);
+  ASSERT_EQ(first.proposal.geometry_sha256,
+            successor.proposal.geometry_sha256);
+  ASSERT_NE(first.proposal.payload_sha256, successor.proposal.payload_sha256);
+
+  autoware_auto_control_msgs::msg::AckermannControlCommand command;
+  multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus first_status;
+  first_status.plan_generation = first.identity.plan_generation;
+  multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus successor_status;
+  successor_status.plan_generation = successor.identity.plan_generation;
+  const auto first_envelope =
+      simple_pure_pursuit::makeControllerCommandEnvelopeV1(
+          command, first_status, 99U, 1U, nullptr, &first);
+  const auto successor_envelope =
+      simple_pure_pursuit::makeControllerCommandEnvelopeV1(
+          command, successor_status, 99U, 2U, nullptr, &successor);
+
+  EXPECT_EQ(first_envelope.candidate_content_sha256,
+            successor_envelope.candidate_content_sha256);
+  EXPECT_EQ(first_envelope.candidate_content_sha256,
+            first.proposal.geometry_sha256);
+}
+
 TEST(ControlCyclePlanStore, AdoptsTypedPlanAtNextCycleAndBindsPublishBundle) {
   simple_pure_pursuit::ControlCyclePlanStore store;
   builtin_interfaces::msg::Time now_stamp;
@@ -2013,7 +2560,26 @@ TEST(ControllerAppliedEnvelope,
   EXPECT_EQ(first.applied_geometry.geometry_sha256,
             second.applied_geometry.geometry_sha256);
 
-  input.required_horizon_end_trajectory_index = 500U;
+  // Runtime-02 read 103 points (indices 400..502 inclusive).  Preserve the
+  // exact regression that exceeded the former 100-point layout.
+  input.required_horizon_end_trajectory_index = 502U;
+  const auto runtime_interval =
+      simple_pure_pursuit::makeControllerAppliedEnvelopeV1(
+          command_envelope, input, &plan, true, nullptr);
+  ASSERT_EQ(runtime_interval.evidence_state,
+            runtime_interval.EVIDENCE_COMPLETE)
+      << runtime_interval.evidence_reason;
+  ASSERT_EQ(runtime_interval.applied_geometry.points.size(), 103U);
+
+  input.required_horizon_end_trajectory_index = 655U;
+  const auto at_limit = simple_pure_pursuit::makeControllerAppliedEnvelopeV1(
+      command_envelope, input, &plan, true, nullptr);
+  ASSERT_EQ(at_limit.evidence_state, at_limit.EVIDENCE_COMPLETE)
+      << at_limit.evidence_reason;
+  ASSERT_EQ(at_limit.applied_geometry.points.size(),
+            simple_pure_pursuit::aw2_shadow::kMaxGeometryPoints);
+
+  input.required_horizon_end_trajectory_index = 656U;
   const auto over_limit = simple_pure_pursuit::makeControllerAppliedEnvelopeV1(
       command_envelope, input, &plan, true, nullptr);
   EXPECT_EQ(over_limit.evidence_state,
@@ -2217,21 +2783,29 @@ TEST(FreeRunLiveExact, UsedIntervalIsBoundedAndCarriesAllReadIndices) {
                           [](std::uint8_t value) { return value != 0U; }));
 }
 
-TEST(FreeRunLiveExact, UsedIntervalRejectsMoreThanOneHundredPoints) {
+TEST(FreeRunLiveExact, UsedIntervalAccepts256AndRejects257Points) {
   Trajectory trajectory;
   trajectory.header.frame_id = "map";
   trajectory.header.stamp.sec = 20;
-  for (std::size_t index = 0U; index < 120U; ++index) {
+  for (std::size_t index = 0U; index < 300U; ++index) {
     trajectory.points.push_back(
         makePointWithSpeed(static_cast<double>(index) * 0.1, 0.0, 0.0, 2.0));
   }
 
-  const auto geometry = simple_pure_pursuit::buildControllerGeometryV1(
-      trajectory, 120U, 0U, 0U, 50U, 80U, 100U, false, 1.0);
+  const auto at_limit = simple_pure_pursuit::buildControllerGeometryV1(
+      trajectory, 300U, 10U, 12U, 100U, 200U, 265U, false, 1.0);
 
-  EXPECT_FALSE(geometry.bounded);
-  EXPECT_FALSE(geometry.valid);
-  EXPECT_TRUE(geometry.geometry.points.empty());
+  ASSERT_TRUE(at_limit.bounded);
+  ASSERT_TRUE(at_limit.valid);
+  EXPECT_EQ(at_limit.geometry.points.size(),
+            simple_pure_pursuit::aw2_shadow::kMaxGeometryPoints);
+
+  const auto over_limit = simple_pure_pursuit::buildControllerGeometryV1(
+      trajectory, 300U, 10U, 12U, 100U, 200U, 266U, false, 1.0);
+
+  EXPECT_FALSE(over_limit.bounded);
+  EXPECT_FALSE(over_limit.valid);
+  EXPECT_TRUE(over_limit.geometry.points.empty());
 }
 
 TEST(FreeRunLiveExact, CommandDigestBindsPayloadAndStamp) {

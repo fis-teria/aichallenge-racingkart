@@ -8,6 +8,7 @@ import os
 import posixpath
 import re
 import shutil
+import signal
 import secrets
 import shlex
 import stat
@@ -18,11 +19,12 @@ import time
 from urllib.parse import unquote, urlparse
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 import xml.etree.ElementTree as ElementTree
 
 from . import SCHEMA_VERSION
 from .model import read_result, write_json_atomic
+from .review_queue import ReviewQueue, ReviewQueueError
 
 
 SERVICE = "autoware-simulator-evaluation"
@@ -42,21 +44,137 @@ CYCLONEDDS_DEFAULT_PORTS = {
     "unicast_data_offset": 11,
 }
 MAX_UDP_PORT = 65535
-GATE2_RUNTIME_TIMEOUT_S = 240.0
+GATE2_RUNTIME_TIMEOUT_S = 120.0
 GATE2_FRESHNESS_TOLERANCE_NS = 2_000_000_000
+GATE2_CURRENT_ARTIFACT_ADMISSION_ENV = {
+    "mux_node": "AIC_TEST_GATE2_REQUIRED_MUX_NODE_SHA256",
+    "mux_config": "AIC_TEST_GATE2_REQUIRED_MUX_CONFIG_SHA256",
+    "planner_node": "AIC_TEST_GATE2_REQUIRED_PLANNER_NODE_SHA256",
+}
+GATE2_REQUIRED_IMAGE_ID_ENV = "AIC_TEST_GATE2_REQUIRED_IMAGE_ID"
+GATE2_RUNTIME_AUTHORIZATION_PATH_ENV = "AIC_TEST_GATE2_RUNTIME_AUTHORIZATION_PATH"
+GATE2_RUNTIME_AUTHORIZATION_SHA_ENV = "AIC_TEST_GATE2_RUNTIME_AUTHORIZATION_SHA256"
+GATE2_REVIEW_ANCHOR_PATH_ENV = "AIC_TEST_GATE2_REVIEW_ANCHOR_PATH"
+GATE2_REVIEW_ANCHOR_SHA_ENV = "AIC_TEST_GATE2_REVIEW_ANCHOR_SHA256"
+GATE2_REVIEW_STATE_PATH_ENV = "AIC_TEST_GATE2_REVIEW_STATE_PATH"
+GATE2_REVIEW_STATE_SHA_ENV = "AIC_TEST_GATE2_REVIEW_STATE_SHA256"
+GATE2_REVIEW_RESULT_PATH_ENV = "AIC_TEST_GATE2_REVIEW_RESULT_PATH"
+GATE2_REVIEW_RESULT_SHA_ENV = "AIC_TEST_GATE2_REVIEW_RESULT_SHA256"
+GATE2_REVIEWED_EXECUTION_ID_ENV = "AIC_TEST_GATE2_REVIEWED_EXECUTION_ID"
+GATE2_REVIEW_ATTEMPT_ID_ENV = "AIC_TEST_GATE2_REVIEW_ATTEMPT_ID"
+GATE2_REVIEWED_HANDOFF_PATH_ENV = "AIC_TEST_GATE2_REVIEWED_HANDOFF_PATH"
+GATE2_REVIEWED_HANDOFF_SHA_ENV = "AIC_TEST_GATE2_REVIEWED_HANDOFF_SHA256"
+GATE2_REVIEW_PACKET_PATH_ENV = "AIC_TEST_GATE2_REVIEW_PACKET_PATH"
+GATE2_REVIEW_PACKET_SHA_ENV = "AIC_TEST_GATE2_REVIEW_PACKET_SHA256"
+GATE2_REVIEW_BUNDLE_PATH_ENV = "AIC_TEST_GATE2_REVIEW_BUNDLE_PATH"
+GATE2_REVIEW_BUNDLE_SHA_ENV = "AIC_TEST_GATE2_REVIEW_BUNDLE_SHA256"
+GATE2_REVIEW_IMAGE_ID_ENV = "AIC_TEST_GATE2_REVIEW_IMAGE_ID"
+GATE2_REVIEW_LAUNCH_SPEC_SHA_ENV = "AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256"
+GATE2_WRAPPER_TOKEN_ENV = "AIC_TEST_GATE2_WRAPPER_TOKEN"
+GATE2_CAPABILITY_PATH_ENV = "AIC_TEST_GATE2_CAPABILITY_PATH"
+GATE2_REVIEW_QUEUE_ROOT_RELATIVE = Path("analysis/aic_test/external_review_queue")
+GATE2_CAPABILITY_RELATIVE = Path("gate2-wrapper-capability.json")
+GATE2_CURRENT_IMAGE_ADMISSION_TIMEOUT_S = 20.0
+GATE2_AUTHORITY_PROFILE_PATH = Path("tools/aic_test/config/safegate2.yaml")
+GATE2_AUTHORITY_FLAGS = {
+    "STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED",
+    "STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED",
+    "STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED",
+}
+GATE2_CURRENT_ARTIFACT_ADMISSION_PATHS = {
+    "mux_node": (
+        "aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/"
+        "hybrid_control_mux/hybrid_control_mux_node.py"
+    ),
+    "mux_config": (
+        "aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/"
+        "hybrid_control_mux.param.yaml"
+    ),
+    "planner_node": (
+        "aichallenge/workspace/build/state_lattice_overtake_planner/"
+        "state_lattice_overtake_planner_node"
+    ),
+}
+GATE2_CURRENT_ARTIFACT_INSTALL_LINKS = {
+    "mux_node": (
+        "aichallenge/workspace/install/hybrid_control_mux/lib/hybrid_control_mux/"
+        "hybrid_control_mux_node.py",
+        "/aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/"
+        "hybrid_control_mux/hybrid_control_mux_node.py",
+    ),
+    "mux_config": (
+        "aichallenge/workspace/install/hybrid_control_mux/share/hybrid_control_mux/"
+        "config/hybrid_control_mux.param.yaml",
+        "/aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/"
+        "hybrid_control_mux.param.yaml",
+    ),
+    "planner_node": (
+        "aichallenge/workspace/install/state_lattice_overtake_planner/lib/"
+        "state_lattice_overtake_planner/state_lattice_overtake_planner_node",
+        "/aichallenge/workspace/build/state_lattice_overtake_planner/"
+        "state_lattice_overtake_planner_node",
+    ),
+}
+GATE2_RUNTIME_SERVICE_SET = frozenset({"autoware-eval-command", "autoware-eval-runtime"})
+GATE2_NORMALIZED_SERVICE_KEYS = frozenset({
+    "image", "command", "entrypoint", "environment", "mounts", "privileged",
+    "network_mode", "security_opt", "cap_add", "read_only", "devices",
+    "working_dir", "stop_signal", "stop_grace_period", "pull_policy",
+})
+# `docker compose config --format json` uses the raw Compose spelling
+# `volumes`; the review anchor stores the normalized spelling `mounts` above.
+# Keeping these sets separate rejects caller-injected `mounts` (and a
+# volumes/mounts collision) before normalization.
+GATE2_RENDERED_SERVICE_KEYS = frozenset({
+    "image", "command", "entrypoint", "environment", "volumes", "privileged",
+    "network_mode", "security_opt", "cap_add", "read_only", "devices",
+    "working_dir", "stop_signal", "stop_grace_period", "pull_policy",
+})
+GATE2_RUNTIME_BUDGET = {
+    "fresh_runtime_max": 1,
+    "fresh_runtime_used": 0,
+    "process_group_timeout_s": 120,
+    "retry_allowed": False,
+}
+GATE2_MAKE_DISPATCH_OWNED_ENV_KEYS = frozenset({
+    "AUTOWARE_SERVICE", "AUTOWARE_COMMAND_SERVICE", "AUTOWARE_COMMAND_MODE",
+    "AUTOWARE_RUNTIME_IMAGE", "AWSIM_START_TARGET", "AUTOWARE_RUN_MODE",
+    "AUTOSTART_DEBUG_VISUALIZATION", "CONTROL_METHOD", "RUN_KIND",
+})
+GATE2_EXPORTED_BASH_FUNCTION_ENV_PREFIX = "BASH_FUNC_"
+# Backward-compatible internal name.  The set now covers every value protected
+# by Make's Gate2 dispatch-origin guard, not only the two headless controls.
+GATE2_TARGET_OWNED_ENV_KEYS = GATE2_MAKE_DISPATCH_OWNED_ENV_KEYS
 GATE2_ENV_EXACT_KEYS = frozenset(
     {
-        "AWSIM_EXTRA_ARGS", "GATE_EXTRA_ARGS", "CONTROL_METHOD", "RUN_KIND",
+        "AWSIM_EXTRA_ARGS", "GATE_EXTRA_ARGS", "AWSIM_START_MODE",
+        "AWSIM_READY_DOMAINS", "AWSIM_VEHICLES", "AWSIM_LAPS", "AWSIM_TIMEOUT",
+        "RACE_ARM_ON_VEHICLE_STATE", "RUN_MODE", "LOG_DIR", "ROS_DOMAIN_ID",
+        "HOST_UID", "HOST_GID", "DEV_AUTO_START", "RUN_GATE_SCENARIO",
+        *GATE2_MAKE_DISPATCH_OWNED_ENV_KEYS,
         "PLANNER_PP_CONTROL_SMOKE_LIVE_SPATIAL", "OUTPUT_ROOT", "OUTPUT_HOST_ROOT",
         "STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED",
         "STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED",
         "STATE_LATTICE_V2_PRODUCER_INSTANCE_ID",
         "STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID",
         "STATE_LATTICE_V2_SESSION_ID",
+        "STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED",
         "OVERTAKE_TRAJECTORY_BACKEND", "PP_CORE_EXACT_SNAPSHOT_ENABLED", "ROSBAG",
-        "AWSIM_START_MODE", "RACE_ARM_ON_VEHICLE_STATE",
         "MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "MAKELEVEL",
-        "COMPOSE_PROJECT_NAME", "COMPOSE_FILE",
+        "MAKEFILES", "GNUMAKEFLAGS", "BASH_ENV", "ENV", "SHELLOPTS",
+        "COMPOSE_PROJECT_NAME", "COMPOSE_FILE", GATE2_WRAPPER_TOKEN_ENV,
+        GATE2_CAPABILITY_PATH_ENV,
+        *GATE2_CURRENT_ARTIFACT_ADMISSION_ENV.values(),
+        GATE2_REQUIRED_IMAGE_ID_ENV,
+        GATE2_RUNTIME_AUTHORIZATION_PATH_ENV, GATE2_RUNTIME_AUTHORIZATION_SHA_ENV,
+        GATE2_REVIEW_ANCHOR_PATH_ENV, GATE2_REVIEW_ANCHOR_SHA_ENV,
+        GATE2_REVIEW_STATE_PATH_ENV, GATE2_REVIEW_STATE_SHA_ENV,
+        GATE2_REVIEW_RESULT_PATH_ENV, GATE2_REVIEW_RESULT_SHA_ENV,
+        GATE2_REVIEWED_EXECUTION_ID_ENV, GATE2_REVIEW_ATTEMPT_ID_ENV,
+        GATE2_REVIEWED_HANDOFF_PATH_ENV, GATE2_REVIEWED_HANDOFF_SHA_ENV,
+        GATE2_REVIEW_PACKET_PATH_ENV, GATE2_REVIEW_PACKET_SHA_ENV,
+        GATE2_REVIEW_BUNDLE_PATH_ENV, GATE2_REVIEW_BUNDLE_SHA_ENV,
+        GATE2_REVIEW_IMAGE_ID_ENV, GATE2_REVIEW_LAUNCH_SPEC_SHA_ENV,
     }
 )
 GATE2_ANALYSIS_TIMEOUT_S = 60.0
@@ -833,6 +951,340 @@ def _normalized_sha256(value: object) -> str | None:
     if not isinstance(value, str) or not re.fullmatch(r"[0-9A-Fa-f]{64}", value):
         return None
     return value.lower()
+
+
+def _gate2_reviewed_admission_inputs() -> tuple[dict[str, Any] | None, str | None]:
+    expected_hashes: dict[str, str] = {}
+    for name, environment_name in GATE2_CURRENT_ARTIFACT_ADMISSION_ENV.items():
+        expected = _normalized_sha256(os.environ.get(environment_name))
+        if expected is None:
+            return None, f"gate2_required_{name}_sha256_invalid"
+        expected_hashes[name] = expected
+    image_id = os.environ.get(GATE2_REQUIRED_IMAGE_ID_ENV)
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9A-Fa-f]{64}", image_id):
+        return None, "gate2_required_image_id_invalid"
+    return {"artifact_sha256": expected_hashes, "image_id": image_id.lower()}, None
+
+
+def _gate2_authority_profile(repo: Path) -> tuple[dict[str, Any] | None, str | None]:
+    path = repo / GATE2_AUTHORITY_PROFILE_PATH
+    try:
+        expected_path = repo.resolve(strict=True) / GATE2_AUTHORITY_PROFILE_PATH
+        resolved_path = path.resolve(strict=True)
+        if (
+            stat.S_ISLNK(path.lstat().st_mode)
+            or not path.is_file()
+            or path != expected_path
+            or resolved_path != expected_path
+        ):
+            return None, "gate2_authority_profile_path_invalid"
+        raw = path.read_bytes()
+    except OSError:
+        return None, "gate2_authority_profile_unreadable"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "gate2_authority_profile_schema_invalid"
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = re.fullmatch(r"([a-z_]+): ([A-Za-z0-9_]+)", stripped)
+        if match is None or match.group(1) in values:
+            return None, "gate2_authority_profile_schema_invalid"
+        values[match.group(1)] = match.group(2)
+    if set(values) != {"schema_version", "state_lattice_authority_profile"} or values["schema_version"] != "1":
+        return None, "gate2_authority_profile_schema_invalid"
+    profile = values["state_lattice_authority_profile"]
+    if profile not in {"disabled", "v2_v4_live"}:
+        return None, "gate2_authority_profile_invalid"
+    enabled = profile == "v2_v4_live"
+    return {
+        "path": str(path.resolve()), "sha256": hashlib.sha256(raw).hexdigest(),
+        "profile": profile, "flags": {key: "true" if enabled else "false" for key in sorted(GATE2_AUTHORITY_FLAGS)},
+    }, None
+
+
+def _gate2_canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _gate2_absolute_env_path(name: str) -> Path | None:
+    raw = os.environ.get(name)
+    if not isinstance(raw, str) or not Path(raw).is_absolute():
+        return None
+    return Path(raw)
+
+
+def _gate2_read_anchor_json(path: Path, expected_sha: str, error: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        resolved = path.resolve(strict=True)
+        if (
+            stat.S_ISLNK(path.lstat().st_mode)
+            or not path.is_file()
+            or stat.S_IMODE(path.stat().st_mode) != 0o644
+            or resolved != path
+            or _regular_file_sha256(path) != expected_sha
+        ):
+            return None, error
+        payload = json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError):
+        return None, error
+    if not isinstance(payload, dict):
+        return None, error
+    return payload, None
+
+
+def _gate2_anchored_file(path: Path, expected_sha: str) -> bool:
+    try:
+        return (
+            path.resolve(strict=True) == path
+            and not stat.S_ISLNK(path.lstat().st_mode)
+            and path.is_file()
+            and stat.S_IMODE(path.stat().st_mode) == 0o644
+            and _regular_file_sha256(path) == expected_sha
+        )
+    except OSError:
+        return False
+
+
+def _gate2_review_anchor(repo: Path, run_id: str, authority_profile: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve local Gate2 authority plus canonical advisory-review provenance.
+
+    Only the two review IDs are accepted from the caller.  The queue root,
+    completed terminal, handoff/packet hashes, and the Gate2 index path are all
+    derived locally; ambient path/hash/state/result variables are deliberately
+    ignored so a caller cannot self-authorize arbitrary bytes.  Reviewer
+    severity does not grant or deny runtime; the exclusive index created by the
+    owner-facing ``authorize-gate2`` command is the one-runtime transition.
+    """
+    execution_id = os.environ.get(GATE2_REVIEWED_EXECUTION_ID_ENV)
+    attempt_id = os.environ.get(GATE2_REVIEW_ATTEMPT_ID_ENV)
+    if (
+        not isinstance(execution_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", execution_id)
+        or not isinstance(attempt_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", attempt_id)
+    ):
+        return None, "gate2_review_queue_identity_invalid"
+    try:
+        queue_root = (repo.resolve(strict=True) / GATE2_REVIEW_QUEUE_ROOT_RELATIVE).resolve(strict=True)
+        expected_queue_root = repo.resolve(strict=True) / GATE2_REVIEW_QUEUE_ROOT_RELATIVE
+        if queue_root != expected_queue_root or stat.S_ISLNK(queue_root.lstat().st_mode) or not queue_root.is_dir():
+            return None, "gate2_review_queue_root_invalid"
+        queue = ReviewQueue(queue_root)
+        anchor = queue.resolve_completed_gate2(
+            execution_id=execution_id, review_attempt_id=attempt_id, run_id=run_id,
+        )
+    except (OSError, ReviewQueueError) as error:
+        return None, str(error)
+    if anchor.get("authority_profile") != authority_profile or anchor.get("runtime_budget") != GATE2_RUNTIME_BUDGET:
+        return None, "gate2_review_anchor_contract_invalid"
+    if anchor.get("transition_permission") != "GO_RUNTIME_ONCE":
+        return None, "gate2_review_anchor_contract_invalid"
+    image_id = anchor.get("image_id")
+    artifacts = anchor.get("artifact_sha256")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        return None, "gate2_review_anchor_image_id_invalid"
+    if (
+        not isinstance(artifacts, dict)
+        or set(artifacts) != set(GATE2_CURRENT_ARTIFACT_ADMISSION_ENV)
+        or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in artifacts.values())
+    ):
+        return None, "gate2_review_anchor_artifact_hashes_invalid"
+    launch_spec = anchor.get("launch_spec")
+    if not isinstance(launch_spec, dict) or set(launch_spec) != {"service_set", "services"}:
+        return None, "gate2_review_anchor_launch_spec_invalid"
+    services = launch_spec.get("services")
+    if launch_spec.get("service_set") != sorted(GATE2_RUNTIME_SERVICE_SET) or not isinstance(services, dict) or set(services) != GATE2_RUNTIME_SERVICE_SET:
+        return None, "gate2_review_anchor_launch_spec_invalid"
+    launch_service_keys = GATE2_NORMALIZED_SERVICE_KEYS
+    for service in GATE2_RUNTIME_SERVICE_SET:
+        spec = services.get(service)
+        if not isinstance(spec, dict) or set(spec) != launch_service_keys:
+            return None, "gate2_review_anchor_launch_spec_invalid"
+        if spec.get("image") != image_id or not isinstance(spec.get("command"), list):
+            return None, "gate2_review_anchor_launch_spec_invalid"
+        if spec.get("entrypoint") is not None and not isinstance(spec.get("entrypoint"), list):
+            return None, "gate2_review_anchor_launch_spec_invalid"
+        if not isinstance(spec.get("environment"), dict) or not isinstance(spec.get("mounts"), list):
+            return None, "gate2_review_anchor_launch_spec_invalid"
+        if type(spec.get("privileged")) is not bool or not isinstance(spec.get("network_mode"), str):
+            return None, "gate2_review_anchor_launch_spec_invalid"
+        if not isinstance(spec.get("security_opt"), list) or not isinstance(spec.get("cap_add"), list) or type(spec.get("read_only")) is not bool:
+            return None, "gate2_review_anchor_launch_spec_invalid"
+        if not isinstance(spec.get("devices"), list):
+            return None, "gate2_review_anchor_launch_spec_invalid"
+        for field in ("working_dir", "stop_signal", "stop_grace_period", "pull_policy"):
+            if spec.get(field) is not None and not isinstance(spec.get(field), str):
+                return None, "gate2_review_anchor_launch_spec_invalid"
+    launch_spec_sha = _gate2_canonical_sha256(launch_spec)
+    supplied_launch_sha = os.environ.get(GATE2_REVIEW_LAUNCH_SPEC_SHA_ENV)
+    if supplied_launch_sha not in (None, launch_spec_sha):
+        return None, "gate2_review_anchor_launch_spec_hash_mismatch"
+    anchor_path = Path(anchor["authorization_index_path"])
+    anchor_sha = anchor["authorization_index_sha256"]
+    result_path = Path(anchor["review_result_path"])
+    env_fields = {
+        GATE2_REVIEW_ANCHOR_PATH_ENV: str(anchor_path),
+        GATE2_REVIEW_ANCHOR_SHA_ENV: anchor_sha,
+        GATE2_REVIEWED_EXECUTION_ID_ENV: execution_id,
+        GATE2_REVIEW_ATTEMPT_ID_ENV: attempt_id,
+        GATE2_REVIEW_RESULT_PATH_ENV: str(result_path),
+        GATE2_REVIEW_RESULT_SHA_ENV: anchor["review_result_sha256"],
+        GATE2_REVIEWED_HANDOFF_PATH_ENV: anchor["reviewed_handoff_path"],
+        GATE2_REVIEWED_HANDOFF_SHA_ENV: anchor["reviewed_handoff_sha256"],
+        GATE2_REVIEW_PACKET_PATH_ENV: anchor["review_packet_path"],
+        GATE2_REVIEW_PACKET_SHA_ENV: anchor["review_packet_sha256"],
+        GATE2_REVIEW_BUNDLE_PATH_ENV: anchor["review_bundle_path"],
+        GATE2_REVIEW_BUNDLE_SHA_ENV: anchor["review_bundle_sha256"],
+        GATE2_REVIEW_IMAGE_ID_ENV: image_id,
+        GATE2_REVIEW_LAUNCH_SPEC_SHA_ENV: launch_spec_sha,
+    }
+    # Keep the old state variables populated with the queue index for downstream
+    # manifest compatibility; they are derived values, never caller authority.
+    env_fields[GATE2_REVIEW_STATE_PATH_ENV] = str(anchor_path)
+    env_fields[GATE2_REVIEW_STATE_SHA_ENV] = anchor_sha
+    return {
+        "anchor_path": str(anchor_path),
+        "anchor_sha256": anchor_sha,
+        "anchor": anchor,
+        "reviewed_inputs": {"artifact_sha256": artifacts, "image_id": image_id},
+        "launch_spec_sha256": launch_spec_sha,
+        "environment": env_fields,
+    }, None
+
+
+def _gate2_runtime_authorization(
+    repo: Path, run_id: str, reviewed_inputs: dict[str, Any] | None, authority_profile: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if os.environ.get(GATE2_RUNTIME_AUTHORIZATION_PATH_ENV) or os.environ.get(GATE2_RUNTIME_AUTHORIZATION_SHA_ENV):
+        return None, "gate2_runtime_authorization_contract_invalid"
+    anchor, error = _gate2_review_anchor(repo, run_id, authority_profile)
+    if error is not None:
+        return None, error
+    assert anchor is not None
+    if reviewed_inputs is not None and reviewed_inputs != anchor["reviewed_inputs"]:
+        return None, "gate2_runtime_authorization_contract_invalid"
+    return anchor, None
+
+
+def _consume_gate2_runtime_authorization(repo: Path, authorization: dict[str, Any]) -> str | None:
+    anchor_sha = authorization.get("anchor_sha256")
+    if not isinstance(anchor_sha, str):
+        return "gate2_runtime_authorization_anchor_missing"
+    guard = repo / "analysis" / "aic_test" / f"gate2_runtime_authorization_consumed_{anchor_sha}.json"
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(guard, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(authorization, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush(); os.fsync(stream.fileno())
+    except FileExistsError:
+        return "gate2_runtime_authorization_already_consumed"
+    except OSError:
+        return "gate2_runtime_authorization_guard_write_failed"
+    return None
+
+
+def _gate2_current_artifact_admission(
+    repo: Path, expected_hashes: dict[str, str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Bind Gate 2 to explicit, reviewed host install targets before launch."""
+    observed: dict[str, dict[str, str]] = {}
+    for name, relative_source in GATE2_CURRENT_ARTIFACT_ADMISSION_PATHS.items():
+        source_path = repo / relative_source
+        actual = _regular_file_sha256(source_path)
+        if actual is None:
+            return None, f"gate2_required_{name}_source_unreadable"
+        if actual != expected_hashes[name]:
+            return None, f"gate2_required_{name}_sha256_mismatch"
+        relative_install, expected_target = GATE2_CURRENT_ARTIFACT_INSTALL_LINKS[name]
+        install_path = repo / relative_install
+        try:
+            if not install_path.is_symlink() or os.readlink(install_path) != expected_target:
+                return None, f"gate2_required_{name}_install_link_mismatch"
+        except OSError:
+            return None, f"gate2_required_{name}_install_link_unreadable"
+        observed[name] = {
+            "expected_sha256": expected_hashes[name],
+            "expected_install_link_sha256": hashlib.sha256(
+                ("symlink\0" + expected_target).encode("utf-8")
+            ).hexdigest(),
+            "source_path": relative_source,
+            "install_path": relative_install,
+            "install_target": expected_target,
+        }
+    return {"artifacts": observed}, None
+
+
+def _gate2_current_image_artifact_admission(
+    repo: Path, environment: dict[str, str], host_admission: dict[str, Any],
+    expected_image_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Inspect the immutable eval image bytes before starting Gate 2 services."""
+    try:
+        inspect = _run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", "aichallenge-2025-eval"],
+            cwd=repo, env=environment, timeout=GATE2_CURRENT_IMAGE_ADMISSION_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, f"gate2_runtime_image_inspect_exception:{type(error).__name__}"
+    actual_image_id = inspect.stdout.strip().lower()
+    if inspect.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", actual_image_id):
+        return None, "gate2_runtime_image_inspect_failed"
+    if actual_image_id != expected_image_id.lower():
+        return None, "gate2_runtime_image_id_mismatch"
+    artifacts = host_admission.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return None, "gate2_host_artifact_admission_invalid"
+    image_paths = [
+        GATE2_CURRENT_ARTIFACT_INSTALL_LINKS[name][0]
+        for name in GATE2_CURRENT_ARTIFACT_ADMISSION_ENV
+    ]
+    container_paths = [f"/aichallenge/{path.removeprefix('aichallenge/')}" for path in image_paths]
+    probe_script = "sha256sum " + " ".join(shlex.quote(path) for path in container_paths)
+    command = [
+        "docker", "run", "--rm", "--read-only", "--network", "none",
+        "--entrypoint", "/bin/sh", actual_image_id, "-c", probe_script,
+    ]
+    try:
+        probe = _run(
+            command, cwd=repo, env=environment,
+            timeout=GATE2_CURRENT_IMAGE_ADMISSION_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, f"gate2_runtime_image_artifact_probe_exception:{type(error).__name__}"
+    if probe.returncode != 0:
+        return None, "gate2_runtime_image_artifact_probe_failed"
+    observed_hashes: dict[str, str] = {}
+    for line in probe.stdout.splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or not re.fullmatch(r"[0-9a-fA-F]{64}", fields[0]):
+            return None, "gate2_runtime_image_artifact_probe_output_invalid"
+        observed_hashes[fields[1].lstrip(" *")] = fields[0].lower()
+    if set(observed_hashes) != set(container_paths):
+        return None, "gate2_runtime_image_artifact_probe_output_invalid"
+    for name, container_path in zip(GATE2_CURRENT_ARTIFACT_ADMISSION_ENV, container_paths):
+        artifact = artifacts.get(name)
+        if not isinstance(artifact, dict):
+            return None, "gate2_host_artifact_admission_invalid"
+        if observed_hashes[container_path] != artifact.get("expected_sha256"):
+            return None, f"gate2_runtime_image_{name}_sha256_mismatch"
+    return {
+        "image": "aichallenge-2025-eval",
+        "image_id": actual_image_id,
+        "service_set": sorted(GATE2_RUNTIME_SERVICE_SET),
+        "artifact_sha256": {
+            name: observed_hashes[path]
+            for name, path in zip(GATE2_CURRENT_ARTIFACT_ADMISSION_ENV, container_paths)
+        },
+        "probe": {"read_only": True, "network": "none"},
+    }, None
 
 
 def _cyclonedds_config_hash_matches(evidence: dict[str, Any]) -> bool:
@@ -2506,31 +2958,463 @@ def _gate2_sanitized_environment() -> dict[str, str]:
         if key not in GATE2_ENV_EXACT_KEYS
         and not key.startswith("AWSIM_")
         and not key.startswith("D1_")
+        and not key.startswith(GATE2_EXPORTED_BASH_FUNCTION_ENV_PREFIX)
     }
+
+
+def _gate2_fixed_runtime_environment(
+    run_id: str, authority_flags: Mapping[str, str],
+) -> dict[str, str]:
+    """Return the exact post-recursion Gate2 Compose context.
+
+    This is the single value source for review/admission rendering.  The Make
+    entrypoint receives a filtered projection below so its protected target
+    variables remain Make-owned while resolving to these same values.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
+        raise ValueError("invalid Gate2 run id")
+    if (
+        set(authority_flags) != GATE2_AUTHORITY_FLAGS
+        or any(authority_flags[key] not in {"true", "false"} for key in authority_flags)
+    ):
+        raise ValueError("invalid Gate2 authority flags")
+    output_root = "/output"
+    gate_scenario = "SafetyGate/scenario2.yaml"
+    scenario_root = "/aichallenge/simulator/AWSIM/AWSIM_Data/StreamingAssets"
+    gate_extra_args = "-batchmode -nographics --camera false --lidar false"
+    effective = {
+        "AIC_TEST_SCOPED_PROJECT": "true",
+        "AUTOSTART_DEBUG_VISUALIZATION": "false",
+        "AUTOWARE_COMMAND_MODE": "exec",
+        "AUTOWARE_COMMAND_SERVICE": "autoware-eval-command",
+        "AUTOWARE_RUN_MODE": "awsim-no-viz",
+        "AUTOWARE_RUNTIME_IMAGE": "aichallenge-2025-eval",
+        "AUTOWARE_SERVICE": "autoware-eval-runtime",
+        # gate2 composes one separating space around an initially empty
+        # AWSIM_EXTRA_ARGS, so the target-effective value has two spaces here.
+        "AWSIM_EXTRA_ARGS": (
+            f"--scenario {scenario_root}/{gate_scenario}  {gate_extra_args}"
+        ),
+        "AWSIM_LAPS": "unlimited",
+        "AWSIM_READY_DOMAINS": "1",
+        "AWSIM_START_MODE": "sync",
+        "AWSIM_START_TARGET": "awsim-request-start-and-watch-d1",
+        "AWSIM_TIMEOUT": "60000000",
+        "AWSIM_VEHICLES": "4",
+        "COMPOSE_PROJECT_NAME": f"aic-{run_id.lower()}",
+        "CONTROL_METHOD": "state_lattice_pure_pursuit",
+        "DEV_AUTO_START": "false",
+        "GATE_EXTRA_ARGS": gate_extra_args,
+        "HOST_GID": str(os.getgid()),
+        "HOST_UID": str(os.getuid()),
+        "LOG_DIR": f"{output_root}/{run_id}",
+        "OUTPUT_HOST_ROOT": "./output",
+        "OUTPUT_ROOT": output_root,
+        "OVERTAKE_TRAJECTORY_BACKEND": "current",
+        "PLANNER_PP_CONTROL_SMOKE_LIVE_SPATIAL": "true",
+        "PP_CORE_EXACT_SNAPSHOT_ENABLED": "false",
+        "RACE_ARM_ON_VEHICLE_STATE": "Start",
+        "ROSBAG": "true",
+        "ROS_DOMAIN_ID": "1",
+        "RUN_GATE_SCENARIO": gate_scenario,
+        "RUN_KIND": "planner-pp-control-smoke",
+        # Unlike AUTOWARE_RUN_MODE, these are Compose interpolation inputs.
+        # Passing them through Make keeps the later attestation render equal to
+        # the inline environment used to create the runtime service.
+        "RUN_MODE": "awsim-no-viz",
+        "STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID": "4201",
+        "STATE_LATTICE_V2_PRODUCER_INSTANCE_ID": "4101",
+        "STATE_LATTICE_V2_SESSION_ID": "1",
+        **{key: authority_flags[key] for key in sorted(authority_flags)},
+    }
+    return effective
+
+
+def _gate2_make_dispatch_environment(
+    effective_environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Project the canonical context onto the protected top-level Make call."""
+    dispatch = {
+        key: value for key, value in effective_environment.items()
+        if key not in GATE2_MAKE_DISPATCH_OWNED_ENV_KEYS
+        and not key.startswith(GATE2_EXPORTED_BASH_FUNCTION_ENV_PREFIX)
+    }
+    # The gate2 recipe adds the reviewed scenario and GATE_EXTRA_ARGS exactly
+    # once.  Feed it the reviewed empty precursor, not the derived Compose value.
+    dispatch["AWSIM_EXTRA_ARGS"] = ""
+    return dispatch
+
+
+def _gate2_xauthority_path() -> Path:
+    path = Path(tempfile.gettempdir()) / f"aic-test-xauthority-{os.getuid()}"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        file_stat = path.lstat()
+        if (
+            stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_uid != os.getuid()
+            or stat.S_IMODE(file_stat.st_mode) != 0o600
+        ):
+            raise OSError("unsafe scoped Xauthority path")
+    else:
+        os.close(descriptor)
+    return path
+
+
+def _gate2_capability_path(repo: Path, run_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
+        raise OSError("invalid scoped capability run id")
+    return repo.resolve(strict=True) / "analysis" / "aic_test" / "runs" / run_id / GATE2_CAPABILITY_RELATIVE
+
+
+def _gate2_proc_start_ticks(pid: int) -> str | None:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()
+        return fields[21]
+    except (OSError, IndexError, UnicodeError):
+        return None
+
+
+def _gate2_write_wrapper_capability(
+    repo: Path, run_dir: Path, run_id: str, anchor_sha256: str,
+) -> tuple[Path | None, str | None]:
+    """Create the one-dispatch capability consumed by the direct Make gate."""
+    try:
+        if run_dir.resolve(strict=True) != repo.resolve(strict=True) / "analysis" / "aic_test" / "runs" / run_id:
+            return None, "gate2_capability_parent_invalid"
+        parent_stat = run_dir.stat()
+        if parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) & 0o022:
+            return None, "gate2_capability_parent_unsafe"
+        if not re.fullmatch(r"[0-9a-f]{64}", anchor_sha256):
+            return None, "gate2_capability_anchor_invalid"
+        pid = os.getpid()
+        start_ticks = _gate2_proc_start_ticks(pid)
+        if start_ticks is None:
+            return None, "gate2_capability_pid_unavailable"
+        payload = {
+            "schema_version": 1,
+            "pid": pid,
+            "pid_start_ticks": start_ticks,
+            "run_id": run_id,
+            "anchor_sha256": anchor_sha256,
+            "nonce": secrets.token_hex(32),
+        }
+        path = _gate2_capability_path(repo, run_id)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                descriptor = -1
+                json.dump(payload, stream, sort_keys=True, ensure_ascii=False, allow_nan=False)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        directory_fd = os.open(run_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return path, None
+    except FileExistsError:
+        return None, "gate2_capability_already_exists"
+    except (OSError, TypeError, ValueError) as error:
+        return None, f"gate2_capability_create_failed:{type(error).__name__}"
+
+
+def _gate2_verify_wrapper_capability(repo: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        path = _gate2_capability_path(repo, run_id)
+        resolved_repo = repo.resolve(strict=True)
+        resolved_parent = path.parent.resolve(strict=True)
+        parent_stat = resolved_parent.stat()
+        file_stat = path.lstat()
+        if (
+            resolved_parent != resolved_repo / "analysis" / "aic_test" / "runs" / run_id
+            or stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode)
+            or stat.S_IMODE(file_stat.st_mode) != 0o600 or file_stat.st_uid != os.getuid()
+            or parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) & 0o022
+        ):
+            return None, "gate2_capability_file_unsafe"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "gate2_capability_file_invalid"
+    if not isinstance(payload, dict) or set(payload) != {"schema_version", "pid", "pid_start_ticks", "run_id", "anchor_sha256", "nonce"}:
+        return None, "gate2_capability_schema_invalid"
+    pid = payload.get("pid")
+    if (
+        payload.get("schema_version") != 1 or type(pid) is not int or pid <= 1
+        or payload.get("run_id") != run_id
+        or not isinstance(payload.get("pid_start_ticks"), str) or not payload["pid_start_ticks"].isdigit()
+        or not isinstance(payload.get("nonce"), str) or not re.fullmatch(r"[0-9a-f]{64}", payload["nonce"])
+        or not isinstance(payload.get("anchor_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", payload["anchor_sha256"])
+    ):
+        return None, "gate2_capability_schema_invalid"
+    if _gate2_proc_start_ticks(pid) != payload["pid_start_ticks"]:
+        return None, "gate2_capability_pid_mismatch"
+    try:
+        command_line = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return None, "gate2_capability_pid_unavailable"
+    if "aic_test" not in command_line and "aic-test" not in command_line:
+        return None, "gate2_capability_pid_not_wrapper"
+    return payload, None
+
+
+def verify_gate2_wrapper_capability(args: argparse.Namespace) -> int:
+    repo = _repo_root(args.repo_root)
+    payload, error = _gate2_verify_wrapper_capability(repo, args.run_id)
+    if error is not None:
+        print(f"PRECONDITION_NOT_MET: {error}")
+        return 3
+    authority_profile, profile_error = _gate2_authority_profile(repo)
+    if profile_error is not None or authority_profile is None:
+        print(f"PRECONDITION_NOT_MET: {profile_error or 'gate2_authority_profile_invalid'}")
+        return 3
+    authorization, auth_error = _gate2_runtime_authorization(repo, args.run_id, None, authority_profile)
+    if auth_error is not None or authorization is None:
+        print(f"PRECONDITION_NOT_MET: {auth_error or 'gate2_runtime_authorization_invalid'}")
+        return 3
+    if payload["anchor_sha256"] != authorization["anchor_sha256"]:
+        print("PRECONDITION_NOT_MET: gate2_capability_anchor_mismatch")
+        return 3
+    print(json.dumps({"run_id": args.run_id, "capability": "valid", "anchor_sha256": payload["anchor_sha256"]}))
+    return 0
+
+
+def _run_gate2_process_group(
+    command: Sequence[str], *, cwd: Path, env: dict[str, str], timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command, cwd=cwd, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.communicate(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5.0)
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _gate2_compose_preflight(
     repo: Path, environment: dict[str, str]
 ) -> tuple[str | None, str | None]:
     for project in (None, "1", "2", "3", "4"):
+        probe_environment = dict(environment)
+        if project is None:
+            probe_environment.pop("COMPOSE_PROJECT_NAME", None)
         command = ["docker", "compose"]
         if project is not None:
             command.extend(["-p", project])
-        command.extend(["ps", "-q"])
+        command.extend(["ps", "-aq"])
         try:
-            result = _run(command, cwd=repo, env=environment, timeout=10)
+            result = _run(command, cwd=repo, env=probe_environment, timeout=10)
         except (OSError, subprocess.TimeoutExpired) as error:
             return None, f"compose_preflight_exception:{type(error).__name__}"
         if result.returncode != 0:
             return None, "compose_preflight_command_failed"
-        if result.stdout.strip():
+        container_ids = [
+            line.strip() for line in result.stdout.splitlines()
+            if re.fullmatch(r"[0-9a-f]{12,64}", line.strip())
+        ]
+        if container_ids:
             label = "default" if project is None else project
             return f"managed_compose_project_active:{label}", None
+    try:
+        listed = _run(["docker", "compose", "ls", "--all", "--format", "json"], cwd=repo, env=environment, timeout=10)
+        projects = json.loads(listed.stdout) if listed.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+        return None, f"compose_scoped_preflight_exception:{type(error).__name__}"
+    if not isinstance(projects, list):
+        return None, "compose_scoped_preflight_invalid"
+    for project in projects:
+        if isinstance(project, dict) and isinstance(project.get("Name"), str) and project["Name"].startswith("aic-"):
+            return f"managed_compose_project_active:{project['Name']}", None
     return None, None
 
 
+def _gate2_write_image_override(run_dir: Path, image_id: str) -> Path:
+    path = run_dir / "eval-image.override.yml"
+    text = (
+        "services:\n"
+        "  autoware-eval-runtime:\n"
+        f"    image: \"aichallenge-2025-eval@{image_id}\"\n"
+        "    pull_policy: never\n"
+        "  autoware-eval-command:\n"
+        f"    image: \"aichallenge-2025-eval@{image_id}\"\n"
+        "    pull_policy: never\n"
+    )
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _gate2_normalized_service_spec(service: Mapping[str, Any]) -> dict[str, Any]:
+    unknown = set(service) - GATE2_RENDERED_SERVICE_KEYS
+    if unknown:
+        raise ValueError(f"unknown Gate 2 service keys: {sorted(unknown)}")
+    environment = service.get("environment", {})
+    if isinstance(environment, list):
+        environment = {
+            item.split("=", 1)[0]: item.split("=", 1)[1] if "=" in item else None
+            for item in environment if isinstance(item, str)
+        }
+    if not isinstance(environment, dict):
+        raise ValueError("Gate 2 service environment is invalid")
+    volumes = service.get("volumes", [])
+    if not isinstance(volumes, list):
+        raise ValueError("Gate 2 service volumes are invalid")
+    normalized_volumes = [
+        json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if isinstance(item, dict) else str(item)
+        for item in volumes
+    ]
+    command = service.get("command", [])
+    if isinstance(command, str):
+        command = [command]
+    if not isinstance(command, list):
+        raise ValueError("Gate 2 service command is invalid")
+    entrypoint = service.get("entrypoint")
+    if isinstance(entrypoint, str):
+        entrypoint = [entrypoint]
+    if entrypoint is not None and not isinstance(entrypoint, list):
+        raise ValueError("Gate 2 service entrypoint is invalid")
+    image = service.get("image")
+    if isinstance(image, str) and "@sha256:" in image:
+        image = image[image.index("@") + 1:]
+    devices = service.get("devices", [])
+    if not isinstance(devices, list):
+        raise ValueError("Gate 2 service devices are invalid")
+    security_opt = service.get("security_opt", [])
+    cap_add = service.get("cap_add", [])
+    if not isinstance(security_opt, list) or not isinstance(cap_add, list):
+        raise ValueError("Gate 2 service security options are invalid")
+    for field in ("working_dir", "stop_signal", "stop_grace_period", "pull_policy"):
+        value = service.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"Gate 2 service {field} is invalid")
+    if type(service.get("privileged", False)) is not bool or type(service.get("read_only", False)) is not bool:
+        raise ValueError("Gate 2 service boolean field is invalid")
+    network_mode = service.get("network_mode", "")
+    if not isinstance(network_mode, str):
+        raise ValueError("Gate 2 service network mode is invalid")
+    return {
+        "image": image,
+        "command": command,
+        "entrypoint": entrypoint,
+        "environment": {str(key): environment[key] for key in sorted(environment)},
+        "mounts": sorted(normalized_volumes),
+        "privileged": service.get("privileged", False),
+        "network_mode": network_mode,
+        "security_opt": sorted(security_opt),
+        "cap_add": sorted(cap_add),
+        "read_only": service.get("read_only", False),
+        "devices": sorted(
+            json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if isinstance(item, dict) else str(item)
+            for item in devices
+        ),
+        "working_dir": service.get("working_dir"),
+        "stop_signal": service.get("stop_signal"),
+        "stop_grace_period": service.get("stop_grace_period"),
+        "pull_policy": service.get("pull_policy"),
+    }
+
+
+def _gate2_launch_spec_admission(
+    repo: Path, environment: dict[str, str], run_id: str, image_id: str,
+    review_anchor: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Bind rendered eval service launch properties to the independent review anchor."""
+    try:
+        rendered = _run(
+            ["docker", "compose", "config", "--format", "json"],
+            cwd=repo, env=environment, timeout=GATE2_CURRENT_IMAGE_ADMISSION_TIMEOUT_S,
+        )
+        if rendered.returncode != 0:
+            return None, "gate2_runtime_launch_spec_render_failed"
+        config = json.loads(rendered.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None, "gate2_runtime_launch_spec_render_failed"
+    services = config.get("services") if isinstance(config, dict) else None
+    if not isinstance(services, dict):
+        return None, "gate2_runtime_launch_spec_schema_invalid"
+    selected = {
+        name: services.get(name)
+        for name in GATE2_RUNTIME_SERVICE_SET
+    }
+    if any(not isinstance(value, dict) for value in selected.values()):
+        return None, "gate2_runtime_launch_spec_service_set_invalid"
+    try:
+        normalized = {
+            "service_set": sorted(GATE2_RUNTIME_SERVICE_SET),
+            "services": {
+                name: _gate2_normalized_service_spec(selected[name])
+                for name in sorted(GATE2_RUNTIME_SERVICE_SET)
+            },
+        }
+    except (TypeError, ValueError):
+        return None, "gate2_runtime_launch_spec_schema_invalid"
+    if any(normalized["services"][name]["image"] != image_id for name in GATE2_RUNTIME_SERVICE_SET):
+        return None, "gate2_runtime_launch_spec_image_mismatch"
+    expected = review_anchor.get("anchor", {}).get("launch_spec")
+    if normalized != expected:
+        return None, "gate2_runtime_launch_spec_anchor_mismatch"
+    return {
+        "run_id": run_id,
+        "project": environment.get("COMPOSE_PROJECT_NAME"),
+        "image_id": image_id,
+        "launch_spec": normalized,
+        "launch_spec_sha256": _gate2_canonical_sha256(normalized),
+    }, None
+
+
+def _gate2_runtime_attestation_image_error(
+    path: Path, image_id: str, run_id: str | None = None,
+    review_anchor: dict[str, Any] | None = None,
+) -> str | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "runtime_container_attestation_unreadable"
+    services = payload.get("services") if isinstance(payload, dict) else None
+    if payload.get("expected_image_id") != image_id or not isinstance(services, list):
+        return "runtime_container_attestation_image_mismatch"
+    if review_anchor is not None:
+        if (
+            payload.get("schema_version") != 2
+            or payload.get("run_id") != run_id
+            or payload.get("review_anchor_sha256") != review_anchor.get("anchor_sha256")
+            or payload.get("launch_spec_sha256") != review_anchor.get("launch_spec_sha256")
+            or {service.get("service") for service in services if isinstance(service, dict)} != GATE2_RUNTIME_SERVICE_SET
+            or len(services) != len(GATE2_RUNTIME_SERVICE_SET)
+        ):
+            return "runtime_container_attestation_contract_invalid"
+        ids = [service.get("container_id") for service in services if isinstance(service, dict)]
+        projects = [service.get("compose_project") for service in services if isinstance(service, dict)]
+        if (
+            any(not isinstance(container_id, str) or not re.fullmatch(r"[0-9a-f]{12,64}", container_id) for container_id in ids)
+            or len(set(ids)) != len(ids)
+            or projects != [f"aic-{run_id.lower()}"] * len(projects)
+            or any(service.get("actual_image_id") != image_id for service in services if isinstance(service, dict))
+        ):
+            return "runtime_container_attestation_contract_invalid"
+    if any(not isinstance(service, dict) or service.get("actual_image_id") != image_id for service in services):
+        return "runtime_container_attestation_image_mismatch"
+    return None
+
+
 def _gate2_manifest_error(
-    path: Path, repo: Path, run_id: str, started_wall_ns: int
+    path: Path, repo: Path, run_id: str, started_wall_ns: int,
+    artifact_admission: dict[str, Any] | None = None,
+    review_anchor: dict[str, Any] | None = None,
 ) -> str | None:
     try:
         if path.stat().st_mtime_ns + GATE2_FRESHNESS_TOLERANCE_NS < started_wall_ns:
@@ -2566,6 +3450,7 @@ def _gate2_manifest_error(
         "PLANNER_PP_CONTROL_SMOKE_LIVE_SPATIAL": "true",
         "STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED": "true",
         "STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED": "true",
+        "STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED": "true",
         "STATE_LATTICE_V2_PRODUCER_INSTANCE_ID": "4101",
         "STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID": "4201",
         "STATE_LATTICE_V2_SESSION_ID": "1",
@@ -2573,15 +3458,57 @@ def _gate2_manifest_error(
         "AWSIM_VEHICLES": "4",
         "AUTOWARE_RUN_MODE": "awsim-no-viz",
         "AUTOSTART_DEBUG_VISUALIZATION": "false",
+        "AUTOWARE_RUNTIME_IMAGE": "aichallenge-2025-eval",
     }
     if any(plain.get(key) != value for key, value in expected_plain.items()):
         return "prelaunch_manifest_launch_context_mismatch"
+    if isinstance(review_anchor, dict) and isinstance(review_anchor.get("environment"), dict):
+        for key, value in review_anchor["environment"].items():
+            if plain.get(key) != value:
+                return "prelaunch_manifest_review_anchor_mismatch"
     gate_args = hashed.get("GATE_EXTRA_ARGS")
     expected_gate_args_hash = hashlib.sha256(
         b"-batchmode -nographics --camera false --lidar false"
     ).hexdigest()
     if not isinstance(gate_args, dict) or gate_args.get("present") is not True or gate_args.get("sha256") != expected_gate_args_hash:
         return "prelaunch_manifest_gate_extra_args_mismatch"
+    if artifact_admission is not None:
+        artifacts = artifact_admission.get("artifacts")
+        runtime_tree_inputs = manifest.get("runtime_tree_inputs")
+        workspace_install = (
+            runtime_tree_inputs.get("workspace_install")
+            if isinstance(runtime_tree_inputs, dict) else None
+        )
+        records = workspace_install.get("records") if isinstance(workspace_install, dict) else None
+        if not isinstance(artifacts, dict) or not isinstance(records, list):
+            return "prelaunch_manifest_artifact_admission_invalid"
+        install_records = {
+            record.get("path"): record
+            for record in records if isinstance(record, dict) and isinstance(record.get("path"), str)
+        }
+        for artifact in artifacts.values():
+            if not isinstance(artifact, dict):
+                return "prelaunch_manifest_artifact_admission_invalid"
+            record = install_records.get(artifact.get("install_path"))
+            if (
+                not isinstance(record, dict)
+                or record.get("type") != "symlink"
+                or record.get("target") != artifact.get("install_target")
+                or record.get("sha256") != artifact.get("expected_install_link_sha256")
+            ):
+                return "prelaunch_manifest_artifact_admission_mismatch"
+        mux_config = artifacts.get("mux_config")
+        launch_config_inputs = manifest.get("launch_config_inputs")
+        manifest_config = (
+            launch_config_inputs.get("hybrid_control_mux_config")
+            if isinstance(launch_config_inputs, dict) else None
+        )
+        if (
+            not isinstance(mux_config, dict)
+            or not isinstance(manifest_config, dict)
+            or manifest_config.get("sha256") != mux_config.get("expected_sha256")
+        ):
+            return "prelaunch_manifest_artifact_admission_mismatch"
     return None
 
 
@@ -2630,6 +3557,48 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
     run_dir = repo / "analysis" / "aic_test" / "runs" / run_id
     output_dir = repo / "output" / run_id
     environment = _gate2_sanitized_environment()
+    authority_profile, authority_profile_error = _gate2_authority_profile(repo)
+    if authority_profile_error is not None:
+        print(f"PRECONDITION_NOT_MET: {authority_profile_error}")
+        return 3
+    assert authority_profile is not None
+    if authority_profile["profile"] != "v2_v4_live":
+        print("PRECONDITION_NOT_MET: safegate2 requires state_lattice_authority_profile=v2_v4_live")
+        return 3
+    fixed_runtime_environment = _gate2_fixed_runtime_environment(
+        run_id, authority_profile["flags"],
+    )
+    environment.update(fixed_runtime_environment)
+    runtime_authorization, runtime_authorization_error = _gate2_runtime_authorization(
+        repo, run_id, None, authority_profile,
+    )
+    if runtime_authorization_error is not None:
+        print(f"PRECONDITION_NOT_MET: {runtime_authorization_error}")
+        return 3
+    assert runtime_authorization is not None
+    reviewed_inputs = runtime_authorization["reviewed_inputs"]
+    environment.update(runtime_authorization["environment"])
+    environment[GATE2_WRAPPER_TOKEN_ENV] = secrets.token_hex(32)
+    artifact_admission, admission_error = _gate2_current_artifact_admission(
+        repo, reviewed_inputs["artifact_sha256"],
+    )
+    if admission_error is not None:
+        print(f"PRECONDITION_NOT_MET: {admission_error}")
+        return 3
+    assert artifact_admission is not None
+    image_admission, image_admission_error = _gate2_current_image_artifact_admission(
+        repo, environment, artifact_admission, reviewed_inputs["image_id"],
+    )
+    if image_admission_error is not None:
+        print(f"PRECONDITION_NOT_MET: {image_admission_error}")
+        return 3
+    assert image_admission is not None
+    environment["AIC_EXPECTED_AUTOWARE_RUNTIME_IMAGE_ID"] = reviewed_inputs["image_id"]
+    try:
+        environment["XAUTHORITY"] = str(_gate2_xauthority_path())
+    except OSError as error:
+        print(f"INFRASTRUCTURE_FAILED: scoped_xauthority_invalid:{type(error).__name__}")
+        return 3
     if output_dir.exists():
         print(f"PRECONDITION_NOT_MET: output directory already exists: {output_dir}")
         return 3
@@ -2641,15 +3610,45 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
         print(f"INFRASTRUCTURE_FAILED: {preflight_error}")
         return 3
     try:
-        run_dir.mkdir(parents=True, exist_ok=False)
+        run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+        os.chmod(run_dir, 0o700)
     except FileExistsError:
         print(f"PRECONDITION_NOT_MET: run directory already exists: {run_dir}")
         return 3
     except OSError as error:
         print(f"INFRASTRUCTURE_FAILED: cannot create run directory: {type(error).__name__}")
         return 3
+    try:
+        compose_override = _gate2_write_image_override(run_dir, reviewed_inputs["image_id"])
+    except OSError as error:
+        print(f"INFRASTRUCTURE_FAILED: cannot write image override: {type(error).__name__}")
+        return 3
+    environment["COMPOSE_FILE"] = f"{repo / 'docker-compose.yml'}:{compose_override}"
+    launch_spec_admission = None
+    review_anchor = runtime_authorization.get("anchor")
+    if isinstance(review_anchor, dict):
+        launch_spec_admission, launch_spec_error = _gate2_launch_spec_admission(
+            repo, environment, run_id, reviewed_inputs["image_id"], runtime_authorization,
+        )
+        if launch_spec_error is not None:
+            print(f"PRECONDITION_NOT_MET: {launch_spec_error}")
+            return 3
+    capability_path, capability_error = _gate2_write_wrapper_capability(
+        repo, run_dir, run_id, runtime_authorization["anchor_sha256"],
+    )
+    if capability_error is not None or capability_path is None:
+        print(f"PRECONDITION_NOT_MET: {capability_error or 'gate2_capability_invalid'}")
+        return 3
+    environment[GATE2_CAPABILITY_PATH_ENV] = str(capability_path)
+    consume_error = _consume_gate2_runtime_authorization(repo, runtime_authorization)
+    if consume_error is not None:
+        print(f"PRECONDITION_NOT_MET: {consume_error}")
+        return 3
 
     result_path = run_dir / "result.json"
+    make_dispatch_environment = _gate2_make_dispatch_environment(
+        fixed_runtime_environment
+    )
     payload: dict[str, Any] = {
         "run_id": run_id,
         "scenario": "safegate2-stopped-overtake",
@@ -2657,31 +3656,46 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
         "reasons": [],
         "command": [
             "make",
-            "planner-pp-control-smoke",
+            "planner-pp-control-smoke-eval",
             f"RUN_ID={run_id}",
-            "GATE_EXTRA_ARGS=-batchmode -nographics --camera false --lidar false",
-            "AWSIM_EXTRA_ARGS=",
-            "AUTOWARE_RUN_MODE=awsim-no-viz",
-            "AUTOSTART_DEBUG_VISUALIZATION=false",
-            "STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED=true",
-            "STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED=true",
-            "STATE_LATTICE_V2_PRODUCER_INSTANCE_ID=4101",
-            "STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID=4201",
-            "STATE_LATTICE_V2_SESSION_ID=1",
-            "OUTPUT_HOST_ROOT=./output",
-            "OUTPUT_ROOT=/output",
+            *[
+                f"{key}={value}"
+                for key, value in make_dispatch_environment.items()
+            ],
+            *[
+                f"GATE2_REQUIRED_{name.upper()}_SHA256={artifact['expected_sha256']}"
+                for name, artifact in artifact_admission["artifacts"].items()
+            ],
+            f"GATE2_REQUIRED_IMAGE_ID={reviewed_inputs['image_id']}",
         ],
-        "maximum_claim": "OFFICIAL_GATE2_PHYSICAL_OUTCOME_ONLY",
+        "maximum_claim": "PACKAGED_EVAL_GATE2_PHYSICAL_OUTCOME_ONLY",
         "artifacts": {"result": str(result_path)},
+        "prelaunch_host_install_link_identity": artifact_admission,
+        "prelaunch_image_artifact_admission": image_admission,
+        "reviewed_admission_inputs": reviewed_inputs,
+        "authority_profile": authority_profile,
+        "runtime_authorization": runtime_authorization,
+        "compose_image_override": str(compose_override),
+        "launch_spec_admission": launch_spec_admission,
     }
     reasons: list[str] = payload["reasons"]
     started_wall_ns = time.time_ns()
+    started_monotonic_ns = time.monotonic_ns()
+    deadline_monotonic_ns = started_monotonic_ns + int(
+        GATE2_RUNTIME_TIMEOUT_S * 1_000_000_000
+    )
     payload["started_wall_ns"] = started_wall_ns
+    payload["started_monotonic_ns"] = started_monotonic_ns
+    payload["deadline_monotonic_ns"] = deadline_monotonic_ns
+    environment["AIC_GATE_DEADLINE_MONOTONIC_NS"] = str(deadline_monotonic_ns)
+    # Keep the full reviewed values for admission.  The top-level Make process
+    # receives only the projection allowed by its dispatch-origin guard.
+    make_environment = _gate2_make_dispatch_environment(environment)
     started = False
     try:
         started = True
-        completed = _run(
-            payload["command"], cwd=repo, env=environment,
+        completed = _run_gate2_process_group(
+            payload["command"], cwd=repo, env=make_environment,
             timeout=GATE2_RUNTIME_TIMEOUT_S
         )
         payload["make_returncode"] = completed.returncode
@@ -2692,7 +3706,7 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
     finally:
         if started:
             try:
-                down = _run(["make", "down"], cwd=repo, env=environment, timeout=210)
+                down = _run(["make", "down"], cwd=repo, env=make_environment, timeout=210)
                 payload["cleanup"] = {"command": ["make", "down"], "returncode": down.returncode}
                 if down.returncode != 0:
                     reasons.append("make_down_failed")
@@ -2713,7 +3727,7 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
         ]
         try:
             verify = _run(
-                verify_command, cwd=repo, env=environment, timeout=30
+                verify_command, cwd=repo, env=make_environment, timeout=30
             )
             payload["verification"] = {
                 "command": verify_command, "returncode": verify.returncode,
@@ -2731,6 +3745,12 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
                 if validation_error is not None:
                     verification_error = validation_error
                     break
+        if verification_error is None:
+            verification_error = _gate2_runtime_attestation_image_error(
+                output_dir / "provenance" / "runtime-container-attestation.json",
+                reviewed_inputs["image_id"], run_id,
+                runtime_authorization if isinstance(runtime_authorization.get("anchor"), dict) else None,
+            )
 
     payload["artifacts"].update(_gate2_artifacts(output_dir))
     official, evidence_error = _validate_gate2_result(
@@ -2744,12 +3764,14 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
         output_dir / "provenance" / "prelaunch-manifest.json",
         output_dir / "provenance" / "source-tree.sha256",
         output_dir / "provenance" / "artifact-fingerprint.sha256",
+        output_dir / "provenance" / "runtime-container-attestation.json",
+        output_dir / "provenance" / "runtime-container-continuity.json",
         output_dir / "provenance" / "postrun-manifest.json",
         output_dir / "provenance" / "verification.json",
     )
     manifest_error = _gate2_manifest_error(
         output_dir / "provenance" / "prelaunch-manifest.json", repo, run_id,
-        started_wall_ns,
+        started_wall_ns, artifact_admission, runtime_authorization,
     )
     evidence_errors: list[str] = []
     if official_result_exists:
@@ -2799,6 +3821,9 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
         payload["outcome"] = "ASSERTION_FAILED"
         return_code = 1
     payload["reasons"] = sorted(set(reasons))
+    payload["ended_wall_ns"] = time.time_ns()
+    payload["ended_monotonic_ns"] = time.monotonic_ns()
+    payload["exit_status"] = return_code
     write_json_atomic(result_path, payload)
     if args.json:
         print(json.dumps(read_result(result_path), ensure_ascii=False, allow_nan=False))
@@ -2957,8 +3982,10 @@ def _gate2_metrics_timeline(raw_records: list[object]) -> tuple[dict[str, Any] |
                     applied
                     and source == "trajectory_overtake_override"
                     and v4_values["v4_poc_contract"] is True
-                    and v4_values["v4_poc_identity_required"] is True
-                    and v4_values["v4_poc_identity_matched"] is True
+                    and (
+                        v4_values["v4_poc_identity_required"] is False
+                        or v4_values["v4_poc_identity_matched"] is True
+                    )
                     and v4_values["v4_poc_geometry_applied"] is True
                     and v4_values["v4_poc_generation"] == generation
                     and generation > 0
@@ -3252,16 +4279,49 @@ def external_review(args: argparse.Namespace) -> int:
                 packet=Path(args.packet), objective=args.objective,
                 requested_by=args.requested_by, retry_of=args.retry_of,
             )
+        elif args.review_command == "retire-pending":
+            result = queue.retire_pending(
+                execution_id=args.execution_id,
+                review_attempt_id=args.review_attempt_id,
+                retired_by=args.retired_by,
+                expected_request_sha256=args.request_sha256,
+                reason=args.reason,
+            )
         elif args.review_command == "claim":
             result = queue.claim(execution_id=args.execution_id,
                                  review_attempt_id=args.review_attempt_id,
                                  worker_id=args.worker_id)
+        elif args.review_command == "claim-next":
+            result = queue.claim_next(worker_id=args.worker_id, execution_id=args.execution_id)
+            if result is None:
+                result = {
+                    "outcome": "NO_ELIGIBLE_REQUEST", "queue_root": str(queue.root),
+                    "integrity_valid": True,
+                }
+        elif args.review_command == "begin-submission":
+            result = queue.begin_submission(
+                execution_id=args.execution_id, review_attempt_id=args.review_attempt_id,
+                worker_id=args.worker_id, model=args.model, project_url=args.project_url,
+                submission_id=args.submission_id, fallback_reason=args.fallback_reason,
+            )
+        elif args.review_command == "record-submission":
+            result = queue.record_submission(
+                execution_id=args.execution_id, review_attempt_id=args.review_attempt_id,
+                worker_id=args.worker_id, model=args.model, submission_id=args.submission_id,
+                project_url=args.project_url, fallback_reason=args.fallback_reason,
+            )
         elif args.review_command == "defer":
             result = queue.defer(
                 execution_id=args.execution_id, review_attempt_id=args.review_attempt_id,
                 worker_id=args.worker_id, evidence=Path(args.connection_evidence),
                 evidence_sha256=args.connection_evidence_sha256,
                 terminal_connection_error=args.terminal_connection_error,
+            )
+        elif args.review_command == "terminal-failure":
+            result = queue.terminal_failure(
+                execution_id=args.execution_id, review_attempt_id=args.review_attempt_id,
+                worker_id=args.worker_id, evidence=Path(args.evidence),
+                evidence_sha256=args.evidence_sha256,
             )
         elif args.review_command == "complete":
             result = queue.complete(
@@ -3272,6 +4332,13 @@ def external_review(args: argparse.Namespace) -> int:
                 response=Path(args.response), minimum_changes=args.minimum_change,
                 submission_id=args.submission_id, project_url=args.project_url,
                 fallback_reason=args.fallback_reason,
+            )
+        elif args.review_command == "authorize-gate2":
+            result = queue.authorize_gate2(
+                execution_id=args.execution_id,
+                review_attempt_id=args.review_attempt_id,
+                preflight_bundle=Path(args.preflight_bundle),
+                expected_run_id=args.run_id,
             )
         else:
             result = queue.status(args.execution_id, args.review_attempt_id)
@@ -3289,6 +4356,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.set_defaults(func=doctor)
+
+    rebuild_preflight_parser = subparsers.add_parser("rebuild-preflight")
+    rebuild_preflight_parser.add_argument("--manifest", required=True)
+    rebuild_preflight_parser.add_argument("--archive")
+    from .rebuild_preflight import run_rebuild_preflight
+    rebuild_preflight_parser.set_defaults(func=run_rebuild_preflight)
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument(
@@ -3308,6 +4381,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--ros-domain-id", type=int, default=231)
     run_parser.add_argument("--json", action="store_true")
     run_parser.set_defaults(func=run_scenario)
+
+    capability_parser = subparsers.add_parser("verify-gate2-wrapper-capability")
+    capability_parser.add_argument("--run-id", required=True)
+    capability_parser.set_defaults(func=verify_gate2_wrapper_capability)
 
     result_parser = subparsers.add_parser("result")
     result_parser.add_argument("run_id")
@@ -3332,11 +4409,44 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue_parser.add_argument("--retry-of")
     enqueue_parser.set_defaults(func=external_review)
 
+    retire_pending_parser = review_subparsers.add_parser("retire-pending")
+    retire_pending_parser.add_argument("--execution-id", required=True)
+    retire_pending_parser.add_argument("--review-attempt-id", required=True)
+    retire_pending_parser.add_argument("--retired-by", required=True)
+    retire_pending_parser.add_argument("--request-sha256", required=True)
+    retire_pending_parser.add_argument("--reason", required=True)
+    retire_pending_parser.set_defaults(func=external_review)
+
     claim_parser = review_subparsers.add_parser("claim")
     claim_parser.add_argument("--execution-id", required=True)
     claim_parser.add_argument("--review-attempt-id", required=True)
     claim_parser.add_argument("--worker-id", required=True)
     claim_parser.set_defaults(func=external_review)
+
+    claim_next_parser = review_subparsers.add_parser("claim-next")
+    claim_next_parser.add_argument("--worker-id", required=True)
+    claim_next_parser.add_argument("--execution-id")
+    claim_next_parser.set_defaults(func=external_review)
+
+    begin_submission_parser = review_subparsers.add_parser("begin-submission")
+    begin_submission_parser.add_argument("--execution-id", required=True)
+    begin_submission_parser.add_argument("--review-attempt-id", required=True)
+    begin_submission_parser.add_argument("--worker-id", required=True)
+    begin_submission_parser.add_argument("--model", choices=("GPT-5.6 Sol Pro", "GPT-5.6 Pro"), required=True)
+    begin_submission_parser.add_argument("--submission-id")
+    begin_submission_parser.add_argument("--project-url", required=True)
+    begin_submission_parser.add_argument("--fallback-reason")
+    begin_submission_parser.set_defaults(func=external_review)
+
+    record_submission_parser = review_subparsers.add_parser("record-submission")
+    record_submission_parser.add_argument("--execution-id", required=True)
+    record_submission_parser.add_argument("--review-attempt-id", required=True)
+    record_submission_parser.add_argument("--worker-id", required=True)
+    record_submission_parser.add_argument("--model", choices=("GPT-5.6 Sol Pro", "GPT-5.6 Pro"), required=True)
+    record_submission_parser.add_argument("--submission-id", required=True)
+    record_submission_parser.add_argument("--project-url", required=True)
+    record_submission_parser.add_argument("--fallback-reason")
+    record_submission_parser.set_defaults(func=external_review)
 
     defer_parser = review_subparsers.add_parser("defer")
     defer_parser.add_argument("--execution-id", required=True)
@@ -3346,6 +4456,14 @@ def build_parser() -> argparse.ArgumentParser:
     defer_parser.add_argument("--connection-evidence-sha256", required=True)
     defer_parser.add_argument("--terminal-connection-error")
     defer_parser.set_defaults(func=external_review)
+
+    terminal_failure_parser = review_subparsers.add_parser("terminal-failure")
+    terminal_failure_parser.add_argument("--execution-id", required=True)
+    terminal_failure_parser.add_argument("--review-attempt-id", required=True)
+    terminal_failure_parser.add_argument("--worker-id", required=True)
+    terminal_failure_parser.add_argument("--evidence", required=True)
+    terminal_failure_parser.add_argument("--evidence-sha256", required=True)
+    terminal_failure_parser.set_defaults(func=external_review)
 
     complete_parser = review_subparsers.add_parser("complete")
     complete_parser.add_argument("--execution-id", required=True)
@@ -3361,6 +4479,13 @@ def build_parser() -> argparse.ArgumentParser:
     complete_parser.add_argument("--project-url", required=True)
     complete_parser.add_argument("--fallback-reason")
     complete_parser.set_defaults(func=external_review)
+
+    authorize_gate2_parser = review_subparsers.add_parser("authorize-gate2")
+    authorize_gate2_parser.add_argument("--execution-id", required=True)
+    authorize_gate2_parser.add_argument("--review-attempt-id", required=True)
+    authorize_gate2_parser.add_argument("--preflight-bundle", required=True)
+    authorize_gate2_parser.add_argument("--run-id", required=True)
+    authorize_gate2_parser.set_defaults(func=external_review)
 
     status_parser = review_subparsers.add_parser("status")
     status_parser.add_argument("--execution-id", required=True)

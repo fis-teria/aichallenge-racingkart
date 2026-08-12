@@ -73,6 +73,26 @@ TEST(Aw2SharedAbi, IsFixedTrivialAlignedAndLockFree) {
       offsetof(SharedAckRegion, read_index) % alignof(std::uint64_t) == 0U);
   EXPECT_TRUE(sharedAtomicsAreLockFree());
   EXPECT_TRUE(hostIsLittleEndian());
+  EXPECT_EQ(kLayoutVersion, 3U);
+  EXPECT_EQ(kMaxGeometryPoints, 256U);
+}
+
+TEST(Aw2SharedAbi, RejectsLayoutAndSlotSizeMismatch) {
+  SharedDataRegion data{};
+  SharedAckRegion ack{};
+  ASSERT_TRUE(initializeSharedRegions(data, ack, 1U, 1U, 2U));
+  ASSERT_TRUE(validateSharedAbi(data, ack));
+
+  data.layout_version = kLayoutVersion - 1U;
+  EXPECT_FALSE(validateSharedAbi(data, ack));
+  data.layout_version = kLayoutVersion;
+
+  ack.layout_version = kLayoutVersion - 1U;
+  EXPECT_FALSE(validateSharedAbi(data, ack));
+  ack.layout_version = kLayoutVersion;
+
+  --data.slot_size;
+  EXPECT_FALSE(validateSharedAbi(data, ack));
 }
 
 TEST(Aw2SharedQueue, RejectsZeroAndSupportsOneAndEight) {

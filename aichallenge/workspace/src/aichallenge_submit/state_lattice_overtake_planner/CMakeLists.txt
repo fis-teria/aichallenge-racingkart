@@ -25,6 +25,7 @@ ament_auto_add_library(${PROJECT_NAME}_core SHARED
   src/instant_controller.cpp
   src/lattice_planner.cpp
   src/reference_override_contract.cpp
+  src/state_lattice_authority_projection.cpp
   src/shadow_geometry_generator.cpp
 )
 
@@ -78,6 +79,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_frenet_and_lattice test/test_frenet_and_lattice.cpp)
   target_link_libraries(test_frenet_and_lattice ${PROJECT_NAME}_core)
   target_compile_definitions(test_frenet_and_lattice PRIVATE
+    STATE_LATTICE_TEST_ACCESS=1
     TEST_MPC_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../multi_purpose_mpc_ros"
     TEST_STATE_LATTICE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 

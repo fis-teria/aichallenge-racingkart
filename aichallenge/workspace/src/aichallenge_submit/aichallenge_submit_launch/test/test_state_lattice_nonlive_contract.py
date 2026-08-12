@@ -292,8 +292,8 @@ class StateLatticeNonLiveContractTest(unittest.TestCase):
         self.assertEqual(
             {name: route_values[name] for name in names},
             {
-                names[0]: "false",
-                names[1]: "false",
+                names[0]: "$(var state_lattice_v2_live_proposal_publish_enabled)",
+                names[1]: "$(var state_lattice_v2_live_proposal_accept_enabled)",
                 names[2]: "4101",
                 names[3]: "4201",
                 names[4]: "1",
@@ -555,25 +555,37 @@ class StateLatticeNonLiveContractTest(unittest.TestCase):
             dedicated_values.get("state_lattice_v2_command_activation_enabled"),
             "false",
         )
-        self.assertEqual(
-            dedicated_values.get("state_lattice_v4_poc_identity_gate_enabled"),
-            "false",
+        dedicated_identity_gate = dedicated_values.get(
+            "state_lattice_v4_poc_identity_gate_enabled"
+        )
+        self.assertIsNotNone(dedicated_identity_gate)
+        self.assertIn(
+            "$(var state_lattice_v4_poc_identity_gate_enabled)",
+            dedicated_identity_gate,
+        )
+        self.assertIn(
+            "$(var state_lattice_v2_live_proposal_publish_enabled)",
+            dedicated_identity_gate,
+        )
+        self.assertIn(
+            "$(var state_lattice_v2_live_proposal_accept_enabled)",
+            dedicated_identity_gate,
         )
         self.assertEqual(
             dedicated_values.get("state_lattice_v4_poc_command_activation_enabled"),
             "$(var state_lattice_v4_poc_command_activation_enabled)",
         )
-        self.assertEqual(
-            dedicated_values.get("require_safety_constraint"),
-            "false",
+        dedicated_require_safety = dedicated_values.get(
+            "require_safety_constraint"
         )
+        self.assertEqual(dedicated_require_safety, "true")
         self.assertEqual(
             dedicated_values.get("state_lattice_v2_live_proposal_publish_enabled"),
-            "false",
+            "$(var state_lattice_v2_live_proposal_publish_enabled)",
         )
         self.assertEqual(
             dedicated_values.get("state_lattice_v2_live_proposal_accept_enabled"),
-            "false",
+            "$(var state_lattice_v2_live_proposal_accept_enabled)",
         )
 
         require_safety_default = shared_defaults.get("require_safety_constraint")
@@ -1113,6 +1125,58 @@ overtake_planner_node:
             )
             with self.subTest(topic=topic, message_type=message_type):
                 self.assertEqual(len(pattern.findall(node)), 1)
+
+    def test_exact_offline_route_replaces_current_authority_owner(self) -> None:
+        launch_path = (
+            LAUNCH_ROOT
+            / "test_only/state_lattice_pp_mux_offline_replay.launch.xml"
+        )
+        source = read(launch_path)
+        self.assertIn(
+            'name="state_lattice_authority_publish_enabled" '
+            'value="$(var exact_cartesian_enabled)"',
+            source,
+        )
+        self.assertIn(
+            'name="state_lattice_authority_tracking_topic" '
+            'value="$(var root)/pp/tracking_status"',
+            source,
+        )
+        self.assertIn(
+            'name="state_lattice_authority_race_arm_topic" '
+            'value="$(var root)/input/race_armed"',
+            source,
+        )
+        self.assertIn('<node if="$(var use_current_authority)"', source)
+        self.assertIn("exact_cartesian_enabled)' != 'true", source)
+        node_source = read(STATE_LATTICE_NODE)
+        self.assertRegex(
+            node_source,
+            r'declare_parameter<bool>\(\s*'
+            r'"state_lattice_authority_publish_enabled",\s*false\)',
+        )
+
+    def test_production_exact_route_explicitly_enables_state_authority(self) -> None:
+        planner_launch = read(
+            STATE_LATTICE_ROOT / "launch/state_lattice_overtake_planner.launch.xml"
+        )
+        self.assertIn(
+            'name="state_lattice_authority_publish_enabled" default="false"',
+            planner_launch,
+        )
+        self.assertIn(
+            'name="state_lattice_authority_publish_enabled" '
+            'value="$(var state_lattice_authority_publish_enabled)"',
+            planner_launch,
+        )
+        control_launch = read(
+            LAUNCH_ROOT / "control/pure_pursuit_mpc_horizon.launch.xml"
+        )
+        self.assertIn(
+            'name="state_lattice_authority_publish_enabled" '
+            'value="$(var state_lattice_v4_poc_command_activation_enabled)"',
+            control_launch,
+        )
 
     def test_v2_evidence_topics_have_no_mux_or_mpc_authority_consumer(self) -> None:
         for root in V2_FORBIDDEN_AUTHORITY_CONSUMER_ROOTS:

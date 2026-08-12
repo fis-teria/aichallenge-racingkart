@@ -9,10 +9,9 @@ constexpr std::uint32_t kMaxGeneration = 16777215U;
 }
 
 PlannerOutput prepareWireOutputForPublication(
-    const PlannerOutput &output, bool v2_base_identity_available,
-    bool v4_poc_live_publish_enabled) {
+    const PlannerOutput &output, bool v2_base_identity_available) {
   PlannerOutput wire_output = output;
-  if (v2_base_identity_available || v4_poc_live_publish_enabled) {
+  if (v2_base_identity_available) {
     wire_output.spatial_profile_shadow_only = false;
   }
   return wire_output;
@@ -100,6 +99,16 @@ bool semanticallyEqual(const WirePayload &lhs, const WirePayload &rhs) {
     }
   }
   return true;
+}
+
+bool shouldAdvanceWireGeneration(
+    const PlannerOutput &output,
+    const std::optional<WirePayload> &last_payload,
+    const WirePayload &prospective_payload) {
+  return output.execution_geometry_kind ==
+             ExecutionGeometryKind::EXACT_CARTESIAN ||
+         !last_payload.has_value() ||
+         !semanticallyEqual(last_payload.value(), prospective_payload);
 }
 
 std::uint32_t nextGeneration(std::uint32_t current) {

@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import difflib
 import hashlib
+import html
 import io
 import json
 import math
@@ -51,8 +52,34 @@ MPC_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_
 OVERTAKE_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/overtake_planner")
 HYBRID_CONTROL_MUX_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux")
 WALL_RECOVERY_ROOT = Path("aichallenge/workspace/src/aichallenge_submit/wall_recovery_planner")
+STATE_LATTICE_ROOT = Path(
+    "aichallenge/workspace/src/aichallenge_submit/state_lattice_overtake_planner"
+)
 OVERTAKE_PERMISSION_CSV_PATH = OVERTAKE_ROOT / "config/overtake_permission.csv"
+STATE_LATTICE_PERMISSION_CSV_PATH = (
+    STATE_LATTICE_ROOT / "config/overtake_permission.csv"
+)
+STATE_LATTICE_REFERENCE_CSV_PATH = (
+    MPC_ROOT / "env/final_ver3/traj_mincurv_manual.csv"
+)
+STATE_LATTICE_WALL_MAP_PATH = (
+    MPC_ROOT / "env/final_ver3/occupancy_grid_map.yaml"
+)
+OVERTAKE_PERMISSION_CSV_PATHS = {
+    OVERTAKE_PERMISSION_CSV_PATH,
+    STATE_LATTICE_PERMISSION_CSV_PATH,
+}
 OVERTAKE_PERMISSION_COLUMNS = ["name", "start_wp", "end_wp", "allow_overtake"]
+OVERTAKE_CONTROL_ROUTES = {
+    "current",
+    "state_lattice_pure_pursuit",
+    "state_lattice_instant_mux",
+}
+OVERTAKE_TRAJECTORY_BACKENDS = {
+    "current",
+    "state_lattice_shadow",
+    "state_lattice_candidate",
+}
 MPC_CONFIG_PATH = MPC_ROOT / "config/config.yaml"
 DELAY_AWARE_MPC_CONFIG_PATH = Path(
     "aichallenge/workspace/src/aichallenge_submit/delay_aware_mpc_ros/config/delay_aware_config.yaml"
@@ -156,6 +183,11 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "overtake_planner_node.ros__parameters.horizon_dt_sec": "override horizon各点の時間刻み[s]です。速度capや横オフセット列の密度に効きます。",
     "overtake_planner_node.ros__parameters.lookahead_s_m": "前方車両を追い抜き判断に入れる縦方向距離[m]です。大きいほど早めに反応します。",
     "overtake_planner_node.ros__parameters.follow_trigger_s_m": "前走車へ追従を始める距離[m]です。大きいほど詰める前に減速します。",
+    "overtake_planner_node.ros__parameters.braking_follow_enabled": "停止・低速前走車を固定lookaheadより前から制動距離/TTCで追従・PASS評価へ入れます。横候補はSafetyEvaluatorを通過した場合だけ使います。",
+    "overtake_planner_node.ros__parameters.braking_follow_max_distance_m": "制動距離/TTCで停止・低速前走車を探索する上限距離[m]です。大きすぎると遠方車へ反応しやすくなります。",
+    "overtake_planner_node.ros__parameters.braking_follow_max_target_speed_mps": "固定lookahead外から早期評価する前走車のFrenet進行速度上限[m/s]です。通常速度車まで遠方探索へ広げない安全境界です。",
+    "overtake_planner_node.ros__parameters.braking_follow_trigger_margin_m": "応答遅れと最大減速度から求めた制動距離へ加える余裕[m]です。",
+    "overtake_planner_node.ros__parameters.braking_follow_ttc_threshold_sec": "相対速度から早期追従・PASS評価を始めるTTC包絡[s]です。0でTTC側の早期トリガを無効にします。",
     "overtake_planner_node.ros__parameters.same_corridor_width_m": "前方閉塞判定で同じ走行コリドーとみなす横幅[m]です。",
     "overtake_planner_node.ros__parameters.same_direction_filter_enabled": "相手車両が同方向に進んでいる時だけ前方/横並び判定へ使うフィルタです。",
     "overtake_planner_node.ros__parameters.same_direction_min_speed_mps": "同方向判定に必要な相手車両の最低速度[m/s]です。低速ノイズを除外します。",
@@ -218,7 +250,7 @@ DESCRIPTION_DEFAULTS: dict[str, str] = {
     "overtake_planner_node.ros__parameters.follow_speed_margin_mps": "追従時に前走車速度から引く速度余裕[m/s]です。",
     "overtake_planner_node.ros__parameters.recovery_v_max_mps": "recovery中の速度上限[m/s]です。高いほど復帰は速いですが制御余裕が減ります。",
     "overtake_planner_node.ros__parameters.wall_margin_recovery_v_max_mps": "壁マージン不足でrecoveryする時の速度上限[m/s]です。",
-    "overtake_planner_node.ros__parameters.outside_corridor_recovery_centering_time_sec": "安全範囲外から中央寄せrecoveryへ戻す時定数[s]です。小さいほど強く中央へ戻します。",
+    "overtake_planner_node.ros__parameters.outside_corridor_recovery_centering_time_sec": "互換用パラメータです。現在の横profileは停止近傍で横移動を圧縮しないよう、物理前進距離だけで生成します。",
     "overtake_planner_node.ros__parameters.v_passthrough_mps": "この速度[m/s]までは速度capを実質通すための上限値です。通常は十分大きくします。",
     "overtake_planner_node.ros__parameters.d_min_m": "plannerが許容する最小横位置d[m]です。走行可能幅の左/内側境界に対応します。",
     "overtake_planner_node.ros__parameters.d_max_m": "plannerが許容する最大横位置d[m]です。走行可能幅の右/外側境界に対応します。",
@@ -407,6 +439,317 @@ YAML_NAME_DESCRIPTION_DEFAULTS: dict[str, str] = {
     "reset_ori_z": "リセットpose姿勢quaternionのz成分です。",
     "reset_ori_w": "リセットpose姿勢quaternionのw成分です。",
 }
+
+# State Lattice Pure Pursuitで表示するPlanner/PP/Mux設定は、汎用文では
+# 調整方向を判断できないため、name単位で実行時の意味と単位を固定する。
+PROFILE_PARAMETER_DESCRIPTION_DEFAULTS: dict[str, str] = {
+    "control_method": (
+        "起動する制御プロファイル名です。主な値はmpc、delay_aware_mpc、"
+        "hybrid_delay_aware_mpc、pure_pursuit_mpc_horizon、"
+        "state_lattice_pure_pursuit、pure_pursuitです。"
+        "state_lattice_pure_pursuitはMPCを起動せず、State Latticeのreference overrideを"
+        "Pure Pursuitが追従します。"
+    ),
+    "control_route": (
+        "追越制御の実行経路です。currentは現行Overtake Planner、"
+        "state_lattice_pure_pursuitはState Lattice軌道をPure Pursuitで追従、"
+        "state_lattice_instant_muxはState Latticeの瞬時commandをHybrid Muxへ入力します。"
+        "control_method=state_lattice_pure_pursuitでは同名の"
+        "state_lattice_pure_pursuitを選びます。"
+    ),
+    "overtake_control_route": (
+        "Overtake Planner設定から渡される実行経路です。current、"
+        "state_lattice_pure_pursuit、state_lattice_instant_muxを選べます。"
+        "State Lattice Pure Pursuitプロファイルでは"
+        "state_lattice_pure_pursuit以外だとcontrollerを起動しません。"
+    ),
+    "trajectory_backend": (
+        "現行Overtake Planner内部の候補生成backendです。currentは現行候補のみ、"
+        "state_lattice_shadowはState Latticeを診断比較だけに使用、"
+        "state_lattice_candidateはSafetyEvaluator通過候補を候補集合へ追加します。"
+        "control_route=state_lattice_pure_pursuitでは現行Plannerを走行authorityに使わないため、"
+        "通常はcurrentの診断設定です。"
+    ),
+    "overtake_trajectory_backend": (
+        "launchから現行Overtake Plannerへ渡すtrajectory backendです。"
+        "current、state_lattice_shadow、state_lattice_candidateを選べます。"
+        "これはcontrol_methodやcontrol_routeとは別の、現行Planner内部backend選択です。"
+    ),
+    "pass_target_policy": (
+        "複数PASS候補からtargetを選ぶ方式です。minimum_clearanceは必要横移動が小さい側を"
+        "優先します。値を変える場合は実装が受理するpolicy名と一致させます。"
+    ),
+    "c002ay1_prod_measure_selected_stream": (
+        "C-002AY1計測対象streamです。legacyは従来streamを測定します。"
+        "診断用の選択で、control_methodや走行authorityは切り替えません。"
+    ),
+    "enabled": "State Lattice Overtake Plannerノードを有効にするフラグです。",
+    "instant_control_lookahead_min_m": "State Lattice瞬時操舵で使う最小lookahead距離[m]です。大きいほど操舵が穏やかになります。",
+    "instant_control_lookahead_gain": "State Lattice瞬時操舵の速度比例lookahead係数[s]です。大きいほど高速時に先を見ます。",
+    "instant_control_lookahead_gain_sec": "State Lattice瞬時操舵の速度比例lookahead係数[s]です。大きいほど高速時に先を見ます。",
+    "instant_control_max_steering_angle_rad": "State Lattice瞬時commandに許す最大操舵角[rad]です。車両・Mux上限以下にします。",
+    "instant_control_max_steering_rate_radps": "State Lattice瞬時commandに許す操舵変化率[rad/s]です。",
+    "instant_control_speed_gain": "State Lattice候補速度へ掛ける瞬時command用倍率です。1.0未満で速度を抑えます。",
+    "cost_levels": "costmapで候補を分類する離散cost値です。前半が低cost、後半ほど障害物・壁に近い高cost帯です。",
+    "wall_distance_thresholds_m": "壁からの距離をcostへ変換する境界列[m]です。小さい側から高cost帯として扱います。",
+    "object_distance_thresholds_m": "相手車両からの距離をcostへ変換する境界列[m]です。大きくすると広い範囲を高cost化します。",
+    "reference_distance_thresholds_m": "基準ラインからの距離をcostへ変換する境界列[m]です。大きくするとライン追従costが緩やかになります。",
+    "reference_extra_step_m": "基準ラインcostを段階化するときの追加距離刻み[m]です。",
+    "opponent_position_sigma_multiplier": "相手位置共分散へ掛ける標準偏差倍率です。大きいほど相手占有領域を保守的に広げます。",
+    "opponent_position_min_margin_m": "相手位置不確かさへ最低限加える余裕[m]です。",
+    "opponent_position_max_margin_m": "相手位置不確かさから加える余裕の上限[m]です。",
+    "reference_package": "State Latticeが基準ラインCSVを検索するROS package名です。",
+    "reference_csv": "State LatticeがFrenet基準と通常走行ラインに使う、reference_package内のCSV相対パスです。",
+    "wall_map_package": "State Latticeが壁occupancy mapを検索するROS package名です。",
+    "wall_map_yaml_relative_path": "wall_map_package内のoccupancy grid YAML相対パスです。",
+    "expected_map_resolution": "Plannerが受理するoccupancy map解像度[m/cell]です。地図YAMLのresolutionと一致させます。",
+    "overtake_permission_package": "追越許可区間CSVを検索するROS package名です。",
+    "overtake_permission_csv": "追越許可区間を定義するpackage内CSV相対パスです。",
+    "default_overtake_allowed": "追越許可CSVのどの区間にも該当しない場所で、新規PASS開始を許可する既定値です。",
+    "overtake_permission_lookahead_m": "現在位置から前方の追越禁止区間を先読みする距離[m]です。",
+    "wheel_base_m": "候補の曲率・操舵角評価に使う車両ホイールベース[m]です。",
+    "front_overhang_m": "後輪軸基準から車体前端までの長さ[m]です。wall/opponent footprint判定に使います。",
+    "rear_overhang_m": "後輪軸基準から車体後端までの長さ[m]です。wall/opponent footprint判定に使います。",
+    "left_extent_m": "車体基準点から左端までの幅[m]です。footprintへ反映します。",
+    "right_extent_m": "車体基準点から右端までの幅[m]です。footprintへ反映します。",
+    "wall_hard_margin_m": "車体footprintへ追加する壁のhard margin[m]です。根拠なく縮めない安全境界です。",
+    "opponent_hard_clearance_m": "相手車両footprintとの衝突判定に要求する追加clearance[m]です。",
+    "lateral_target_offsets_m": "State Latticeが基準ライン左右へ生成する横offset候補列[m]です。符号が左右方向を表します。",
+    "tangent_scale_factors": "横遷移曲線の接線長へ掛ける候補倍率列です。大きいほど緩やかな遷移になります。",
+    "num_sampling_points": "各lattice接続を初期生成するときのsample点数です。衝突評価の細分化上限とは別です。",
+    "base_dist_param": "低速時に使うState Lattice遷移距離の基準値[m]です。",
+    "max_dist_param": "速度適応後のState Lattice遷移距離上限[m]です。",
+    "max_dist_speed_mps": "遷移距離をmax_dist_paramへ到達させる基準速度[m/s]です。",
+    "minimum_lateral_transition_distance_m": "横offsetへ移るために要求する最小縦距離[m]です。短くすると急操舵になりやすいです。",
+    "lateral_transition_distance_gain": "横移動量から必要縦距離を増やす倍率です。大きいほど横遷移が緩やかになります。",
+    "adaptive_pass_offset_enabled": "相手幅とclearanceからPASS横offsetを自動調整する機能です。",
+    "pass_lateral_extra_margin_m": "適応PASS offsetへ追加する横余裕[m]です。",
+    "max_adaptive_lateral_offset_m": "適応PASSで許す基準ラインからの最大横offset[m]です。",
+    "minimum_obstacle_transition_distance_m": "障害物回避候補の横遷移に要求する最小縦距離[m]です。",
+    "front_detection_radius_m": "前方target探索で同一候補帯とみなす横方向半径[m]です。",
+    "frontmost_s_tolerance_m": "最前方target同士を同順位とみなすFrenet s許容差[m]です。",
+    "front_detection_enter_cycles": "前方targetとして確定するまでに必要な連続検出周期数です。",
+    "front_detection_release_cycles": "前方targetを見失ってから解除するまで保持する周期数です。",
+    "initial_detection_sweep_enabled": "起動直後に通常窓より広く相手候補を探索する機能です。",
+    "free_run_return_required_cycles": "追越後にFREE_RUNへ戻る条件を連続で満たす必要周期数です。",
+    "passed_target_gap_m": "targetを抜き切ったと判定する自車後方へのFrenet s gap[m]です。",
+    "return_predicted_min_gap_m": "基準ラインへ戻る予測で相手に要求する最小縦gap[m]です。",
+    "return_lateral_error_m": "基準ライン復帰完了とみなす横誤差上限[m]です。",
+    "return_heading_error_rad": "基準ライン復帰完了とみなすheading誤差上限[rad]です。",
+    "rear_safety_check_distance_m": "merge/return前に後方車を確認する距離[m]です。",
+    "rear_terminal_distance": "後方安全評価trajectoryの終端距離[m]です。",
+    "rear_sampling_angle": "後方安全評価で横方向へsampleする角度幅[rad]です。",
+    "rear_safety_num_sampling_points": "後方安全評価に使うsample点数です。",
+    "rear_return_cost_threshold": "後方領域のcostがこの値未満のときreturn候補を許す閾値です。",
+    "target_missing_uncertainty_growth_mps": "target欠測中に予測占有余裕を時間あたり増やす速度[m/s]です。",
+    "target_missing_recovery_speed_mps": "target欠測grace中に許す復帰走行速度上限[m/s]です。",
+    "hard_max_steer_rad": "State Lattice SafetyEvaluatorが絶対に超過を許さない操舵角上限[rad]です。",
+    "planner_max_steer_rad": "Plannerが候補生成時に使用する操舵角上限[rad]です。hard_max_steer_rad以下にします。",
+    "max_steer_rate_radps": "候補trajectoryに許す操舵角変化率上限[rad/s]です。",
+    "min_acceleration_mps2": "候補trajectoryに許す最小加速度[m/s^2]です。負値が減速側です。",
+    "max_acceleration_mps2": "候補trajectoryに許す最大加速度[m/s^2]です。",
+    "max_acceleration_jerk_mps3": "加速側jerkの最大値[m/s^3]です。",
+    "max_deceleration_jerk_mps3": "減速側jerk絶対値の最大値[m/s^3]です。",
+    "lateral_acceleration_limit_mps2": "候補速度と曲率から求める横加速度上限[m/s^2]です。",
+    "collision_check_max_step_m": "swept collision評価で許す点間の最大移動距離[m]です。小さいほど詳細になります。",
+    "collision_check_max_yaw_step_rad": "swept collision評価で許す点間の最大yaw変化[rad]です。",
+    "lateral_tracking_margin_m": "自車が横追従でずれる分としてfootprintへ加える余裕[m]です。",
+    "longitudinal_tracking_margin_m": "自車が縦追従でずれる分としてfootprintへ加える余裕[m]です。",
+    "opponent_lateral_tracking_margin_m": "相手予測の横追従誤差として占有領域へ加える余裕[m]です。",
+    "opponent_longitudinal_tracking_margin_m": "相手予測の縦追従誤差として占有領域へ加える余裕[m]です。",
+    "candidate_entry_speed_tolerance_mps": "候補始端速度と実測ego速度の許容差[m/s]です。",
+    "allow_reverse": "負速度を持つ候補trajectoryを許可するフラグです。通常レース走行ではfalseです。",
+    "reference_curvature_sanity_limit_radpm": "入力referenceの異常曲率を棄却する絶対上限[rad/m]です。",
+    "horizon_points": "State Latticeがreference overrideへ載せる点数です。PP required arcを含む必要があります。",
+    "mpc_wp_id_offset": "互換horizon生成で最近傍点から前へ進めるwaypoint index数です。",
+    "receiver_nearest_index_uncertainty": "受信側PPの最近傍indexずれとして評価する前後index数です。",
+    "projection_initial_search_half_width_m": "初回Frenet投影でreference周辺を探索する半幅[m]です。",
+    "projection_follow_search_half_width_m": "連続周期のFrenet投影で前回位置周辺を探索する半幅[m]です。",
+    "projection_max_backward_step_m": "連続投影で許すFrenet sの最大後退量[m]です。",
+    "tie_break_epsilon": "候補costが同値とみなす数値比較epsilonです。",
+    "normal_speed_mps": "FREE_RUN時のState Lattice目標速度[m/s]です。下流の速度上限が低い場合はそちらが優先です。",
+    "free_run_return_cost": "障害物回避後に基準ラインへ戻る候補へ割り当てるcostです。",
+    "stop_cost": "安全な走行候補がないときのSTOP候補costです。",
+    "safe_stop_compat_speed_mps": "旧SAFE_STOP表現との互換に使う微小速度上限[m/s]です。",
+    "own_vehicle_id": "V2X相手一覧から除外する自車IDです。autoはROS_DOMAIN_IDからd1等を解決します。",
+    "planning_warn_time_ms": "Planner処理時間が警告対象になる閾値[ms]です。",
+    "planning_deadline_ms": "1周期のPlanner処理deadline[ms]です。超過時は期限切れ安全処理へ移ります。",
+    "opponent_max_position_jump_m": "相手位置観測を異常jumpとして棄却する1更新あたりの距離[m]です。",
+    "candidate_cost_hysteresis": "候補切替を抑えるcost差のヒステリシスです。",
+    "safe_stop_release_cost": "SAFE_STOPから走行候補へ戻すために要求する最大候補costです。",
+    "safe_stop_release_required_cycles": "SAFE_STOP解除条件を連続で満たす必要周期数です。",
+    "overrun_safe_stop_consecutive_cycles": "Planner deadline超過が連続してSAFE_STOPへ移るまでの周期数です。",
+    "mpc_health_infeasible_count_threshold": "MPC health guardがinfeasibleと判断する連続失敗数です。MPC-free profileではguardを無効化します。",
+    "mpc_health_solve_time_warn_ms": "MPC solve遅延とみなす処理時間[ms]です。MPC-free profileでは速度guardに使用しません。",
+    "mpc_health_v_max_mps": "MPC health degraded時に適用する速度上限[m/s]です。MPC-free profileではguardを無効化します。",
+    "mpc_health_release_samples": "MPC health guardを解除するために必要な正常sample数です。",
+}
+
+PROFILE_PARAMETER_DESCRIPTION_DEFAULTS.update({
+    "supervisor_v2_abort_release_cycles": "V2 supervisorがABORT条件消失後に解除まで要求する連続安全周期数です。",
+    "supervisor_v2_pass_completion_cycles": "V2 supervisorがPASS完了を確定する連続成立周期数です。",
+    "supervisor_v2_target_missing_hold_cycles": "V2 supervisorがtarget欠測を一過性として保持する周期数です。",
+    "supervisor_v2_tracking_unusable_hold_cycles": "V2 supervisorがtracking unusableを一過性として保持する周期数です。",
+    "start_grid_tracking_probe_required_cycles": "スタート配置PASSの非走行tracking probeをmotion grant前に連続成立させる周期数です。",
+    "start_grid_tracking_release_timeout_cycles": "スタート配置tracking probeの成立を待つ最大周期数です。超過時は走行権限を与えません。",
+    "start_grid_tracking_continuity_max_mpc_solve_time_ms": "スタート配置でtracking continuityを維持できるMPC solve時間上限[ms]です。",
+    "drivable_corridor_package": "現行Overtake Plannerが走行可能corridor CSVを検索するROS package名です。",
+    "drivable_corridor_csv": "drivable_corridor_package内の走行可能左右境界CSV相対パスです。",
+    "race_arm_required": "走行開始にrace_armed=trueを必須とする安全設定です。falseにしてstart authorityを迂回しないでください。",
+    "gentle_curve_safe_pass_max_curvature_m_inv": "緩いコーナーで新規PASS開始を許す最大reference曲率[1/m]です。",
+    "gentle_curve_safe_pass_v_max_mps": "緩いコーナーPASS候補に許す速度上限[m/s]です。",
+    "gentle_curve_safe_pass_max_lateral_displacement_m": "緩いコーナーPASS候補に許す最大横移動量[m]です。",
+    "gentle_curve_safe_pass_max_lateral_accel_mps2": "緩いコーナーPASS候補に許す最大横加速度[m/s^2]です。",
+    "gentle_curve_safe_pass_max_cbf_slack": "緩いコーナーPASS開始で許すCBF slack上限です。0はslackなしを要求します。",
+    "slow_front_exception_max_start_curvature_m_inv": "停止・低速車例外PASSを開始できる最大reference曲率[1/m]です。",
+    "early_stationary_parallel_pass_distance_m": "停止している並走車を早期PASS targetへ入れる前方距離[m]です。",
+    "early_stationary_parallel_pass_lateral_width_m": "停止している並走車を早期PASS targetへ入れる最大横差[m]です。",
+    "start_grid_target_window_distance_m": "スタート配置でPASS/FOLLOW targetを探索する縦方向窓[m]です。",
+    "start_grid_target_max_ego_speed_mps": "スタート配置専用target探索を有効にする自車速度上限[m/s]です。",
+    "start_grid_target_min_delta_s_m": "スタート配置targetとして許す相対Frenet sの下限[m]です。負値は少し後方も含めます。",
+    "start_grid_target_max_delta_s_m": "スタート配置targetとして許す相対Frenet sの上限[m]です。",
+    "start_grid_target_lateral_width_m": "スタート配置targetとして許す自車との最大横差[m]です。",
+    "start_grid_stationary_confirmation_distance_m": "スタート配置で近距離相手を停止車として確認する距離[m]です。",
+    "start_grid_attack_follow_v_max_mps": "スタート配置ATTACK_FOLLOWの速度上限[m/s]です。",
+    "start_grid_uncommitted_hold_max_lateral_drift_m": "未commitのstart-grid HOLDで許す実測横drift上限[m]です。",
+    "start_grid_hold_correction_distance_m": "start-grid HOLDを実姿勢からcurrent-dへ接続する縦距離[m]です。",
+    "start_grid_moving_pass_max_lateral_displacement_m": "スタート配置の移動target PASSに許す最大横移動量[m]です。",
+    "stationary_no_pass_safe_pass_max_curvature_m_inv": "追越禁止区間の停止車例外PASSに許す最大reference曲率[1/m]です。",
+    "stationary_no_pass_safe_pass_v_max_mps": "追越禁止区間の停止車例外PASSに許す速度上限[m/s]です。",
+    "stationary_no_pass_safe_pass_max_lateral_displacement_m": "追越禁止区間の停止車例外PASSに許す最大横移動量[m]です。",
+    "stationary_no_pass_safe_pass_max_lateral_accel_mps2": "追越禁止区間の停止車例外PASSに許す最大横加速度[m/s^2]です。",
+    "stationary_no_pass_safe_pass_max_cbf_slack": "追越禁止区間の停止車例外PASSに許すCBF slack上限です。",
+    "max_brake_decel_mps2": "前走車へ安全停止可能かの判定で仮定する最大減速度[m/s^2]です。",
+    "safety_constraint_normal_speed_limit_mps": "SafetyConstraintがNORMALのときに伝える速度上限[m/s]です。",
+    "safety_constraint_release_safe_cycles": "停止SafetyConstraintを解除するために要求する連続安全周期数です。",
+    "stationary_obstacle_speed_threshold_mps": "相手を停止・低速障害物と分類する速度上限[m/s]です。",
+    "reentry_safe_cycles": "ABORT/RECOVERY後のreentryを許すために要求する連続安全周期数です。",
+    "reentry_min_safety_margin_h": "reentry候補に要求するCBF safety margin hの下限です。",
+    "reentry_completion_lateral_error_m": "reentry完了とみなす基準ラインへの横誤差上限[m]です。",
+    "reentry_completion_rearm_lateral_error_m": "reentry完了判定を再armする横誤差閾値[m]です。completion値より大きくしてヒステリシスを作ります。",
+    "reentry_hold_v_max_mps": "reentry HOLD中の速度上限[m/s]です。",
+    "reentry_mpc_degraded_hold_v_max_mps": "MPC degraded中のreentry HOLD速度上限[m/s]です。",
+    "post_abort_curve_hold_v_max_mps": "ABORT直後にコーナー内で横位置を保持するときの速度上限[m/s]です。",
+    "reentry_mpc_latency_degraded_enter_samples": "MPC latency degradedへ入るまでの連続遅延sample数です。",
+    "reentry_mpc_unhealthy_enter_samples": "MPC unhealthyへ入るまでの連続異常sample数です。",
+    "reentry_mpc_healthy_release_samples": "MPC health回復を確定する連続正常sample数です。",
+    "reentry_require_mpc_health": "reentry開始にMPC health正常を必須とする設定です。MPC-free経路との所有関係を確認して変更します。",
+    "attack_follow_tracking_wheelbase_m": "ATTACK_FOLLOW候補のPP追従性評価に使うホイールベース[m]です。",
+    "attack_follow_max_steering_angle_rad": "ATTACK_FOLLOW候補の追従性評価で許す最大操舵角[rad]です。",
+    "attack_follow_max_steering_rate_radps": "ATTACK_FOLLOW候補の追従性評価で許す最大操舵rate[rad/s]です。",
+    "attack_follow_steering_tire_angle_gain": "ATTACK_FOLLOW追従性評価でraw PP操舵へ掛けるタイヤ角gainです。",
+    "attack_follow_steering_rate_reserve_ratio": "ATTACK_FOLLOW追従性評価で操舵rate上限のうち予約して残す比率です。",
+    "attack_follow_min_spatial_horizon_m": "ATTACK_FOLLOW/HOLDに要求する最小空間ホライズン弧長[m]です。",
+    "lateral_override_lookahead_gain": "横override追従性評価の速度比例lookahead係数[s]です。",
+    "lateral_override_lookahead_min_distance_m": "横override追従性評価の最小lookahead距離[m]です。",
+    "unstarted_pass_target_release_min_gap_m": "横移動未開始のPASS targetを解除可能にする最小縦gap[m]です。",
+    "unstarted_pass_target_release_min_opening_speed_mps": "横移動未開始のPASS target解除に要求する相対opening速度[m/s]です。",
+    "unstarted_pass_target_release_max_lateral_progress_m": "PASS未開始とみなしてtarget解除を許す最大横進捗[m]です。",
+    "unstarted_pass_target_release_required_cycles": "未開始PASS target解除条件を連続で満たす必要周期数です。",
+    "follow_gap_closing_target_gap_m": "ATTACK_FOLLOWで詰めた後に維持したいtargetとの縦gap[m]です。",
+    "follow_gap_closing_engage_gap_m": "ATTACK_FOLLOWのgap closing加速を開始する縦gap[m]です。",
+    "follow_gap_closing_speed_gain_per_m": "目標gapを超えた1 mあたりに加える速度bonus係数[(m/s)/m]です。",
+    "follow_gap_closing_max_speed_bonus_mps": "ATTACK_FOLLOWでtarget速度へ加えられる最大速度bonus[m/s]です。",
+    "follow_gap_closing_assumed_accel_mps2": "gap closing profile生成で仮定する加速度[m/s^2]です。",
+    "pass_speed_cap_mps": "PASS proposal/shadow軌道に許す速度上限[m/s]です。",
+    "pass_assumed_accel_mps2": "PASS proposalの時系列生成で仮定する加速度[m/s^2]です。motion grant前は実車速度を上げません。",
+    "moving_pass_min_closing_speed_mps": "移動targetへPASSを仕掛けるために要求する最小接近速度[m/s]です。",
+    "pass_target_lateral_margin_m": "PASS target footprintへ追加する横clearance[m]です。",
+    "pass_lateral_first_stationary_creep_v_max_mps": "停止targetに対する横移動優先段階のcreep速度上限[m/s]です。",
+    "pass_lateral_tracking_lag_threshold_m": "PASS中の実測横進捗遅れを検出する誤差閾値[m]です。",
+    "pass_lateral_tracking_lag_speed_cap_mps": "横進捗遅れ検出中に適用する速度上限[m/s]です。",
+    "recovery_assumed_accel_mps2": "RECOVERY trajectoryの時系列生成で仮定する加速度[m/s^2]です。",
+    "ego_front_extent_m": "Overtake Plannerのego基準点から車体前端までの長さ[m]です。",
+    "ego_rear_extent_m": "Overtake Plannerのego基準点から車体後端までの長さ[m]です。",
+    "ego_half_width_m": "Overtake Plannerがwall/opponent評価に使う車体半幅[m]です。",
+    "wall_localization_uncertainty_m": "自己位置誤差としてwall footprintへ追加する余裕[m]です。",
+    "wall_footprint_max_sample_distance_m": "wall swept-footprint評価で許すsample間の最大移動距離[m]です。",
+    "wall_footprint_max_sample_yaw_rad": "wall swept-footprint評価で許すsample間の最大yaw変化[rad]です。",
+    "preemptive_wall_recovery_min_curvature_m_inv": "壁接触前RECOVERYを検討するreference曲率の下限[1/m]です。",
+    "normal_recovery_speed_only_v_max_mps": "NORMAL/RECOVERYで横軌道を変えず速度だけ制限する場合の上限[m/s]です。",
+})
+
+PROFILE_PARAMETER_DESCRIPTION_DEFAULTS.update({
+    "node_name": "起動するROSノード名です。同じ実行ファイルを通常PPとRecovery PPで分けるために使います。",
+    "mpc_enabled": "pure_pursuit_mpc_horizon基盤でMPCノードを起動するフラグです。State Lattice Pure Pursuitプロファイルはfalse固定です。",
+    "state_lattice_mpc_health_speed_guard_enabled": "State Lattice側でMPC healthによる速度guardを使うlaunch設定です。MPC-freeのstate_lattice_pure_pursuitではfalseです。",
+    "mpc_health_speed_guard_enabled": "State Lattice PlannerがMPC health異常時に速度を制限する機能です。MPC-free profileではfalseです。",
+    "live_control_output_enabled": "State Lattice出力をlive制御経路へpublishする設定です。shadow-only時はfalseです。",
+    "instant_control_enabled": "State Latticeの瞬時Ackermann commandを生成する設定です。state_lattice_instant_muxでtrue、state_lattice_pure_pursuitでfalseです。",
+    "state_lattice_instant_control_enabled": "Hybrid MuxでState Lattice瞬時command sourceを有効にする設定です。state_lattice_instant_mux専用です。",
+    "safety_evaluation_enabled": "State Lattice候補をlive出力前にwall・相手・追従性などのSafetyEvaluatorへ通す設定です。",
+    "controller_trackability_profile": "State Lattice SafetyEvaluatorが候補追従性を判定するときのcontroller特性プロファイルです。",
+    "require_state_lattice_override_fresh": "State Lattice reference overrideがmissing/staleのときPPを停止させる設定です。state_lattice_pure_pursuitではtrue固定です。",
+    "require_overtake_reference_override_fresh": "overtake reference overrideを使うPPで、missing/stale時の停止を必須にする設定です。",
+    "experimental_spatial_reference_override_live_publish_enabled": "State Latticeの距離軸付きV4横profileをlive reference overrideへ出すPoC設定です。通常launchではfalseです。",
+    "state_lattice_v4_poc_identity_gate_enabled": "V4横profileを既存V2 sidebandのgeneration・frame・base stamp・source generationと照合してからPPへ適用するPoC gateです。",
+    "state_lattice_v2_live_proposal_publish_enabled": "V4 PoCのidentity sidebandとしてState Lattice typed proposalをpublishする設定です。通常launchではfalseです。",
+    "state_lattice_v2_live_proposal_accept_enabled": "V4 PoCのidentity sidebandをPure Pursuitが受信・検証する設定です。通常launchではfalseです。",
+    "state_lattice_v2_producer_instance_id": "V4 PoC sidebandのState Lattice Planner producer IDです。",
+    "state_lattice_v2_pp_producer_instance_id": "V4 PoC base attestationを送るPure Pursuit producer IDです。",
+    "state_lattice_v2_session_id": "V4 PoC sidebandとbase attestationを同一走行へ束縛するsession IDです。",
+    "state_lattice_v2_base_attestation_accept_enabled": "PlannerがPPの基準軌道attestationを検証し、V4 PoC proposal生成へ使用する設定です。",
+    "state_lattice_v2_expected_pp_producer_instance_id": "Plannerが受理するPP base-attestation producer IDです。",
+    "state_lattice_v2_expected_pp_session_id": "Plannerが受理するPP base-attestation session IDです。",
+    "state_lattice_v2_expected_producer_instance_id": "PPが受理するState Lattice typed proposal producer IDです。",
+    "state_lattice_v2_base_attestation_publish_enabled": "PPが現在の基準軌道attestationをPlannerへpublishする設定です。",
+    "state_lattice_v2_base_attestation_producer_instance_id": "PP base-attestationのproducer IDです。",
+    "state_lattice_v2_base_attestation_session_id": "PP base-attestationのsession IDです。",
+    "require_matching_overtake_horizon_contract": "MPC horizonとOvertake Planのtuple/generation一致を要求する設定です。不一致時はhorizonを採用しません。",
+    "require_safety_constraint": "Hybrid Muxが正速度commandの採用にfreshなSafetyConstraintを必須とする設定です。",
+    "recovery_enabled": "Wall Recovery sourceをPlanner/Muxで有効にする設定です。falseではRecovery commandを選びません。",
+    "aw2_shadow_transport_enabled": "AW2 exact Cartesian transportをshadow記録する診断設定です。走行authorityは与えません。",
+    "c002ay0_shadow_capture_enabled": "C-002AY0 shadow snapshot収集を有効にする診断設定です。",
+    "state_lattice_source_binding_shadow_enabled": "PPが使用する基準軌道source tupleをshadow観測へ束縛する診断設定です。走行authorityは変更しません。",
+    "c002ay0_state_lattice_shadow_enabled": "State Lattice Planner側のC-002AY0 shadow proposal記録を有効にする診断設定です。",
+    "c002ay0_state_lattice_shadow_worker_path": "State Lattice shadow固定recordを書き出すworker実行ファイルのパスです。",
+    "c002ay0_state_lattice_shadow_session_generation": "State Lattice shadow記録sessionのgeneration識別子です。",
+    "c002ay0_state_lattice_shadow_session_nonce": "State Lattice shadow記録sessionを再起動間で区別するnonceです。",
+    "c002ay0_shadow_session_generation": "C-002AY0 shadow記録sessionのgeneration識別子です。",
+    "c002ay0_shadow_session_nonce": "C-002AY0 shadow記録sessionを再起動間で区別するnonceです。",
+    "c002ay1_prod_measure_enabled": "C-002AY1 runtime計測recordの収集を有効にする診断設定です。制御選択には使いません。",
+    "c002ay1_prod_measure_run_id": "C-002AY1計測recordを走行artifactへ結び付けるrun IDです。",
+    "c002ay1_prod_measure_planner_nonce": "C-002AY1でPlanner process instanceを識別するnonceです。",
+    "c002ay1_prod_measure_planner_instance_id": "C-002AY1でPlanner instanceを識別する数値IDです。",
+    "c002ay1_prod_measure_pp_nonce": "C-002AY1でPure Pursuit process instanceを識別するnonceです。",
+    "c002ay1_prod_measure_pp_instance_id": "C-002AY1でPure Pursuit instanceを識別する数値IDです。",
+    "c002ay1_prod_measure_session_nonce": "C-002AY1計測sessionを再起動間で区別するnonceです。",
+    "c002ay1_prod_measure_instance_id": "C-002AY1計測producerのinstance IDです。",
+    "free_run_live_exact_observe_enabled": "FREE_RUN commandとACKのexact SourceKey照合を観測する設定です。",
+    "free_run_live_exact_pre_ack_hold_enabled": "正常なN-1/N配送gap中に、速度0のまま直前の検証済み操舵を保持する設定です。",
+    "free_run_live_exact_ack_enabled": "Pure PursuitがFREE_RUN execution ACKをpublishする設定です。",
+    "pp_core_exact_snapshot_enabled": "PPのlookahead・操舵基準などをexact tuple付きread-only snapshotとして記録する設定です。",
+    "free_run_live_exact_hard_steering_limit_rad": "FREE_RUN exact authorityがhard超過とみなす操舵角上限[rad]です。",
+    "free_run_live_exact_hard_steering_rate_limit_radps": "FREE_RUN exact authorityがhard超過とみなす操舵rate上限[rad/s]です。",
+    "overtake_short_spatial_horizon_v_max_mps": "Overtake軌道の空間ホライズンが短いときにPPが適用する速度上限[m/s]です。",
+    "overtake_spatial_horizon_min_arc_m": "Overtake軌道としてPPが要求する最小弧長[m]です。",
+    "overtake_spatial_horizon_brake_decel_mps2": "必要弧長不足時の停止距離計算に使う減速度[m/s^2]です。",
+    "overtake_mpc_health_solve_time_warn_ms": "Overtake PlannerがMPC solve遅延とみなす時間[ms]です。",
+    "state_lattice_max_steering_angle_rad": "Hybrid MuxがState Lattice瞬時sourceに許す最大操舵角[rad]です。",
+    "state_lattice_max_steering_rate_radps": "Hybrid MuxがState Lattice瞬時sourceに許す最大操舵rate[rad/s]です。",
+    "safety_constraint_max_speed_mps": "Hybrid MuxがSafetyConstraint経由で許す速度上限の絶対上限[m/s]です。",
+    "planner_stop_release_bootstrap_max_speed_mps": "Planner STOP解除直後のbootstrap期間に許す速度上限[m/s]です。",
+    "safety_constraint_max_brake_decel_mps2": "SafetyConstraintが要求できる最大減速度の絶対値[m/s^2]です。",
+    "control_fault_clear_safe_cycles": "Hybrid Muxのcontrol fault latchを解除するために要求する連続正常周期数です。",
+    "finish_stop_decel_mps2": "Finish authorityによる停止commandの減速度[m/s^2]です。",
+    "finish_stop_max_steering_rad": "Finish停止中に保持を許す操舵角の絶対上限[rad]です。",
+    "finish_stop_steering_guard_trigger_rad": "Finish停止でzero-steerへ切り替える操舵角閾値[rad]です。",
+    "tracking_usable_max_steering_angle_rad": "ControllerTrackingStatusをtracking usableと判定できる操舵角上限[rad]です。",
+    "race_arm_on_vehicle_state": "race authorityをarmするAWSIM vehicle state名です。通常はStartです。",
+    "race_arm_neutral_vehicle_states": "race arm判定で中立扱いにするAWSIM state名のカンマ区切り一覧です。",
+    "race_disarm_on_vehicle_state": "race authorityを解除するAWSIM state名のカンマ区切り一覧です。",
+    "official_start_service": "公式Startをsupervisorへ通知するROS service名です。",
+    "unknown_position_covariance_m2": "GNSS位置共分散がunknown表現のときにsimulation限定で代入する分散[m^2]です。",
+    "image": "occupancy grid YAMLから参照する地図画像ファイル名です。同じディレクトリ内のPGM等を指定します。",
+    "resolution": "occupancy gridの1 cellあたりの解像度[m/cell]です。Plannerのexpected_map_resolutionと一致させます。",
+    "negate": "地図画像の白黒を反転して占有判定する設定です。0は通常、1は反転です。",
+    "occupied_thresh": "画像pixelをoccupied cellと判定する確率閾値です。",
+    "free_thresh": "画像pixelをfree cellと判定する確率閾値です。occupied_threshとの間はunknownになります。",
+    "rosbag_required_present_topics": "bag metadata上に存在することを必須とするtopic名の一覧です。sampleが0件でも存在確認だけ行います。",
+    "rosbag_required_any_nonempty_topic_groups": "各group内のいずれか1 topicにsampleがあることを要求するtopic group一覧です。",
+})
+
+YAML_NAME_DESCRIPTION_DEFAULTS.update(PROFILE_PARAMETER_DESCRIPTION_DEFAULTS)
 
 GENERIC_DESCRIPTION_DEFAULTS = {
     "launch引数です。defaultを変更すると、このlaunch内で使われる既定値が変わります。",
@@ -820,6 +1163,96 @@ CATALOG: dict[str, list[dict[str, str]]] = {
             "kind": "text",
         },
     ],
+    "state_lattice_pure_pursuit": [
+        {
+            "label": "State Lattice Pure Pursuit profile",
+            "path": str(
+                LAUNCH_ROOT
+                / "launch/control/state_lattice_pure_pursuit.launch.xml"
+            ),
+            "kind": "xml",
+        },
+        {
+            "label": "State Lattice Pure Pursuit base launch",
+            "path": str(
+                LAUNCH_ROOT
+                / "launch/control/pure_pursuit_mpc_horizon.launch.xml"
+            ),
+            "kind": "xml",
+        },
+        {
+            "label": "Pure Pursuit launch params",
+            "path": str(LAUNCH_ROOT / "launch/control/pure_pursuit.launch.xml"),
+            "kind": "xml",
+        },
+        {
+            "label": "State Lattice planner params",
+            "path": str(
+                STATE_LATTICE_ROOT
+                / "config/state_lattice_overtake_planner.param.yaml"
+            ),
+            "kind": "yaml",
+        },
+        {
+            "label": "State Lattice planner launch",
+            "path": str(
+                STATE_LATTICE_ROOT
+                / "launch/state_lattice_overtake_planner.launch.xml"
+            ),
+            "kind": "xml",
+        },
+        {
+            "label": "State Lattice overtake permission profile",
+            "path": str(STATE_LATTICE_PERMISSION_CSV_PATH),
+            "kind": "csv",
+        },
+        {
+            "label": "State Lattice reference path",
+            "path": str(STATE_LATTICE_REFERENCE_CSV_PATH),
+            "kind": "csv",
+        },
+        {
+            "label": "State Lattice wall map metadata",
+            "path": str(STATE_LATTICE_WALL_MAP_PATH),
+            "kind": "yaml",
+        },
+        {
+            "label": "Pure Pursuit primary mux params",
+            "path": str(
+                HYBRID_CONTROL_MUX_ROOT
+                / "config/pure_pursuit_mpc_horizon.param.yaml"
+            ),
+            "kind": "yaml",
+        },
+        {
+            "label": "Hybrid control mux launch",
+            "path": str(
+                HYBRID_CONTROL_MUX_ROOT / "launch/hybrid_control_mux.launch.xml"
+            ),
+            "kind": "xml",
+        },
+        {
+            "label": "Wall recovery planner params",
+            "path": str(
+                WALL_RECOVERY_ROOT
+                / "config/wall_recovery_planner.param.yaml"
+            ),
+            "kind": "yaml",
+        },
+        {
+            "label": "Wall recovery planner launch",
+            "path": str(
+                WALL_RECOVERY_ROOT
+                / "launch/wall_recovery_planner.launch.xml"
+            ),
+            "kind": "xml",
+        },
+        {
+            "label": "Overtake planner route params",
+            "path": str(OVERTAKE_ROOT / "config/overtake_planner.param.yaml"),
+            "kind": "yaml",
+        },
+    ],
     "pure_pursuit": [
         {
             "label": "Pure Pursuit launch params",
@@ -1158,7 +1591,7 @@ def parse_control_default() -> str:
 
 
 def is_overtake_permission_csv(path: str | Path) -> bool:
-    return str(rel_path(path)) == str(OVERTAKE_PERMISSION_CSV_PATH)
+    return rel_path(path) in OVERTAKE_PERMISSION_CSV_PATHS
 
 
 def validate_overtake_permission_csv(content: str) -> None:
@@ -1196,7 +1629,9 @@ def _csv_bool(value: str, label: str = "boolean") -> bool:
 def validate_content(path: str, content: str) -> None:
     suffix = rel_path(path).suffix.lower()
     if suffix in {".yaml", ".yml"}:
-        yaml.safe_load(content)
+        parsed = yaml.safe_load(content)
+        if rel_path(path) == OVERTAKE_ROOT / "config/overtake_planner.param.yaml":
+            validate_overtake_route_config(parsed)
     elif suffix == ".xml":
         ET.fromstring(content)
     elif suffix == ".json":
@@ -1207,6 +1642,29 @@ def validate_content(path: str, content: str) -> None:
             raise ValueError("CSV parse produced no rows")
         if is_overtake_permission_csv(path):
             validate_overtake_permission_csv(content)
+
+
+def validate_overtake_route_config(parsed: Any) -> None:
+    try:
+        params = parsed["overtake_planner_node"]["ros__parameters"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            "overtake planner config must contain "
+            "overtake_planner_node.ros__parameters"
+        ) from exc
+    control_route = str(params.get("control_route", "")).strip()
+    if control_route not in OVERTAKE_CONTROL_ROUTES:
+        expected = ", ".join(sorted(OVERTAKE_CONTROL_ROUTES))
+        raise ValueError(
+            f"control_route must be one of: {expected}; got {control_route!r}"
+        )
+    trajectory_backend = str(params.get("trajectory_backend", "")).strip()
+    if trajectory_backend not in OVERTAKE_TRAJECTORY_BACKENDS:
+        expected = ", ".join(sorted(OVERTAKE_TRAJECTORY_BACKENDS))
+        raise ValueError(
+            "trajectory_backend must be one of: "
+            f"{expected}; got {trajectory_backend!r}"
+        )
 
 
 def structured_rows(path: str, content: str) -> dict[str, Any]:
@@ -1328,6 +1786,8 @@ def default_description(kind: str, row: dict[str, Any]) -> str:
             return DESCRIPTION_DEFAULTS[path]
         if re.match(r"^/\*\*\.ros__parameters\.rosbag_topics\[\d+\]$", path):
             return "rosbagへ記録するROS topic名です。走行後レポートやデバッグで見たいtopicを指定します。"
+        if re.match(r"^/\*\*\.ros__parameters\.rosbag_required_nonempty_topics\[\d+\]$", path):
+            return "bag受入時に1 sample以上の記録を必須とするROS topic名です。欠測するとrun証拠不成立になります。"
         if name in YAML_NAME_DESCRIPTION_DEFAULTS:
             return YAML_NAME_DESCRIPTION_DEFAULTS[name]
         if re.match(r"ref_vel_configulator\.[^.]+\.ref_vel$", path):
@@ -1586,7 +2046,10 @@ def _xml_rows(content: str) -> list[dict[str, Any]]:
         tag_name = tag_match.group(1)
         attrs_text = tag_match.group(2)
         attrs = list(re.finditer(r"([A-Za-z_:][\w:.-]*)\s*=\s*\"([^\"]*)\"", attrs_text))
-        attr_map = {match.group(1): match.group(2) for match in attrs}
+        attr_map = {
+            match.group(1): html.unescape(match.group(2))
+            for match in attrs
+        }
         attr_order = [match.group(1) for match in attrs]
         label = attr_map.get("name") or attr_map.get("pkg") or attr_map.get("file") or tag_name
         line_no = content.count("\n", 0, tag_match.start()) + 1
@@ -1632,6 +2095,9 @@ def _apply_xml_rows(content: str, rows: list[dict[str, Any]]) -> str:
             elif legacy_row_id in attr_row_values:
                 value = attr_row_values[legacy_row_id]
             else:
+                continue
+            original_value = attr.group(2)
+            if value == html.unescape(original_value):
                 continue
             value_start = attrs_offset + attr.start(2)
             value_end = attrs_offset + attr.end(2)
@@ -2223,6 +2689,16 @@ def load_history() -> list[dict[str, Any]]:
 def command_env(method: str) -> dict[str, str]:
     env = os.environ.copy()
     env["CONTROL_METHOD"] = method
+    if method == "state_lattice_pure_pursuit":
+        # Explicit GUI/SafetyGate PoC opt-in. Repository and production launch
+        # defaults remain OFF; selecting this controller enables the existing
+        # typed V2 sideband required by the V4 lateral identity gate.
+        env["STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED"] = "true"
+        env["STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED"] = "true"
+        env["STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED"] = "true"
+        env["STATE_LATTICE_V2_PRODUCER_INSTANCE_ID"] = "4101"
+        env["STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID"] = "4201"
+        env["STATE_LATTICE_V2_SESSION_ID"] = "1"
     return env
 
 

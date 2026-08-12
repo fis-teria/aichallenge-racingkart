@@ -344,6 +344,9 @@ struct CandidateTrajectory {
   std::vector<TrajectoryPoint> representative;
   std::vector<TrajectoryPoint> dense;
   int total_cost{0};
+  // Wall/object risk only. Reference deviation ranks otherwise-safe geometry
+  // but must not stop or slow the vehicle merely for executing an overtake.
+  int safety_cost{0};
   // Read-only totals of the individual pose-cost inputs over representative
   // points. Wall/object values are above their clear-space baseline. They are
   // not additive because production ranking merges levels before converting
@@ -467,6 +470,11 @@ discardUncommittedPassClearanceDiagnostic(PlanningCycleMetrics *metrics) {
   }
 }
 
+enum class ExecutionGeometryKind : std::uint8_t {
+  LEGACY_OFFSETS = 0,
+  EXACT_CARTESIAN = 1,
+};
+
 struct PlannerOutput {
   BehaviorMode mode{BehaviorMode::FREE_RUN};
   SolverHorizonIntent intent{SolverHorizonIntent::NONE};
@@ -480,6 +488,8 @@ struct PlannerOutput {
   // PP's exact base trajectory tuple. It may be recorded in shadow evidence,
   // but the wire producer must fail closed to speed-only.
   bool spatial_profile_shadow_only{false};
+  ExecutionGeometryKind execution_geometry_kind{
+      ExecutionGeometryKind::LEGACY_OFFSETS};
   double speed_cap_mps{0.0};
   double candidate_speed_limit_mps{0.0};
   int minimum_cost{-1};

@@ -7,32 +7,56 @@
   <arg name="topic_token"/>
   <arg name="regenerated_mode" default="false"/>
   <arg name="use_sim_time" default="true"/>
+  <arg name="exact_cartesian_enabled" default="false"/>
+  <arg name="steering_feedback_enabled" default="false"/>
+  <arg name="controller_trackability_profile" default="shadow_only"/>
+  <arg name="own_vehicle_id" default="d112"/>
   <let name="root" value="/test_only/offline_replay/$(var topic_token)"/>
+  <let name="use_current_authority"
+       value="$(eval &quot;'$(var regenerated_mode)' == 'true' and '$(var exact_cartesian_enabled)' != 'true'&quot;)"/>
 
   <group>
     <set_remap from="/clock" to="$(var root)/input/clock"/>
     <set_remap from="/tf" to="$(var root)/input/tf"/>
     <set_remap from="/tf_static" to="$(var root)/input/tf_static"/>
+    <set_remap from="/localization/kinematic_state" to="$(var root)/input/kinematics"/>
+    <set_remap from="/v2x/vehicle_positions" to="$(var root)/input/v2x"/>
+    <set_remap from="/mpc/speed_profile_debug" to="$(var root)/input/mpc_health"/>
+    <set_remap from="/planning/overtake/state_lattice/v2_proposal" to="$(var root)/planner/v2_proposal"/>
+    <set_remap from="/control/overtake/state_lattice/v2_base_attestation" to="$(var root)/pp/v2_base_attestation"/>
+    <set_remap from="/debug/overtake/state_lattice/v2_binding_status" to="$(var root)/pp/v2_binding_status"/>
+    <set_remap from="/hybrid_control/state_lattice/control_cmd" to="$(var root)/unused/state_lattice_instant_control"/>
 
     <!-- Production State Lattice Planner, with every input/output private. -->
     <node pkg="state_lattice_overtake_planner"
           exec="state_lattice_overtake_planner_node"
-          name="test_only_offline_state_lattice_planner"
+          name="state_lattice_overtake_planner_node"
           output="screen">
       <param name="use_sim_time" value="$(var use_sim_time)"/>
       <param from="$(find-pkg-share state_lattice_overtake_planner)/config/state_lattice_overtake_planner.param.yaml"/>
-      <param name="live_control_output_enabled" value="false"/>
+      <param name="live_control_output_enabled" value="$(var exact_cartesian_enabled)"/>
       <param name="experimental_spatial_reference_override_live_publish_enabled" value="true"/>
       <param name="instant_control_enabled" value="false"/>
-      <param name="controller_trackability_profile" value="shadow_only"/>
+      <param name="controller_trackability_profile" value="$(var controller_trackability_profile)"/>
+      <param name="own_vehicle_id" value="$(var own_vehicle_id)"/>
       <param name="safety_evaluation_enabled" value="true"/>
       <param name="c002ay0_state_lattice_shadow_enabled" value="false"/>
-      <param name="state_lattice_v2_live_proposal_publish_enabled" value="false"/>
+      <param name="state_lattice_v2_live_proposal_publish_enabled" value="$(var exact_cartesian_enabled)"/>
+      <param name="state_lattice_v2_producer_instance_id" value="4101"/>
+      <param name="state_lattice_v2_base_attestation_accept_enabled" value="$(var exact_cartesian_enabled)"/>
+      <param name="state_lattice_v2_expected_pp_producer_instance_id" value="4201" type="str"/>
+      <param name="state_lattice_v2_expected_pp_session_id" value="1" type="str"/>
+      <param name="state_lattice_authority_publish_enabled" value="$(var exact_cartesian_enabled)"/>
+      <param name="state_lattice_authority_tracking_topic" value="$(var root)/pp/tracking_status"/>
+      <param name="state_lattice_authority_race_arm_topic" value="$(var root)/input/race_armed"/>
       <param name="ego_state_topic" value="$(var root)/input/kinematics"/>
       <param name="opponent_topic" value="$(var root)/input/v2x"/>
       <param name="mpc_health_topic" value="$(var root)/input/mpc_health"/>
       <param name="reference_override_topic" value="$(var root)/planner/reference_override"/>
       <param name="instant_control_topic" value="$(var root)/unused/state_lattice_instant_control"/>
+      <remap from="/overtake/reference_override" to="$(var root)/planner/reference_override"/>
+      <remap from="/overtake/plan" to="$(var root)/planner/plan"/>
+      <remap from="/overtake/safety_constraint" to="$(var root)/planner/safety_constraint"/>
       <remap from="/debug/overtake/mode" to="$(var root)/planner/debug/mode"/>
       <remap from="/debug/overtake/metrics" to="$(var root)/planner/debug/metrics"/>
       <remap from="/debug/overtake/wall_map" to="$(var root)/planner/debug/wall_map"/>
@@ -50,7 +74,7 @@
       In regenerated mode, the unmodified production overtake Planner is the
       sole Plan/Safety producer. Baseline mode deliberately omits it.
     -->
-    <node if="$(var regenerated_mode)"
+    <node if="$(var use_current_authority)"
           pkg="overtake_planner"
           exec="overtake_planner_node"
           name="test_only_offline_overtake_planner"
@@ -58,6 +82,7 @@
       <param name="use_sim_time" value="$(var use_sim_time)"/>
       <param from="$(find-pkg-share overtake_planner)/config/overtake_planner.param.yaml"/>
       <param name="race_arm_topic" value="$(var root)/input/race_armed"/>
+      <param name="own_vehicle_id" value="$(var own_vehicle_id)"/>
       <param name="pp_core_exact_snapshot_enabled" value="false"/>
       <remap from="/localization/kinematic_state" to="$(var root)/input/kinematics"/>
       <remap from="/v2x/vehicle_positions" to="$(var root)/input/v2x"/>
@@ -104,7 +129,7 @@
       <arg name="use_external_target_vel" value="false"/>
       <arg name="use_overtake_reference_override" value="true"/>
       <arg name="require_overtake_reference_override_fresh" value="true"/>
-      <arg name="state_lattice_v4_poc_identity_gate_enabled" value="false"/>
+      <arg name="state_lattice_v4_poc_identity_gate_enabled" value="$(var exact_cartesian_enabled)"/>
       <arg name="state_lattice_v4_poc_command_activation_enabled" value="true"/>
       <arg name="free_run_live_exact_ack_enabled" value="true"/>
       <!-- The AW2 sidecar publishes fixed live absolute topics and is outside
@@ -112,8 +137,12 @@
            but do not start that external transport in the private graph. -->
       <arg name="aw2_shadow_transport_enabled" value="false"/>
       <arg name="pp_core_exact_snapshot_enabled" value="false"/>
-      <arg name="state_lattice_v2_live_proposal_accept_enabled" value="false"/>
+      <arg name="state_lattice_v2_live_proposal_accept_enabled" value="$(var exact_cartesian_enabled)"/>
       <arg name="state_lattice_v2_command_activation_enabled" value="false"/>
+      <arg name="state_lattice_v2_expected_producer_instance_id" value="4101"/>
+      <arg name="state_lattice_v2_base_attestation_publish_enabled" value="$(var exact_cartesian_enabled)"/>
+      <arg name="state_lattice_v2_base_attestation_producer_instance_id" value="4201"/>
+      <arg name="state_lattice_v2_base_attestation_session_id" value="1"/>
       <arg name="max_odom_age_sec" value="0.30"/>
       <arg name="max_trajectory_age_sec" value="0.30"/>
       <arg name="max_override_age_sec" value="0.30"/>
@@ -160,6 +189,21 @@
       <remap from="output/debug" to="$(var root)/mux/debug"/>
       <remap from="output/controller_tracking_status" to="$(var root)/mux/tracking_status"/>
       <remap from="output/motion_authority_grant" to="$(var root)/mux/motion_authority_grant"/>
+    </node>
+
+    <!-- Test-only bounded actuator response; never present in normal launch. -->
+    <node if="$(var steering_feedback_enabled)"
+          pkg="aichallenge_submit_launch"
+          exec="test_only_steering_actuator.py"
+          name="test_only_offline_steering_actuator"
+          output="screen">
+      <param name="use_sim_time" value="$(var use_sim_time)"/>
+      <param name="input_control_topic" value="$(var root)/output/control_cmd"/>
+      <param name="output_steering_topic" value="$(var root)/input/steering_status"/>
+      <param name="period_sec" value="0.01"/>
+      <param name="max_steering_rate_radps" value="0.75"/>
+      <param name="max_steering_angle_rad" value="0.48"/>
+      <param name="command_timeout_sec" value="0.20"/>
     </node>
   </group>
 </launch>

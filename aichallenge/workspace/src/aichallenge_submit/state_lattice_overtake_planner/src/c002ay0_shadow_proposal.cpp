@@ -213,6 +213,28 @@ Ay0ShadowProposalResult fail(Ay0ShadowProposalFailure failure,
 
 } // namespace
 
+bool baseSnapshotCurrentForProposal(
+    const multi_purpose_mpc_ros_msgs::msg::ControllerBaseTrajectorySnapshot
+        &base,
+    const builtin_interfaces::msg::Time &plan_stamp,
+    double maximum_snapshot_age_sec) {
+  if (!std::isfinite(maximum_snapshot_age_sec) ||
+      maximum_snapshot_age_sec <= 0.0) {
+    return false;
+  }
+  const auto plan_ns = timeNs(plan_stamp);
+  const auto record_ns = timeNs(base.record_stamp);
+  const auto source_ns = timeNs(base.base_source_stamp);
+  const auto lease_ns = timeNs(base.lease_valid_until);
+  const auto maximum_snapshot_age_ns =
+      static_cast<std::int64_t>(std::llround(maximum_snapshot_age_sec * 1.0e9));
+  return plan_ns >= 0 && record_ns >= 0 && source_ns >= 0 && lease_ns >= 0 &&
+         maximum_snapshot_age_ns > 0 && plan_ns >= record_ns &&
+         plan_ns >= source_ns &&
+         plan_ns - record_ns <= maximum_snapshot_age_ns &&
+         plan_ns < lease_ns;
+}
+
 const char *toString(Ay0ShadowProposalFailure failure) {
   switch (failure) {
   case Ay0ShadowProposalFailure::NONE:
@@ -434,6 +456,11 @@ Ay0ShadowProposalResult buildAy0ShadowProposal(
       identity.authority_token == 0U || identity.safety_snapshot_id == 0U ||
       identity.plan_generation == 0U || identity.candidate_revision == 0U ||
       identity.target_id.empty() || identity.target_id.size() > 64U ||
+      !std::isfinite(config.planner_rate_hz) ||
+      config.planner_rate_hz <= 0.0 ||
+      !std::isfinite(config.ego_stale_sec) || config.ego_stale_sec <= 0.0 ||
+      !std::isfinite(config.opponent_stale_sec) ||
+      config.opponent_stale_sec <= 0.0 ||
       digestMissing(safety_evidence.evaluator_implementation_sha256) ||
       digestMissing(safety_evidence.evaluator_config_sha256)) {
     return fail(Ay0ShadowProposalFailure::INVALID_INPUT, "invalid_input");
@@ -443,15 +470,9 @@ Ay0ShadowProposalResult buildAy0ShadowProposal(
     return fail(Ay0ShadowProposalFailure::BASE_INVALID, "base_invalid");
   }
   const auto plan_ns = timeNs(plan_stamp);
-  const auto record_ns = timeNs(base.record_stamp);
-  const auto source_ns = timeNs(base.base_source_stamp);
   const auto lease_ns = timeNs(base.lease_valid_until);
-  const auto maximum_snapshot_age_ns =
-      static_cast<std::int64_t>(std::llround(config.ego_stale_sec * 1.0e9));
-  if (plan_ns < 0 || record_ns < 0 || source_ns < 0 || lease_ns < 0 ||
-      maximum_snapshot_age_ns <= 0 || plan_ns < record_ns ||
-      plan_ns < source_ns || plan_ns - record_ns > maximum_snapshot_age_ns ||
-      plan_ns >= lease_ns) {
+  if (!baseSnapshotCurrentForProposal(base, plan_stamp,
+                                      config.ego_stale_sec)) {
     return fail(Ay0ShadowProposalFailure::BASE_NOT_CURRENT, "base_not_current");
   }
   if (!candidate.feasible) {
@@ -517,9 +538,24 @@ Ay0ShadowProposalResult buildAy0ShadowProposal(
   trajectory.safety_snapshot_id = identity.safety_snapshot_id;
   trajectory.safety_evaluation_result = Authorized::SAFETY_PASSED;
   trajectory.safety_evaluation_stamp = plan_stamp;
-  constexpr std::int64_t kShadowSafetyLifetimeNs = 50000000LL;
+  // Availability is checked by the faster PP cycle against this absolute
+  // lease. A lease equal to exactly one planner period creates deterministic
+  // gaps whenever the 20 Hz publisher has normal scheduling jitter, clearing
+  // the accepted Cartesian cache and restarting steering acquisition. Keep
+  // two nominal publications of continuity, while remaining below the
+  // downstream 120 ms exact-evidence bound and both owning input stale limits.
+  constexpr double kMaximumExactEvidenceLifetimeSec = 0.12;
+  const double safety_lifetime_sec =
+      std::min({2.0 / config.planner_rate_hz,
+                config.ego_stale_sec, config.opponent_stale_sec,
+                kMaximumExactEvidenceLifetimeSec});
+  const auto safety_lifetime_ns = static_cast<std::int64_t>(
+      std::llround(safety_lifetime_sec * 1.0e9));
+  if (!std::isfinite(safety_lifetime_sec) || safety_lifetime_ns <= 0) {
+    return fail(Ay0ShadowProposalFailure::INVALID_INPUT, "invalid_input");
+  }
   const auto safety_until_ns =
-      std::min(lease_ns, plan_ns + kShadowSafetyLifetimeNs);
+      std::min(lease_ns, plan_ns + safety_lifetime_ns);
   if (safety_until_ns <= plan_ns) {
     return fail(Ay0ShadowProposalFailure::BASE_NOT_CURRENT, "base_not_current");
   }

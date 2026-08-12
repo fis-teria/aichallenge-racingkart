@@ -10,14 +10,17 @@ namespace simple_pure_pursuit::aw2_shadow {
 
 inline constexpr std::uint64_t kSharedMagic = 0x4157325348505032ULL;
 inline constexpr std::uint32_t kAbiVersion = 1U;
-inline constexpr std::uint32_t kLayoutVersion = 2U;
+inline constexpr std::uint32_t kLayoutVersion = 3U;
 inline constexpr std::uint32_t kLittleEndianMarker = 0x01020304U;
 inline constexpr std::size_t kQueueCapacity = 8U;
 inline constexpr std::size_t kLossRangeCapacity = 16U;
 inline constexpr std::size_t kMaxTargetBytes = 64U;
 inline constexpr std::size_t kMaxFrameBytes = 128U;
 inline constexpr std::size_t kMaxSourceBytes = 4096U;
-inline constexpr std::size_t kMaxGeometryPoints = 100U;
+// The applied-evidence interval can cover the complete fixed V4 Cartesian
+// trajectory.  simple_pure_pursuit.hpp compile-time checks this against the
+// upstream V4 transport bound so producer and consumer capacities cannot drift.
+inline constexpr std::size_t kMaxGeometryPoints = 256U;
 inline constexpr std::size_t kMaxRolloutSamples = 100U;
 inline constexpr std::size_t kMaxConfigScalars = 32U;
 inline constexpr std::uint8_t kControllerRolePrimary = 1U;

@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -12,6 +13,52 @@ from pathlib import Path
 import pytest
 
 from aichallenge import capture_run_fingerprint as fingerprint
+
+
+def _raw_compose_service_for_normalization() -> dict[str, object]:
+    return {
+        "image": "aichallenge-2025-eval@sha256:" + "a" * 64,
+        "command": ["bash", "-lc", "exec sleep infinity"],
+        "entrypoint": None,
+        "environment": {"RUN_KIND": "planner-pp-control-smoke"},
+        "volumes": [{"type": "bind", "source": "/tmp/input", "target": "/input"}],
+        "privileged": False,
+        "network_mode": "host",
+        "security_opt": [],
+        "cap_add": [],
+        "read_only": False,
+        "devices": [],
+        "working_dir": None,
+        "stop_signal": None,
+        "stop_grace_period": None,
+        "pull_policy": "never",
+    }
+
+
+def test_gate2_raw_compose_volumes_normalize_to_mounts_and_raw_mounts_fail() -> None:
+    raw = _raw_compose_service_for_normalization()
+    normalized = fingerprint._normalize_compose_service(raw)
+    assert normalized["mounts"] == [
+        '{"source":"/tmp/input","target":"/input","type":"bind"}'
+    ]
+
+    raw_with_normalized_key = dict(raw)
+    raw_with_normalized_key["mounts"] = []
+    with pytest.raises(fingerprint.FingerprintError, match="unknown keys"):
+        fingerprint._normalize_compose_service(raw_with_normalized_key)
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker is unavailable")
+def test_gate2_repository_compose_renders_two_target_services() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    launch_spec = fingerprint._rendered_launch_spec(repo_root)
+    assert launch_spec["service_set"] == [
+        "autoware-eval-command", "autoware-eval-runtime",
+    ]
+    assert set(launch_spec["services"]) == set(launch_spec["service_set"])
+    for service in launch_spec["services"].values():
+        assert set(service) == fingerprint.GATE2_NORMALIZED_SERVICE_KEYS
+        assert service["mounts"]
 
 
 def _fake_snapshot(value: str) -> tuple[dict, list[dict]]:
@@ -327,7 +374,7 @@ def test_runtime_guard_rejects_existing_compose_container(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fake_run(command: list[str], _cwd: Path) -> bytes:
-        return b"container-id\n" if command == ["docker", "compose", "ps", "-q"] else b""
+        return b"container-id\n" if command == ["docker", "compose", "ps", "-aq"] else b""
 
     monkeypatch.setattr(fingerprint, "_run_command", fake_run)
     with pytest.raises(fingerprint.FingerprintError, match="requires stopped"):

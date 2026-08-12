@@ -198,6 +198,23 @@ PLAINTEXT_ENV_KEYS = (
     "AUTOWARE_RUN_MODE",
     "AUTOSTART_DEBUG_VISUALIZATION",
     "AUTOWARE_RUNTIME_IMAGE",
+    "AIC_EXPECTED_AUTOWARE_RUNTIME_IMAGE_ID",
+    "AIC_TEST_GATE2_REVIEW_ANCHOR_PATH",
+    "AIC_TEST_GATE2_REVIEW_ANCHOR_SHA256",
+    "AIC_TEST_GATE2_REVIEW_STATE_PATH",
+    "AIC_TEST_GATE2_REVIEW_STATE_SHA256",
+    "AIC_TEST_GATE2_REVIEW_RESULT_PATH",
+    "AIC_TEST_GATE2_REVIEW_RESULT_SHA256",
+    "AIC_TEST_GATE2_REVIEWED_EXECUTION_ID",
+    "AIC_TEST_GATE2_REVIEW_ATTEMPT_ID",
+    "AIC_TEST_GATE2_REVIEWED_HANDOFF_PATH",
+    "AIC_TEST_GATE2_REVIEWED_HANDOFF_SHA256",
+    "AIC_TEST_GATE2_REVIEW_PACKET_PATH",
+    "AIC_TEST_GATE2_REVIEW_PACKET_SHA256",
+    "AIC_TEST_GATE2_REVIEW_BUNDLE_PATH",
+    "AIC_TEST_GATE2_REVIEW_BUNDLE_SHA256",
+    "AIC_TEST_GATE2_REVIEW_IMAGE_ID",
+    "AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256",
     "D1_STALL_TIMEOUT_SEC",
     "D1_STALL_ENTER_SPEED_MPS",
     "D1_STALL_EXIT_SPEED_MPS",
@@ -215,6 +232,33 @@ HASHED_ENV_KEYS = (
     "AWSIM_EXTRA_ARGS",
     "GATE_EXTRA_ARGS",
 )
+GATE2_REVIEW_ANCHOR_PATH_KEYS = (
+    "AIC_TEST_GATE2_REVIEW_ANCHOR_PATH",
+    "AIC_TEST_GATE2_REVIEW_STATE_PATH",
+    "AIC_TEST_GATE2_REVIEW_RESULT_PATH",
+    "AIC_TEST_GATE2_REVIEWED_HANDOFF_PATH",
+    "AIC_TEST_GATE2_REVIEW_PACKET_PATH",
+    "AIC_TEST_GATE2_REVIEW_BUNDLE_PATH",
+)
+GATE2_REVIEW_ANCHOR_SHA_KEYS = (
+    "AIC_TEST_GATE2_REVIEW_ANCHOR_SHA256",
+    "AIC_TEST_GATE2_REVIEW_STATE_SHA256",
+    "AIC_TEST_GATE2_REVIEW_RESULT_SHA256",
+    "AIC_TEST_GATE2_REVIEWED_HANDOFF_SHA256",
+    "AIC_TEST_GATE2_REVIEW_PACKET_SHA256",
+    "AIC_TEST_GATE2_REVIEW_BUNDLE_SHA256",
+    "AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256",
+)
+GATE2_NORMALIZED_SERVICE_KEYS = frozenset({
+    "image", "command", "entrypoint", "environment", "mounts", "privileged",
+    "network_mode", "security_opt", "cap_add", "read_only", "devices",
+    "working_dir", "stop_signal", "stop_grace_period", "pull_policy",
+})
+GATE2_RENDERED_SERVICE_KEYS = frozenset({
+    "image", "command", "entrypoint", "environment", "volumes", "privileged",
+    "network_mode", "security_opt", "cap_add", "read_only", "devices",
+    "working_dir", "stop_signal", "stop_grace_period", "pull_policy",
+})
 
 
 class FingerprintError(RuntimeError):
@@ -241,6 +285,32 @@ def _canonical_sha256(value: Any) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return _sha256_bytes(encoded)
+
+
+def _gate2_review_launch_spec(
+    repo_root: Path, plain: Mapping[str, Any], launch_spec_sha256: str,
+) -> dict[str, Any]:
+    """Load the fixed queue index's normalized launch contract."""
+    raw_path = plain.get("AIC_TEST_GATE2_REVIEW_ANCHOR_PATH")
+    if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+        raise FingerprintError("Gate 2 review launch index path is missing")
+    anchor_sha256 = plain.get("AIC_TEST_GATE2_REVIEW_ANCHOR_SHA256")
+    if not isinstance(anchor_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", anchor_sha256):
+        raise FingerprintError("Gate 2 review launch index hash is missing")
+    path = Path(raw_path)
+    expected_root = repo_root.resolve(strict=True) / "analysis" / "aic_test" / "external_review_queue" / "gate2_authorizations"
+    try:
+        if path.resolve(strict=True).parent != expected_root or path.is_symlink() or stat.S_IMODE(path.stat().st_mode) != 0o644:
+            raise FingerprintError("Gate 2 review launch index path is unsafe")
+        if _sha256_file(path) != anchor_sha256:
+            raise FingerprintError("Gate 2 review launch index hash mismatch")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise FingerprintError("Gate 2 review launch index is unreadable") from error
+    launch_spec = payload.get("launch_spec") if isinstance(payload, dict) else None
+    if not isinstance(launch_spec, dict) or _canonical_sha256(launch_spec) != launch_spec_sha256:
+        raise FingerprintError("Gate 2 review launch specification hash mismatch")
+    return launch_spec
 
 
 def _relative_path(path: Path, repo_root: Path) -> str:
@@ -460,6 +530,33 @@ def build_snapshot(
     if runtime_image not in {"aichallenge-2025-dev", "aichallenge-2025-eval"}:
         raise FingerprintError(f"unsupported AUTOWARE_RUNTIME_IMAGE: {runtime_image!r}")
     docker_image_id = collect_docker_image_id(repo_root, runtime_image)
+    expected_image_id = plain.get("AIC_EXPECTED_AUTOWARE_RUNTIME_IMAGE_ID") if isinstance(plain, Mapping) else ""
+    is_gate2_profile = isinstance(plain, Mapping) and plain.get("RUN_KIND") == "planner-pp-control-smoke"
+    if is_gate2_profile:
+        if not isinstance(expected_image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image_id):
+            raise FingerprintError("expected eval image id is missing or invalid")
+        if docker_image_id != expected_image_id:
+            raise FingerprintError("expected eval image id does not match tagged image")
+        if any(
+            not isinstance(plain.get(key), str)
+            or not Path(plain[key]).is_absolute()
+            for key in GATE2_REVIEW_ANCHOR_PATH_KEYS
+        ):
+            raise FingerprintError("Gate 2 review anchor path is missing or invalid")
+        if any(
+            not isinstance(plain.get(key), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", plain[key])
+            for key in GATE2_REVIEW_ANCHOR_SHA_KEYS
+        ):
+            raise FingerprintError("Gate 2 review anchor hash is missing or invalid")
+        for key in ("AIC_TEST_GATE2_REVIEWED_EXECUTION_ID", "AIC_TEST_GATE2_REVIEW_ATTEMPT_ID", "AIC_TEST_GATE2_REVIEW_IMAGE_ID"):
+            if not isinstance(plain.get(key), str) or not plain[key].strip():
+                raise FingerprintError(f"Gate 2 review anchor field is missing: {key}")
+        launch_spec = _gate2_review_launch_spec(
+            repo_root, plain, plain["AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256"],
+        )
+    else:
+        launch_spec = None
     git_info = collect_git_info(repo_root)
 
     groups = {
@@ -494,6 +591,16 @@ def build_snapshot(
             "image": runtime_image,
             "image_id": docker_image_id,
         },
+        "runtime_image_admission": (
+            {
+                "expected_image_id": expected_image_id,
+                "actual_image_id": docker_image_id,
+                "review_anchor_sha256": plain.get("AIC_TEST_GATE2_REVIEW_ANCHOR_SHA256"),
+                "launch_spec_sha256": plain.get("AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256"),
+                "launch_spec": launch_spec,
+            }
+            if is_gate2_profile else None
+        ),
         "source_tree": {
             "root": "aichallenge/workspace/src",
             "file_count": len(source_records),
@@ -543,12 +650,46 @@ def attest_running_service(
     expected_image_id = collect_docker_image_id(repo_root, runtime_image)
     if prelaunch.get("docker") != {"image": runtime_image, "image_id": expected_image_id}:
         raise FingerprintError("prelaunch Docker image binding does not match runtime request")
-    records = [_inspect_running_service(repo_root, service, expected_image_id) for service in services]
+    admission = prelaunch.get("runtime_image_admission")
+    if runtime_image == "aichallenge-2025-eval":
+        if (
+            not isinstance(admission, dict)
+            or
+            admission.get("expected_image_id") != expected_image_id
+            or admission.get("actual_image_id") != expected_image_id
+            or not re.fullmatch(r"[0-9a-f]{64}", admission.get("review_anchor_sha256", ""))
+            or not re.fullmatch(r"[0-9a-f]{64}", admission.get("launch_spec_sha256", ""))
+            or not isinstance(admission.get("launch_spec"), dict)
+        ):
+            raise FingerprintError("prelaunch expected eval image id does not match runtime request")
+        launch_context = prelaunch.get("launch_context")
+        plain = launch_context.get("plain", {}) if isinstance(launch_context, dict) else {}
+        if _gate2_review_launch_spec(
+            repo_root, plain, admission["launch_spec_sha256"],
+        ) != admission["launch_spec"]:
+            raise FingerprintError("prelaunch Gate 2 review launch index changed")
+        if _rendered_launch_spec(repo_root) != admission["launch_spec"]:
+            raise FingerprintError("rendered Gate 2 launch specification does not match review anchor")
+    if set(services) != {"autoware-eval-runtime", "autoware-eval-command"}:
+        raise FingerprintError("Gate 2 runtime service set is invalid")
+    expected_project = f"aic-{run_dir.name.lower()}"
+    records = [
+        _inspect_running_service(repo_root, service, expected_image_id, expected_project)
+        for service in services
+    ]
+    container_ids = [record.get("container_id") for record in records]
+    if len(set(container_ids)) != len(container_ids):
+        raise FingerprintError("Gate 2 runtime container IDs are not distinct")
+    launch_context = prelaunch.get("launch_context")
+    plain = launch_context.get("plain", {}) if isinstance(launch_context, dict) else {}
     payload = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_dir.name,
         "expected_image": runtime_image,
         "expected_image_id": expected_image_id,
+        "review_anchor_sha256": plain.get("AIC_TEST_GATE2_REVIEW_ANCHOR_SHA256"),
+        "launch_spec_sha256": plain.get("AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256"),
+        "launch_spec": admission.get("launch_spec") if isinstance(admission, dict) else None,
         "services": records,
     }
     temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
@@ -557,7 +698,10 @@ def attest_running_service(
     return output_path
 
 
-def _inspect_running_service(repo_root: Path, service: str, expected_image_id: str) -> dict[str, Any]:
+def _inspect_running_service(
+    repo_root: Path, service: str, expected_image_id: str,
+    expected_project: str | None = None,
+) -> dict[str, Any]:
     container_id = _run_command(["docker", "compose", "ps", "-q", service], repo_root).decode().strip()
     if not re.fullmatch(r"[0-9a-f]{12,64}", container_id):
         raise FingerprintError(f"running service container is not unique: {service}")
@@ -565,6 +709,8 @@ def _inspect_running_service(repo_root: Path, service: str, expected_image_id: s
     if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
         raise FingerprintError("running service inspection has invalid schema")
     container = inspected[0]
+    config = container.get("Config") if isinstance(container.get("Config"), dict) else {}
+    host_config = container.get("HostConfig") if isinstance(container.get("HostConfig"), dict) else {}
     mounts = container.get("Mounts")
     labels = container.get("Config", {}).get("Labels") if isinstance(container.get("Config"), dict) else None
     if container.get("Image") != expected_image_id or not isinstance(mounts, list) or not isinstance(labels, dict):
@@ -574,6 +720,8 @@ def _inspect_running_service(repo_root: Path, service: str, expected_image_id: s
     compose_project = labels.get("com.docker.compose.project")
     if not isinstance(compose_project, str) or not compose_project:
         raise FingerprintError("running container compose project label is missing")
+    if expected_project is not None and compose_project != expected_project:
+        raise FingerprintError("running service compose project label mismatch")
     destinations: list[str] = []
     forbidden_root = PurePosixPath("/aichallenge")
     for mount in mounts:
@@ -586,6 +734,19 @@ def _inspect_running_service(repo_root: Path, service: str, expected_image_id: s
         destinations.append(normalized.as_posix())
         if normalized == forbidden_root or forbidden_root in normalized.parents:
             raise FingerprintError("packaged runtime must not mount /aichallenge or its subtree")
+    devices = host_config.get("Devices", [])
+    if not isinstance(devices, list) or any(not isinstance(device, dict) for device in devices):
+        raise FingerprintError("running service device records are invalid")
+    stop_timeout = host_config.get("StopTimeout")
+    if stop_timeout is not None and (type(stop_timeout) is not int or stop_timeout < 0):
+        raise FingerprintError("running service stop timeout is invalid")
+    stop_grace_period = None if stop_timeout is None else f"{stop_timeout}s"
+    stop_signal = config.get("StopSignal")
+    if stop_signal is not None and not isinstance(stop_signal, str):
+        raise FingerprintError("running service stop signal is invalid")
+    working_dir = config.get("WorkingDir")
+    if working_dir is not None and not isinstance(working_dir, str):
+        raise FingerprintError("running service working directory is invalid")
     return {
         "service": service,
         "container_id": container_id,
@@ -593,6 +754,119 @@ def _inspect_running_service(repo_root: Path, service: str, expected_image_id: s
         "compose_project": compose_project,
         "mount_destinations": destinations,
         "mounts": mounts,
+        "launch_spec": {
+            "image": container.get("Image"),
+            "command": config.get("Cmd"),
+            "entrypoint": config.get("Entrypoint"),
+            "environment": sorted(config.get("Env", []) or []),
+            "mounts": mounts,
+            "privileged": host_config.get("Privileged", False),
+            "network_mode": host_config.get("NetworkMode", ""),
+            "security_opt": sorted(host_config.get("SecurityOpt", []) or []),
+            "cap_add": sorted(host_config.get("CapAdd", []) or []),
+            "read_only": host_config.get("ReadonlyRootfs", False),
+            "devices": sorted(
+                json.dumps(device, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                for device in devices
+            ),
+            "working_dir": working_dir,
+            "stop_signal": stop_signal,
+            "stop_grace_period": stop_grace_period,
+            # Docker inspect does not expose Compose's pull policy after create;
+            # the review-bound rendered Compose contract carries the authoritative value.
+            "pull_policy": None,
+        },
+    }
+
+
+def _normalize_compose_service(service: Mapping[str, Any]) -> dict[str, Any]:
+    unknown = set(service) - GATE2_RENDERED_SERVICE_KEYS
+    if unknown:
+        raise FingerprintError(f"Gate 2 rendered service has unknown keys: {sorted(unknown)}")
+    environment = service.get("environment", {})
+    if isinstance(environment, list):
+        environment = {
+            item.split("=", 1)[0]: item.split("=", 1)[1] if "=" in item else None
+            for item in environment if isinstance(item, str)
+        }
+    if not isinstance(environment, dict):
+        raise FingerprintError("Gate 2 rendered service environment is invalid")
+    volumes = service.get("volumes", [])
+    if not isinstance(volumes, list):
+        raise FingerprintError("Gate 2 rendered service volumes are invalid")
+    normalized_volumes = [
+        json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if isinstance(item, dict) else str(item)
+        for item in volumes
+    ]
+    command = service.get("command", [])
+    if isinstance(command, str):
+        command = [command]
+    if not isinstance(command, list):
+        raise FingerprintError("Gate 2 rendered service command is invalid")
+    entrypoint = service.get("entrypoint")
+    if isinstance(entrypoint, str):
+        entrypoint = [entrypoint]
+    if entrypoint is not None and not isinstance(entrypoint, list):
+        raise FingerprintError("Gate 2 rendered service entrypoint is invalid")
+    image = service.get("image")
+    if isinstance(image, str) and "@sha256:" in image:
+        image = image[image.index("@") + 1:]
+    devices = service.get("devices", [])
+    if not isinstance(devices, list):
+        raise FingerprintError("Gate 2 rendered service devices are invalid")
+    security_opt = service.get("security_opt", [])
+    cap_add = service.get("cap_add", [])
+    if not isinstance(security_opt, list) or not isinstance(cap_add, list):
+        raise FingerprintError("Gate 2 rendered service security options are invalid")
+    for field in ("working_dir", "stop_signal", "stop_grace_period", "pull_policy"):
+        value = service.get(field)
+        if value is not None and not isinstance(value, str):
+            raise FingerprintError(f"Gate 2 rendered service {field} is invalid")
+    if type(service.get("privileged", False)) is not bool or type(service.get("read_only", False)) is not bool:
+        raise FingerprintError("Gate 2 rendered service boolean field is invalid")
+    network_mode = service.get("network_mode", "")
+    if not isinstance(network_mode, str):
+        raise FingerprintError("Gate 2 rendered service network mode is invalid")
+    return {
+        "image": image,
+        "command": command,
+        "entrypoint": entrypoint,
+        "environment": {str(key): environment[key] for key in sorted(environment)},
+        "mounts": sorted(normalized_volumes),
+        "privileged": service.get("privileged", False),
+        "network_mode": network_mode,
+        "security_opt": sorted(security_opt),
+        "cap_add": sorted(cap_add),
+        "read_only": service.get("read_only", False),
+        "devices": sorted(
+            json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if isinstance(item, dict) else str(item)
+            for item in devices
+        ),
+        "working_dir": service.get("working_dir"),
+        "stop_signal": service.get("stop_signal"),
+        "stop_grace_period": service.get("stop_grace_period"),
+        "pull_policy": service.get("pull_policy"),
+    }
+
+
+def _rendered_launch_spec(repo_root: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(_run_command(["docker", "compose", "config", "--format", "json"], repo_root))
+    except (FingerprintError, json.JSONDecodeError) as error:
+        raise FingerprintError("Gate 2 rendered launch specification is unavailable") from error
+    services = payload.get("services") if isinstance(payload, dict) else None
+    names = {"autoware-eval-command", "autoware-eval-runtime"}
+    if (
+        not isinstance(services, dict)
+        or not names.issubset(services)
+        or any(not isinstance(services[name], dict) for name in names)
+    ):
+        raise FingerprintError("Gate 2 rendered launch service set is invalid")
+    return {
+        "service_set": sorted(names),
+        "services": {name: _normalize_compose_service(services[name]) for name in sorted(names)},
     }
 
 
@@ -607,6 +881,19 @@ def _canonical_mounts(record: Mapping[str, Any]) -> list[str]:
         json.dumps(mount, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         for mount in mounts
     )
+
+
+def _canonical_runtime_launch_spec(record: Mapping[str, Any]) -> Any:
+    """Normalize only the duplicated Docker mount ordering in a live launch spec."""
+    launch_spec = record.get("launch_spec")
+    if not isinstance(launch_spec, dict):
+        return launch_spec
+    mounts = launch_spec.get("mounts")
+    if not isinstance(mounts, list) or any(not isinstance(mount, dict) for mount in mounts):
+        return launch_spec
+    canonical = dict(launch_spec)
+    canonical["mounts"] = _canonical_mounts(launch_spec)
+    return canonical
 
 
 def _identity_differences(
@@ -643,6 +930,17 @@ def _identity_differences(
                 "attested_canonical": original_mounts,
                 "observed_canonical": observed_mounts,
             })
+        original_launch_spec = _canonical_runtime_launch_spec(original)
+        observed_launch_spec = _canonical_runtime_launch_spec(observed)
+        if original_launch_spec != observed_launch_spec:
+            differences.append({
+                "service": service,
+                "field": "launch_spec",
+                "attested": original.get("launch_spec"),
+                "observed": observed.get("launch_spec"),
+                "attested_canonical": original_launch_spec,
+                "observed_canonical": observed_launch_spec,
+            })
     return differences
 
 
@@ -654,11 +952,13 @@ def _write_identity_evidence(
     original_services: list[dict[str, Any]],
     observed_services: list[dict[str, Any]],
     differences: list[dict[str, Any]],
+    launch_spec: Mapping[str, Any] | None = None,
 ) -> None:
     payload = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "identity_continuous": identity_continuous,
+        "launch_spec": launch_spec,
         # Keep `services` for the existing postrun contract.  It deliberately
         # remains the immutable attested identity, never the later observation.
         "services": original_services,
@@ -683,6 +983,17 @@ def verify_running_attestation(
     attestation_path = provenance / "runtime-container-attestation.json"
     if not attestation_path.is_file():
         raise FingerprintError("runtime container attestation is missing")
+    prelaunch_path = provenance / "prelaunch-manifest.json"
+    if prelaunch_path.is_file():
+        try:
+            prelaunch = json.loads(prelaunch_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise FingerprintError("prelaunch manifest is unavailable for attestation verification") from error
+    else:
+        # Legacy unit fixtures exercise identity continuity without a Gate2
+        # prelaunch.  The production Gate2 path always has this manifest and
+        # therefore takes the strict review-bound launch branch below.
+        prelaunch = None
     attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
     services = attestation.get("services") if isinstance(attestation, dict) else None
     expected_image_id = attestation.get("expected_image_id") if isinstance(attestation, dict) else None
@@ -691,14 +1002,33 @@ def verify_running_attestation(
         or not isinstance(expected_image_id, str)
         or not isinstance(services, list)
         or len(services) != 2
+        or {record.get("service") for record in services if isinstance(record, dict)} != {"autoware-eval-runtime", "autoware-eval-command"}
     ):
         raise FingerprintError("runtime container attestation schema or run binding is invalid")
+    admission = prelaunch.get("runtime_image_admission") if isinstance(prelaunch, dict) else None
+    if isinstance(prelaunch, dict) and prelaunch.get("docker", {}).get("image") == "aichallenge-2025-eval":
+        if (
+            not isinstance(admission, dict)
+            or attestation.get("review_anchor_sha256") != admission.get("review_anchor_sha256")
+            or attestation.get("launch_spec_sha256") != admission.get("launch_spec_sha256")
+            or attestation.get("launch_spec") != admission.get("launch_spec")
+            or _canonical_sha256(admission.get("launch_spec")) != admission.get("launch_spec_sha256")
+        ):
+            raise FingerprintError("runtime container attestation launch specification is not review-bound")
+        launch_context = prelaunch.get("launch_context")
+        plain = launch_context.get("plain", {}) if isinstance(launch_context, dict) else {}
+        if _gate2_review_launch_spec(
+            repo_root, plain, admission["launch_spec_sha256"],
+        ) != admission["launch_spec"]:
+            raise FingerprintError("runtime container attestation review index changed")
     if any(not isinstance(record, dict) for record in services):
         raise FingerprintError("runtime container attestation services are invalid")
     service_names = [record.get("service") for record in services]
     if (
         any(not isinstance(service, str) for service in service_names)
         or len(set(service_names)) != len(service_names)
+        or len({record.get("container_id") for record in services}) != len(services)
+        or any(not isinstance(record.get("container_id"), str) or not re.fullmatch(r"[0-9a-f]{12,64}", record["container_id"]) for record in services)
     ):
         raise FingerprintError("runtime container attestation service ownership is invalid")
     original_services = services
@@ -724,6 +1054,7 @@ def verify_running_attestation(
         original_services=original_services,
         observed_services=current,
         differences=differences,
+        launch_spec=attestation.get("launch_spec") if isinstance(attestation.get("launch_spec"), dict) else None,
     )
     if differences:
         raise FingerprintError("runtime service identity changed after attestation")
@@ -741,6 +1072,7 @@ def _validate_continuity_evidence(
         or continuity.get("identity_continuous") is not True
         or continuity.get("services") != attested_services
         or continuity.get("attested_services") != attested_services
+        or continuity.get("launch_spec") != attestation.get("launch_spec")
         or not isinstance(observed_services, list)
         or len(observed_services) != 2
         or differences != []
@@ -751,8 +1083,15 @@ def _validate_continuity_evidence(
         raise FingerprintError("runtime container continuity seal is invalid")
     expected_names = [record.get("service") for record in attested_services]
     observed_names = [record.get("service") for record in observed_services]
-    if expected_names != observed_names or _identity_differences(
-        attested_services, observed_services,
+    expected_ids = [record.get("container_id") for record in attested_services]
+    observed_ids = [record.get("container_id") for record in observed_services]
+    if (
+        set(expected_names) != {"autoware-eval-runtime", "autoware-eval-command"}
+        or len(set(expected_ids)) != len(expected_ids)
+        or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{12,64}", value) for value in expected_ids)
+        or expected_names != observed_names
+        or expected_ids != observed_ids
+        or _identity_differences(attested_services, observed_services)
     ):
         raise FingerprintError("runtime container continuity seal is invalid")
 
@@ -902,9 +1241,9 @@ def validate_output_mapping(
 
 
 def assert_runtime_stopped(repo_root: Path) -> None:
-    commands = [["docker", "compose", "ps", "-q"]]
+    commands = [["docker", "compose", "ps", "-aq"]]
     commands.extend(
-        ["docker", "compose", "-p", str(project), "ps", "-q"]
+        ["docker", "compose", "-p", str(project), "ps", "-aq"]
         for project in range(1, 5)
     )
     running: list[str] = []
@@ -917,6 +1256,20 @@ def assert_runtime_stopped(repo_root: Path) -> None:
             "run fingerprint requires stopped AWSIM/Autoware containers: "
             + ", ".join(running)
         )
+    try:
+        projects = json.loads(_run_command(["docker", "compose", "ls", "--all", "--format", "json"], repo_root))
+    except (FingerprintError, json.JSONDecodeError) as error:
+        raise FingerprintError("unable to enumerate all compose projects") from error
+    if not isinstance(projects, list):
+        raise FingerprintError("compose project enumeration has invalid schema")
+    stale = [
+        project.get("Name") for project in projects
+        if isinstance(project, dict)
+        and isinstance(project.get("Name"), str)
+        and project["Name"].startswith("aic-")
+    ]
+    if stale:
+        raise FingerprintError("run fingerprint requires no reserved aic-* compose projects: " + ", ".join(stale))
 
 
 def _requires_rosbag(launch_context: Mapping[str, Any]) -> bool:
@@ -1007,6 +1360,17 @@ def verify_postrun(repo_root: Path, output_root: Path, run_dir: Path) -> tuple[P
 
     prelaunch = json.loads(prelaunch_path.read_text(encoding="utf-8"))
     if prelaunch.get("docker", {}).get("image") == "aichallenge-2025-eval":
+        admission = prelaunch.get("runtime_image_admission")
+        launch_context = prelaunch.get("launch_context")
+        plain = launch_context.get("plain", {}) if isinstance(launch_context, dict) else {}
+        if (
+            not isinstance(admission, dict)
+            or not isinstance(admission.get("launch_spec_sha256"), str)
+            or _gate2_review_launch_spec(
+                repo_root, plain, admission["launch_spec_sha256"],
+            ) != admission.get("launch_spec")
+        ):
+            raise FingerprintError("postrun Gate 2 review launch index changed")
         attestation_path = provenance / "runtime-container-attestation.json"
         continuity_path = provenance / "runtime-container-continuity.json"
         if not attestation_path.is_file():
@@ -1014,13 +1378,27 @@ def verify_postrun(repo_root: Path, output_root: Path, run_dir: Path) -> tuple[P
         attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
         if (
             not isinstance(attestation, dict)
+            or attestation.get("schema_version") != SCHEMA_VERSION
             or attestation.get("run_id") != run_dir.name
             or attestation.get("expected_image") != prelaunch.get("docker", {}).get("image")
             or attestation.get("expected_image_id") != prelaunch.get("docker", {}).get("image_id")
+            or attestation.get("review_anchor_sha256") != prelaunch.get("runtime_image_admission", {}).get("review_anchor_sha256")
+            or attestation.get("launch_spec_sha256") != prelaunch.get("runtime_image_admission", {}).get("launch_spec_sha256")
+            or attestation.get("launch_spec") != prelaunch.get("runtime_image_admission", {}).get("launch_spec")
             or not isinstance(attestation.get("services"), list)
             or len(attestation["services"]) != 2
+            or {service.get("service") for service in attestation["services"] if isinstance(service, dict)} != {"autoware-eval-runtime", "autoware-eval-command"}
         ):
             raise FingerprintError("runtime container attestation does not match prelaunch binding")
+        ids = [service.get("container_id") for service in attestation["services"] if isinstance(service, dict)]
+        projects = [service.get("compose_project") for service in attestation["services"] if isinstance(service, dict)]
+        if (
+            any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{12,64}", value) for value in ids)
+            or len(set(ids)) != len(ids)
+            or projects != [f"aic-{run_dir.name.lower()}"] * len(projects)
+            or any(service.get("actual_image_id") != prelaunch["docker"]["image_id"] for service in attestation["services"] if isinstance(service, dict))
+        ):
+            raise FingerprintError("runtime container attestation service identity is invalid")
         if not continuity_path.is_file():
             raise FingerprintError("runtime container continuity seal is missing")
         continuity = json.loads(continuity_path.read_text(encoding="utf-8"))

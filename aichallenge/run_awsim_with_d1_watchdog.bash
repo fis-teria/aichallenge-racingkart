@@ -165,6 +165,12 @@ stop_scoped_run() {
 
 verify_runtime_identity() {
     local mode="$1"
+    # The immutable two-container attestation belongs to the packaged eval
+    # runtime.  The ordinary developer route uses compose-run helpers and has
+    # no persistent command container to attest.
+    if [ "${autoware_runtime_image}" != "aichallenge-2025-eval" ]; then
+        return 0
+    fi
     AUTOWARE_RUNTIME_IMAGE="${autoware_runtime_image}" \
         python3 aichallenge/capture_run_fingerprint.py \
             --repo-root "${repo_root}" --output-root "$(dirname "${run_host_dir%/}")" \

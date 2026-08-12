@@ -17,6 +17,7 @@
   <arg name="state_lattice_v2_base_attestation_accept_enabled" default="false"/>
   <arg name="state_lattice_v2_expected_pp_producer_instance_id" default=""/>
   <arg name="state_lattice_v2_expected_pp_session_id" default=""/>
+  <arg name="state_lattice_authority_publish_enabled" default="false"/>
   <arg name="state_lattice_v2_final_fence_enabled" default="false"/>
   <arg name="state_lattice_v2_final_fence_execution_nonce" default=""/>
   <arg name="state_lattice_v2_final_fence_expected_session_id" default=""/>
@@ -52,6 +53,7 @@
     <param name="state_lattice_v2_base_attestation_accept_enabled" value="$(var state_lattice_v2_base_attestation_accept_enabled)"/>
     <param name="state_lattice_v2_expected_pp_producer_instance_id" value="$(var state_lattice_v2_expected_pp_producer_instance_id)" type="str"/>
     <param name="state_lattice_v2_expected_pp_session_id" value="$(var state_lattice_v2_expected_pp_session_id)" type="str"/>
+    <param name="state_lattice_authority_publish_enabled" value="$(var state_lattice_authority_publish_enabled)"/>
     <param name="state_lattice_v2_final_fence_enabled" value="$(var state_lattice_v2_final_fence_enabled)"/>
     <param name="state_lattice_v2_final_fence_execution_nonce" value="$(var state_lattice_v2_final_fence_execution_nonce)" type="str"/>
     <param name="state_lattice_v2_final_fence_expected_session_id" value="$(var state_lattice_v2_final_fence_expected_session_id)" type="str"/>

@@ -26,13 +26,17 @@ public:
   FrenetPoint projectContinuous(
     double x, double y, double yaw, double expected_unwrapped_s,
     double search_half_width_m) const;
+  FrenetPoint projectContinuousUnique(
+    double x, double y, double yaw, double expected_unwrapped_s,
+    double search_half_width_m) const;
   std::size_t nearestIndex(double s) const;
   double unwrappedIndexS(long long index, std::size_t anchor_index, double anchor_s) const;
 
 private:
   FrenetPoint projectInWindow(
     double x, double y, double yaw, double expected_unwrapped_s,
-    double search_half_width_m, bool unrestricted) const;
+    double search_half_width_m, bool unrestricted,
+    bool require_unique_correspondence) const;
 
   std::vector<ReferencePoint> points_;
   double length_m_{0.0};

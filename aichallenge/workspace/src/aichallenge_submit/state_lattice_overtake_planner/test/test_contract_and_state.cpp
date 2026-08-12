@@ -15,17 +15,26 @@ TEST(ReferenceOverrideContract,
      PublicationPreparationKeepsShadowWithoutExplicitAuthority) {
   sl::PlannerOutput output;
   output.spatial_profile_shadow_only = true;
-  EXPECT_TRUE(sl::prepareWireOutputForPublication(output, false, false)
+  EXPECT_TRUE(sl::prepareWireOutputForPublication(output, false)
                   .spatial_profile_shadow_only);
 }
 
 TEST(ReferenceOverrideContract,
-     V4PocLivePreparationClearsOnlyWireCopyShadowMarker) {
+     LivePublicationCannotBypassMissingBaseAttestation) {
   sl::PlannerOutput output;
+  output.active = true;
+  output.safe_lateral = true;
+  output.mode = sl::BehaviorMode::OVERTAKE_RIGHT;
+  output.intent = sl::SolverHorizonIntent::MANEUVER_AUTHORIZED;
+  output.speed_cap_mps = 2.0;
+  output.lateral_offsets_m = {0.0, -0.4};
+  output.speed_caps_mps = {2.0, 1.5};
+  output.longitudinal_offsets_m = {0.0, 1.0};
   output.spatial_profile_shadow_only = true;
-  const auto wire_output =
-      sl::prepareWireOutputForPublication(output, false, true);
-  EXPECT_FALSE(wire_output.spatial_profile_shadow_only);
+  const auto wire_output = sl::prepareWireOutputForPublication(output, false);
+  EXPECT_TRUE(wire_output.spatial_profile_shadow_only);
+  EXPECT_EQ(sl::makeWirePayload(wire_output, 1U, kExactLivePolicy).kind,
+            sl::WireKind::SPEED_ONLY_V2);
   EXPECT_TRUE(output.spatial_profile_shadow_only);
 }
 
@@ -33,8 +42,7 @@ TEST(ReferenceOverrideContract,
      V2BaseIdentityStillClearsOnlyWireCopyShadowMarker) {
   sl::PlannerOutput output;
   output.spatial_profile_shadow_only = true;
-  const auto wire_output =
-      sl::prepareWireOutputForPublication(output, true, false);
+  const auto wire_output = sl::prepareWireOutputForPublication(output, true);
   EXPECT_FALSE(wire_output.spatial_profile_shadow_only);
   EXPECT_TRUE(output.spatial_profile_shadow_only);
 }
@@ -79,6 +87,26 @@ TEST(ReferenceOverrideContract, GenerationChangesOnlyForSemanticContent) {
       sl::semanticallyEqual(original, sl::makeWirePayload(output, 2U)));
   EXPECT_EQ(sl::nextGeneration(16777215U), 1U);
   EXPECT_EQ(sl::nextGeneration(41U), 42U);
+}
+
+TEST(ReferenceOverrideContract,
+     ExactCartesianAlwaysAdvancesAuthorityGeneration) {
+  sl::PlannerOutput output;
+  output.active = true;
+  output.safe_lateral = true;
+  output.mode = sl::BehaviorMode::OVERTAKE_LEFT;
+  output.intent = sl::SolverHorizonIntent::MANDATORY_AVOIDANCE;
+  output.execution_geometry_kind = sl::ExecutionGeometryKind::EXACT_CARTESIAN;
+  output.lateral_offsets_m = {0.0, 0.0};
+  output.speed_caps_mps = {1.0, 1.0};
+  output.longitudinal_offsets_m = {0.0, 2.0};
+  const auto previous = sl::makeWirePayload(output, 9U, kExactLivePolicy);
+  const auto prospective = sl::makeWirePayload(output, 9U, kExactLivePolicy);
+  ASSERT_TRUE(sl::semanticallyEqual(previous, prospective));
+  EXPECT_TRUE(sl::shouldAdvanceWireGeneration(output, previous, prospective));
+
+  output.execution_geometry_kind = sl::ExecutionGeometryKind::LEGACY_OFFSETS;
+  EXPECT_FALSE(sl::shouldAdvanceWireGeneration(output, previous, prospective));
 }
 
 TEST(ReferenceOverrideContract, GenerationWrapsAtFloatExactLimit) {

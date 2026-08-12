@@ -186,21 +186,29 @@ ReferencePoint FrenetFrame::frenetToCartesian(double s, double d) const {
 }
 
 FrenetPoint FrenetFrame::project(double x, double y, double yaw) const {
-  return projectInWindow(x, y, yaw, 0.0, 0.0, true);
+  return projectInWindow(x, y, yaw, 0.0, 0.0, true, false);
 }
 
 FrenetPoint FrenetFrame::projectContinuous(double x, double y, double yaw,
                                            double expected_s,
                                            double half_width) const {
-  return projectInWindow(x, y, yaw, expected_s, half_width, false);
+  return projectInWindow(x, y, yaw, expected_s, half_width, false, false);
+}
+
+FrenetPoint FrenetFrame::projectContinuousUnique(
+    double x, double y, double yaw, double expected_s,
+    double half_width) const {
+  return projectInWindow(x, y, yaw, expected_s, half_width, false, true);
 }
 
 FrenetPoint FrenetFrame::projectInWindow(double x, double y, double yaw,
                                          double expected_s, double half_width,
-                                         bool unrestricted) const {
+                                         bool unrestricted,
+                                         bool require_unique_correspondence) const {
   FrenetPoint best;
   double best_distance_sq = std::numeric_limits<double>::infinity();
   double best_expected_delta = std::numeric_limits<double>::infinity();
+  bool ambiguous_correspondence = false;
   if (empty() || !std::isfinite(x) || !std::isfinite(y)) {
     return best;
   }
@@ -235,9 +243,25 @@ FrenetPoint FrenetFrame::projectInWindow(double x, double y, double yaw,
       return;
     }
     const double distance_sq = (x - px) * (x - px) + (y - py) * (y - py);
-    if (distance_sq + 1.0e-10 < best_distance_sq ||
-        (std::abs(distance_sq - best_distance_sq) <= 1.0e-10 &&
-         expected_delta < best_expected_delta)) {
+    constexpr double kDistanceTieSq = 1.0e-10;
+    constexpr double kSameStationEpsilonM = 1.0e-6;
+    const bool strictly_nearer =
+        distance_sq + kDistanceTieSq < best_distance_sq;
+    const bool distance_tie =
+        best.valid && std::abs(distance_sq - best_distance_sq) <=
+                          kDistanceTieSq;
+    const bool distinct_tied_station =
+        distance_tie &&
+        std::abs(unwrapped_s - best.s) > kSameStationEpsilonM;
+    if (distinct_tied_station) {
+      // Two physically distinct reference stations are equally good Cartesian
+      // correspondences.  The legacy projection keeps its deterministic
+      // expected-s tie break, while unique callers fail closed after the
+      // bounded scan completes.
+      ambiguous_correspondence = true;
+    }
+    if (strictly_nearer ||
+        (distance_tie && expected_delta < best_expected_delta)) {
       const double segment_yaw = std::atan2(vy, vx);
       best.s = unwrapped_s;
       best.d =
@@ -247,7 +271,17 @@ FrenetPoint FrenetFrame::projectInWindow(double x, double y, double yaw,
       best.valid = true;
       best_distance_sq = distance_sq;
       best_expected_delta = expected_delta;
+      if (strictly_nearer && !distinct_tied_station) {
+        ambiguous_correspondence = false;
+      }
     }
+  };
+
+  const auto unique_result = [&]() {
+    if (require_unique_correspondence && ambiguous_correspondence) {
+      return FrenetPoint{};
+    }
+    return best;
   };
 
   const auto evaluate_all_segments = [&]() {
@@ -265,7 +299,7 @@ FrenetPoint FrenetFrame::projectInWindow(double x, double y, double yaw,
       !std::isfinite(half_width) || half_width < 0.0 ||
       2.0 * half_width >= length_m_ - 2.0e-9) {
     evaluate_all_segments();
-    return best;
+    return unique_result();
   }
 
   constexpr double kWindowEpsilon = 1.0e-9;
@@ -305,7 +339,7 @@ FrenetPoint FrenetFrame::projectInWindow(double x, double y, double yaw,
 
   if (selected_count == 0U || selected_count > points_.size()) {
     evaluate_all_segments();
-    return best;
+    return unique_result();
   }
   if (first_index + selected_count <= points_.size()) {
     for (std::size_t i = first_index; i < first_index + selected_count; ++i) {
@@ -321,7 +355,7 @@ FrenetPoint FrenetFrame::projectInWindow(double x, double y, double yaw,
       evaluate_segment(i);
     }
   }
-  return best;
+  return unique_result();
 }
 
 std::size_t FrenetFrame::nearestIndex(double s) const {

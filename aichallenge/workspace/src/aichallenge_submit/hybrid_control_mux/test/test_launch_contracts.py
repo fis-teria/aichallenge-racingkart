@@ -380,7 +380,7 @@ def test_aw2_candidate_execution_request_is_fully_bounded_and_shadow_only():
     assert "string<=64 target_vehicle_id" in data_lines
     assert "uint8[<=4096] canonical_source_wire" in data_lines
     assert (
-        "multi_purpose_mpc_ros_msgs/CandidateExecutionPoint[<=100] geometry_points"
+        "multi_purpose_mpc_ros_msgs/CandidateExecutionPoint[<=256] geometry_points"
         in data_lines
     )
     assert "bool authority_eligible" in data_lines

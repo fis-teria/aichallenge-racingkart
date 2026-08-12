@@ -108,6 +108,32 @@ class FreeRunSourceGapLease:
 
 
 @dataclass(frozen=True)
+class MotionAuthorityDeliveryGapLease:
+    """One non-renewable hold of an already committed PASSING cohort."""
+
+    plan_generation: int
+    plan_identity: tuple
+    constraint: SafetyConstraintState
+    envelope: ControllerCommandEnvelope
+    final_command: AckermannControlCommand
+    acquired_steady_time_sec: float
+    # Preserve the original N receipt leases.  A delivery-gap acquisition is
+    # not a new receipt for any member of the committed cohort.
+    plan_receipt_time_sec: Optional[float] = None
+    constraint_receipt_time_sec: Optional[float] = None
+    tracking_receipt_time_sec: Optional[float] = None
+    envelope_receipt_time_sec: Optional[float] = None
+    command_receipt_time_sec: Optional[float] = None
+    plan_header_stamp_ns: Optional[int] = None
+    constraint_header_stamp_ns: Optional[int] = None
+    tracking_header_stamp_ns: Optional[int] = None
+    envelope_header_stamp_ns: Optional[int] = None
+    command_header_stamp_ns: Optional[int] = None
+    plan_lateral_stop_fingerprint: Optional[tuple] = None
+    constraint_payload_fingerprint: Optional[tuple] = None
+
+
+@dataclass(frozen=True)
 class PendingFreeRunSource:
     """Observed SourceKey successor that has not received execution authority."""
 
@@ -142,6 +168,16 @@ class SafetyAuthoritySelection:
         yield self.receipt_time_sec
         yield self.authority_plan_generation
 
+
+def retain_warmup_proof_in_stop_state(
+    *, exact_pass_warmup_stop: bool,
+    rendezvous_state: SafetyAuthorityRendezvousState,
+) -> bool:
+    """Keep Stage-A only for its exact STOP or a bounded topic rendezvous."""
+    return bool(
+        exact_pass_warmup_stop
+        or rendezvous_state == SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP
+    )
 
 class HybridControlMuxNode(Node):
     def __init__(self, **node_kwargs: object) -> None:
@@ -935,6 +971,34 @@ class HybridControlMuxNode(Node):
         self.motion_authority_grant_lease_sec = (
             motion_authority_grant_lease_sec
         )
+        motion_authority_delivery_gap_lease_sec = float(
+            self.declare_parameter(
+                "motion_authority_delivery_gap_lease_sec", 0.04
+            ).value
+        )
+        if (
+            not math.isfinite(motion_authority_delivery_gap_lease_sec)
+            or not 0.0 < motion_authority_delivery_gap_lease_sec <= 0.04
+        ):
+            raise ValueError(
+                "motion_authority_delivery_gap_lease_sec must be finite and "
+                "in (0.0, 0.04]"
+            )
+        # This is intentionally shorter than every message freshness bound.
+        # The effective bound below remains fail-closed if a launch supplies a
+        # shorter existing freshness timeout.
+        self.motion_authority_delivery_gap_lease_sec = (
+            motion_authority_delivery_gap_lease_sec
+        )
+        self.motion_authority_delivery_gap_lease: Optional[
+            MotionAuthorityDeliveryGapLease
+        ] = None
+        # This is deliberately independent from the active lease.  Once an
+        # exact cohort has expired or been revoked, timer republishes of that
+        # same cohort must not mint a fresh delivery-gap window.
+        self.motion_authority_delivery_gap_tombstone: Optional[
+            MotionAuthorityDeliveryGapLease
+        ] = None
         self.motion_authority_grant_issuer_instance_id = (
             secrets.randbits(64) or 1
         )
@@ -3208,6 +3272,7 @@ class HybridControlMuxNode(Node):
             self.external_safety_status = msg
             self.external_stop_latched = True
             self.motion_authority_warmup_proof = None
+            self._invalidate_motion_authority_delivery_gap_lease()
             self._invalidate_verified_stop_steering()
             self._invalidate_free_run_live_exact_record("external_safety_stop")
             if timestamp_advanced:
@@ -3227,6 +3292,7 @@ class HybridControlMuxNode(Node):
         self.finish_stop_latch.observe_race_armed(bool(msg.data))
         if not bool(msg.data):
             self._invalidate_free_run_live_exact_record("race_disarmed")
+            self._invalidate_motion_authority_delivery_gap_lease()
             self._reset_state_lattice_source("race_disarmed")
         if self.race_arm_required:
             if bool(msg.data) and not was_armed:
@@ -3243,10 +3309,15 @@ class HybridControlMuxNode(Node):
             self._reset_finish_terminal_reference()
             self._invalidate_verified_stop_steering()
             self._reset_pure_pursuit_envelope_epoch()
+            # A new race epoch is a fresh identity boundary; do not carry a
+            # prior same-stamp safety payload taint into the new cohort.
+            self.safety_constraint_timestamp_regressed = False
             self.overtake_plan_lateral_stop_taint_cache.clear()
             self.overtake_plan_motion_identity_cache.clear()
             self.motion_authority_grant_active = False
             self.motion_authority_warmup_proof = None
+            self._invalidate_motion_authority_delivery_gap_lease()
+            self.motion_authority_delivery_gap_tombstone = None
             self._reset_state_lattice_source("race_epoch_changed")
 
     def _reset_state_lattice_source(self, reason: str) -> None:
@@ -3466,6 +3537,30 @@ class HybridControlMuxNode(Node):
 
         valid, reason = self._validate_pure_pursuit_envelope(msg)
         receipt_time_sec = self.now_sec()
+        delivery_gap_lease = self.motion_authority_delivery_gap_lease
+        if (
+            delivery_gap_lease is not None
+            and int(msg.plan_generation)
+            == int(delivery_gap_lease.plan_generation)
+            and (not valid or not bool(msg.trajectory_tracking_usable))
+        ):
+            # A malformed/unusable same-generation PP sample is a hard
+            # negative for an active committed cohort; never let the timer
+            # replay the old lease after that rejection.
+            self._invalidate_motion_authority_delivery_gap_lease()
+        if (
+            delivery_gap_lease is not None
+            and int(msg.plan_generation)
+            == (
+                1
+                if int(delivery_gap_lease.plan_generation) >= 16_777_215
+                else int(delivery_gap_lease.plan_generation) + 1
+            )
+            and (not valid or not bool(msg.trajectory_tracking_usable))
+        ):
+            # A received successor PP rejection is a hard negative, not a
+            # missing-topic delivery gap.
+            self._invalidate_motion_authority_delivery_gap_lease()
         self._remember_bounded(
             self.pure_pursuit_envelope_cache,
             identity,
@@ -3653,7 +3748,10 @@ class HybridControlMuxNode(Node):
         )
 
     def _validate_pure_pursuit_envelope(
-        self, msg: ControllerCommandEnvelope
+        self,
+        msg: ControllerCommandEnvelope,
+        *,
+        allow_tracking_unusable: bool = False,
     ) -> tuple[bool, str]:
         command = msg.command
         header_stamp_ns = self._stamp_ns(msg.header.stamp)
@@ -3730,7 +3828,10 @@ class HybridControlMuxNode(Node):
             return False, "command_age"
         if not bool(msg.pp_command_fresh):
             return False, "pp_command_not_fresh"
-        if not bool(msg.trajectory_tracking_usable):
+        if (
+            not bool(msg.trajectory_tracking_usable)
+            and not allow_tracking_unusable
+        ):
             return False, "trajectory_tracking_unusable"
         if int(msg.schema_version) == 2:
             key = msg.plan_sample_key
@@ -3883,11 +3984,16 @@ class HybridControlMuxNode(Node):
             return None
         legacy_command = self.pure_pursuit_cmd
         command_stamp_ns = self._stamp_ns(legacy_command.stamp)
-        previous_generation = (
+        active_producer = self.pure_pursuit_envelope_active_producer_instance_id
+        legacy_previous_generation = (
             16_777_215
             if int(tracking_plan_generation) == 1
             else int(tracking_plan_generation) - 1
         )
+        # Selector history must not turn arbitrary older samples into motion.
+        # The sole direct-predecessor exception is handled by the immutable
+        # committed-cohort lease at the timer boundary below.
+        previous_generation = legacy_previous_generation
         current_entry = self.pure_pursuit_tracking_status_cache.get(
             (command_stamp_ns, tracking_plan_generation)
         )
@@ -3942,6 +4048,14 @@ class HybridControlMuxNode(Node):
             or tracking_plan_generation < 0
         ):
             return None
+        legacy_previous_generation = (
+            16_777_215
+            if int(tracking_plan_generation) == 1
+            else int(tracking_plan_generation) - 1
+        )
+        # Do not widen an N-1 bridge by scanning cache history.  A positive
+        # PASSING command can cross this boundary only via a committed lease.
+        previous_generation = legacy_previous_generation
         watermark = self.pure_pursuit_envelope_watermark
         if watermark is not None:
             watermark_identity, watermark_record = watermark
@@ -3949,6 +4063,9 @@ class HybridControlMuxNode(Node):
                 int(watermark_identity[0]) == int(active_producer)
                 and int(watermark_identity[3]) == int(tracking_plan_generation)
             ):
+                # A received unusable envelope is a hard negative.  It is not
+                # a delivery gap and cannot reopen older cache history.
+                watermark_delivery_gap = False
                 if (
                     not bool(watermark_record[2])
                     or not self._fresh(
@@ -3956,7 +4073,7 @@ class HybridControlMuxNode(Node):
                         now_sec,
                         self.pure_pursuit_envelope_timeout_sec,
                     )
-                ):
+                ) and not watermark_delivery_gap:
                     if debug_rejection_sink is not None:
                         envelope = watermark_record[4]
                         fresh = self._fresh(
@@ -4000,43 +4117,41 @@ class HybridControlMuxNode(Node):
                             }
                         )
                     return None
-                envelope = copy.deepcopy(watermark_record[4])
-                proof = ControllerTrackingStatus()
-                proof.header.stamp = copy.deepcopy(envelope.header.stamp)
-                proof.header.frame_id = "base_link"
-                proof.plan_generation = int(envelope.plan_generation)
-                proof.mpc_horizon_usable = bool(envelope.mpc_horizon_usable)
-                proof.pp_command_fresh = bool(envelope.pp_command_fresh)
-                proof.trajectory_tracking_usable = bool(
-                    envelope.trajectory_tracking_usable
-                )
-                proof.lateral_stop_authority_kind = int(
-                    envelope.lateral_stop_authority_kind
-                )
-                proof.lateral_stop_transaction_pass_direction = int(
-                    envelope.lateral_stop_transaction_pass_direction
-                )
-                proof.lateral_stop_authority_token = int(
-                    envelope.lateral_stop_authority_token
-                )
-                proof.command_age_sec = float(envelope.command_age_sec)
-                proof.reason = str(envelope.reason)
-                return self._build_selected_pp_motion_sample(
-                    envelope.command,
-                    watermark_record[1],
-                    authority_proof=proof,
-                    authority_proof_receipt_time_sec=watermark_record[1],
-                    authority_proof_valid=True,
-                    observed_proof=proof,
-                    observed_proof_receipt_time_sec=watermark_record[1],
-                    observed_proof_valid=True,
-                    envelope_identity=watermark_identity,
-                )
-        previous_generation = (
-            16_777_215
-            if int(tracking_plan_generation) == 1
-            else int(tracking_plan_generation) - 1
-        )
+                if watermark_delivery_gap:
+                    watermark = None
+                else:
+                    envelope = copy.deepcopy(watermark_record[4])
+                    proof = ControllerTrackingStatus()
+                    proof.header.stamp = copy.deepcopy(envelope.header.stamp)
+                    proof.header.frame_id = "base_link"
+                    proof.plan_generation = int(envelope.plan_generation)
+                    proof.mpc_horizon_usable = bool(envelope.mpc_horizon_usable)
+                    proof.pp_command_fresh = bool(envelope.pp_command_fresh)
+                    proof.trajectory_tracking_usable = bool(
+                        envelope.trajectory_tracking_usable
+                    )
+                    proof.lateral_stop_authority_kind = int(
+                        envelope.lateral_stop_authority_kind
+                    )
+                    proof.lateral_stop_transaction_pass_direction = int(
+                        envelope.lateral_stop_transaction_pass_direction
+                    )
+                    proof.lateral_stop_authority_token = int(
+                        envelope.lateral_stop_authority_token
+                    )
+                    proof.command_age_sec = float(envelope.command_age_sec)
+                    proof.reason = str(envelope.reason)
+                    return self._build_selected_pp_motion_sample(
+                        envelope.command,
+                        watermark_record[1],
+                        authority_proof=proof,
+                        authority_proof_receipt_time_sec=watermark_record[1],
+                        authority_proof_valid=True,
+                        observed_proof=proof,
+                        observed_proof_receipt_time_sec=watermark_record[1],
+                        observed_proof_valid=True,
+                        envelope_identity=watermark_identity,
+                    )
         # A received current-generation envelope is an authoritative hard
         # negative when its contract is unusable.  Never evade it by reusing
         # an older N-1 command; only a missing current record may bridge.
@@ -4051,6 +4166,7 @@ class HybridControlMuxNode(Node):
                 current_records,
                 key=lambda item: int(item[0][1]),
             )
+            current_delivery_gap = False
             if (
                 not bool(current_record[2])
                 or not self._fresh(
@@ -4058,7 +4174,7 @@ class HybridControlMuxNode(Node):
                     now_sec,
                     self.pure_pursuit_envelope_timeout_sec,
                 )
-            ):
+            ) and not current_delivery_gap:
                 if debug_rejection_sink is not None:
                     envelope = current_record[4]
                     fresh = self._fresh(
@@ -4102,8 +4218,16 @@ class HybridControlMuxNode(Node):
                         }
                     )
                 return None
-            generations = (tracking_plan_generation,)
+            generations = (
+                (previous_generation,)
+                if current_delivery_gap
+                else (tracking_plan_generation,)
+            )
         else:
+            # Preserve the existing direct N-1 selector contract for
+            # zero-speed and non-PASSING control.  PASSING positive motion is
+            # filtered at the timer boundary and may cross only via its
+            # committed-cohort lease.
             generations = (previous_generation,)
         for generation in generations:
             candidates = [
@@ -4178,6 +4302,136 @@ class HybridControlMuxNode(Node):
         proof.command_age_sec = float(envelope.command_age_sec)
         proof.reason = str(envelope.reason)
         return proof
+
+    def _select_pass_warmup_acquisition_sample(
+        self,
+        *,
+        tracking_plan_generation: int,
+        now_sec: float,
+        ros_clock_stalled: bool,
+    ) -> Optional[PurePursuitMotionSample]:
+        """Select a bound unusable command only for typed zero-speed warmup.
+
+        This does not alter the normal motion selector.  The returned authority
+        proof deliberately remains trajectory_tracking_usable=false, so it
+        cannot satisfy any motion proof; it can only reach the later typed
+        PASS_WARMUP zero-speed composition.
+        """
+        active = self.pure_pursuit_envelope_active_producer_instance_id
+        if (
+            self.pure_pursuit_envelope_fault_latched
+            or ros_clock_stalled
+            or tracking_plan_generation <= 0
+        ):
+            return None
+        if active is None:
+            bootstrap_records = []
+            for identity, record in self.pure_pursuit_envelope_cache.items():
+                envelope = record[4]
+                structural, _ = self._validate_pure_pursuit_envelope(
+                    envelope, allow_tracking_unusable=True
+                )
+                if (
+                    structural
+                    and not bool(envelope.trajectory_tracking_usable)
+                    and int(envelope.schema_version) == 2
+                    and int(envelope.lateral_stop_authority_kind)
+                    == int(OvertakePlan.LATERAL_STOP_PASS_WARMUP)
+                    and str(record[3]) == "trajectory_tracking_unusable"
+                    and self._fresh(
+                        record[1], now_sec, self.pure_pursuit_envelope_timeout_sec
+                    )
+                ):
+                    bootstrap_records.append((identity, record))
+            producers = {int(identity[0]) for identity, _ in bootstrap_records}
+            if len(producers) != 1:
+                return None
+            active = next(iter(producers))
+            ordered = sorted(
+                (
+                    (int(identity[1]), self._stamp_ns(record[4].header.stamp))
+                    for identity, record in bootstrap_records
+                    if int(identity[0]) == int(active)
+                ),
+                key=lambda item: item[0],
+            )
+            if len(ordered) < 2 or any(
+                later_sequence <= earlier_sequence
+                or later_stamp < earlier_stamp
+                for (earlier_sequence, earlier_stamp),
+                (later_sequence, later_stamp) in zip(ordered, ordered[1:])
+            ):
+                return None
+        candidates = sorted(
+            (
+                (identity, record)
+                for identity, record in self.pure_pursuit_envelope_cache.items()
+                if int(identity[0]) == int(active)
+                and int(identity[3]) == int(tracking_plan_generation)
+                and str(record[3]) == "trajectory_tracking_unusable"
+                and self._fresh(
+                    record[1], now_sec, self.pure_pursuit_envelope_timeout_sec
+                )
+            ),
+            key=lambda item: int(item[0][1]),
+            reverse=True,
+        )
+        for identity, record in candidates:
+            envelope = copy.deepcopy(record[4])
+            structurally_valid, _ = self._validate_pure_pursuit_envelope(
+                envelope, allow_tracking_unusable=True
+            )
+            if (
+                not structurally_valid
+                or bool(envelope.trajectory_tracking_usable)
+                or int(envelope.schema_version) != 2
+                or int(envelope.lateral_stop_authority_kind)
+                != int(OvertakePlan.LATERAL_STOP_PASS_WARMUP)
+            ):
+                continue
+            status_key = (
+                self._stamp_ns(envelope.header.stamp),
+                int(envelope.plan_generation),
+            )
+            status_record = self.pure_pursuit_tracking_status_cache.get(status_key)
+            if (
+                status_record is None
+                or not bool(status_record[2])
+                or not self._fresh(
+                    status_record[1],
+                    now_sec,
+                    self.pure_pursuit_tracking_status_timeout_sec,
+                )
+            ):
+                continue
+            status = status_record[0]
+            if (
+                bool(status.trajectory_tracking_usable)
+                or not bool(status.pass_warmup_steering_acquisition_active)
+                or bool(status.pass_warmup_motion_ready)
+                or int(status.lateral_stop_authority_kind)
+                != int(envelope.lateral_stop_authority_kind)
+                or int(status.lateral_stop_transaction_pass_direction)
+                != int(envelope.lateral_stop_transaction_pass_direction)
+                or int(status.lateral_stop_authority_token)
+                != int(envelope.lateral_stop_authority_token)
+                or not self._tracking_status_binds_pure_pursuit_command(
+                    status, envelope.command
+                )
+            ):
+                continue
+            return self._build_selected_pp_motion_sample(
+                envelope.command,
+                record[1],
+                authority_proof=status,
+                authority_proof_receipt_time_sec=status_record[1],
+                authority_proof_valid=True,
+                observed_proof=status,
+                observed_proof_receipt_time_sec=status_record[1],
+                observed_proof_valid=True,
+                envelope_identity=identity,
+            )
+        return None
 
     def _select_pp_motion_sample(
         self,
@@ -4292,6 +4546,7 @@ class HybridControlMuxNode(Node):
         ros_clock_stalled: bool,
         deadline_missed: bool,
         steering_result: SteeringLimitResult,
+        delivery_gap_lease_active: bool = False,
     ) -> tuple[bool, str, Optional[ControllerCommandEnvelope], Optional[tuple]]:
         """Validate one exact PASS command immediately before final publish."""
         if str(decision_source) != "pure_pursuit":
@@ -4350,11 +4605,19 @@ class HybridControlMuxNode(Node):
             or not any(candidate_digest)
         ):
             return False, "plan_identity", None, plan_identity
-        envelope = self._exact_current_motion_envelope(
-            selected_sample,
-            tracking_plan_generation=tracking_plan_generation,
-            now_sec=now_sec,
-        )
+        if delivery_gap_lease_active:
+            lease = self.motion_authority_delivery_gap_lease
+            envelope = (
+                copy.deepcopy(lease.envelope)
+                if lease is not None
+                else None
+            )
+        else:
+            envelope = self._exact_current_motion_envelope(
+                selected_sample,
+                tracking_plan_generation=tracking_plan_generation,
+                now_sec=now_sec,
+            )
         if envelope is None or int(envelope.schema_version) != 2:
             return False, "envelope_schema", envelope, plan_identity
         key = envelope.plan_sample_key
@@ -4384,62 +4647,6 @@ class HybridControlMuxNode(Node):
         )
         if envelope_identity != expected_identity:
             return False, "envelope_plan_binding", envelope, plan_identity
-        warmup_proof = self.motion_authority_warmup_proof
-        if warmup_proof is None:
-            return False, "warmup_proof_missing", envelope, plan_identity
-        warmup_age_sec = now_sec - float(warmup_proof["receipt_time_sec"])
-        if (
-            not math.isfinite(warmup_age_sec)
-            or warmup_age_sec < 0.0
-            or warmup_age_sec > self.motion_authority_warmup_proof_timeout_sec
-        ):
-            self.motion_authority_warmup_proof = None
-            return False, "warmup_proof_stale", envelope, plan_identity
-        warmup_identity = tuple(warmup_proof["plan_identity"])
-        same_plan_sample = warmup_identity == tuple(plan_identity)
-        direct_successor_generation = (
-            int(plan_identity[7])
-            == (
-                1
-                if int(warmup_identity[7]) >= 16_777_215
-                else int(warmup_identity[7]) + 1
-            )
-        )
-        stable_transaction_successor = bool(
-            direct_successor_generation
-            and tuple(plan_identity[:6]) == tuple(warmup_identity[:6])
-            and int(plan_identity[6]) > int(warmup_identity[6])
-            and int(plan_identity[8]) == int(OvertakePlan.PASSING)
-            and int(plan_identity[9]) > int(warmup_identity[9])
-            and bytes(plan_identity[10]) == bytes(warmup_identity[10])
-        )
-        if (
-            direct_successor_generation
-            and tuple(plan_identity[:6]) == tuple(warmup_identity[:6])
-            and bytes(plan_identity[10]) != bytes(warmup_identity[10])
-        ):
-            self.motion_authority_warmup_proof = None
-            return (
-                False,
-                "warmup_candidate_mutation",
-                envelope,
-                plan_identity,
-            )
-        if not (same_plan_sample or stable_transaction_successor):
-            return False, "warmup_plan_binding", envelope, plan_identity
-        if tuple(warmup_proof["trajectory_xy"]) != tuple(
-            self.overtake_plan_trajectory_cache.get(
-                int(tracking_plan_generation), ()
-            )
-        ):
-            return False, "warmup_trajectory_binding", envelope, plan_identity
-        if (
-            int(warmup_proof["pp_producer_instance_id"])
-            != int(envelope.producer_instance_id)
-            or int(envelope.command_sequence)
-            <= int(warmup_proof["pp_command_sequence"])
-        ):
-            return False, "warmup_command_successor", envelope, plan_identity
         envelope_command = envelope.command
         envelope_longitudinal_values = (
             float(envelope_command.longitudinal.speed),
@@ -4461,6 +4668,7 @@ class HybridControlMuxNode(Node):
             and float(final_command.lateral.steering_tire_angle)
             == float(steering_result.limited_steering_rad)
             and not steering_result.angle_limited
+            and not steering_result.rate_limited
         )
         if (
             envelope_longitudinal_values != final_longitudinal_values
@@ -4472,7 +4680,694 @@ class HybridControlMuxNode(Node):
             or int(envelope.command_sequence) <= 0
         ):
             return False, "command_identity", envelope, plan_identity
+        # State has already authorized this safety-evaluated candidate and its
+        # entry-speed cap.  The exact current-generation envelope and final
+        # command binding above are the execution proof; no earlier zero-speed
+        # warmup sample is required.
         return True, "ready", envelope, plan_identity
+
+    def _invalidate_motion_authority_delivery_gap_lease(self) -> None:
+        """Revoke the one-shot PASSING delivery-gap authority immediately."""
+        self.motion_authority_delivery_gap_lease = None
+
+    def _motion_release_constraint_valid(
+        self,
+        constraint: Optional[SafetyConstraintState],
+        *,
+        receipt_time_sec: Optional[float],
+        now_sec: float,
+        expected_generation: Optional[int] = None,
+        expected_stamp_ns: Optional[int] = None,
+    ) -> bool:
+        """Check the complete non-STOP release contract without latching.
+
+        Delivery-gap preview is deliberately side-effect free.  In particular,
+        this helper must not call the live ``SafetyConstraintAuthority``: a
+        successor preview is only evidence for deciding whether the committed
+        cohort may remain held, never an authority transition for that cohort.
+        """
+        if constraint is None or not self._fresh(
+            receipt_time_sec, now_sec, self.safety_constraint_timeout_sec
+        ):
+            return False
+        if (
+            not constraint.valid
+            or constraint.stop_requested
+            or not constraint.release_authorized
+            or constraint.plan_generation < 0
+            or constraint.constraint_generation < 0
+            or constraint.header_stamp_ns < 0
+            or str(constraint.frame_id) != "map"
+            or not math.isfinite(float(constraint.speed_limit_mps))
+            or not 0.0 < float(constraint.speed_limit_mps)
+            <= float(self.safety_constraint_max_speed_mps)
+            or not math.isfinite(float(constraint.required_brake_decel_mps2))
+            or not 0.0 <= float(constraint.required_brake_decel_mps2)
+            <= float(self.safety_constraint_max_brake_decel_mps2)
+        ):
+            return False
+        if (
+            expected_generation is not None
+            and int(constraint.plan_generation) != int(expected_generation)
+        ):
+            return False
+        if (
+            expected_stamp_ns is not None
+            and int(constraint.header_stamp_ns) != int(expected_stamp_ns)
+        ):
+            return False
+        return True
+
+    def _coerce_safety_constraint_state(
+        self, constraint: object
+    ) -> SafetyConstraintState:
+        """Normalize legacy test/fixture messages at the private lease edge."""
+        if isinstance(constraint, SafetyConstraintState):
+            return copy.deepcopy(constraint)
+        header = getattr(constraint, "header", None)
+        return SafetyConstraintState(
+            constraint_generation=int(constraint.constraint_generation),
+            plan_generation=int(constraint.plan_generation),
+            valid=bool(constraint.valid),
+            stop_requested=bool(constraint.stop_requested),
+            release_authorized=bool(constraint.release_authorized),
+            speed_limit_mps=float(constraint.speed_limit_mps),
+            required_brake_decel_mps2=float(
+                getattr(constraint, "required_brake_decel_mps2", 0.0)
+            ),
+            header_stamp_ns=self._stamp_ns(header.stamp) if header else 0,
+            frame_id=str(header.frame_id) if header else "",
+            reason=str(getattr(constraint, "reason", "")),
+        )
+
+    @staticmethod
+    def _motion_constraint_payload_fingerprint(
+        constraint: SafetyConstraintState,
+    ) -> tuple:
+        """Capture every committed safety-constraint payload field immutably."""
+        return (
+            int(constraint.constraint_generation),
+            int(constraint.plan_generation),
+            bool(constraint.valid),
+            bool(constraint.stop_requested),
+            bool(constraint.release_authorized),
+            float(constraint.speed_limit_mps),
+            float(constraint.required_brake_decel_mps2),
+            int(constraint.header_stamp_ns),
+            str(constraint.frame_id),
+            str(constraint.reason),
+        )
+
+    @staticmethod
+    def _lease_receipt_time(
+        lease: MotionAuthorityDeliveryGapLease,
+        field_name: str,
+    ) -> float:
+        """Read an original receipt, retaining compatibility with old fixtures."""
+        value = getattr(lease, field_name, None)
+        if value is None:
+            return float(lease.acquired_steady_time_sec)
+        return float(value)
+
+    def _motion_authority_delivery_gap_lease_timeout_sec(self) -> float:
+        """Bound the hold by the already-configured live-input freshness."""
+        return min(
+            float(self.motion_authority_delivery_gap_lease_sec),
+            float(self.overtake_plan_timeout_sec),
+            float(self.safety_constraint_timeout_sec),
+            float(self.pure_pursuit_cmd_timeout_sec),
+            float(self.pure_pursuit_tracking_status_timeout_sec),
+            float(self.pure_pursuit_envelope_timeout_sec),
+        )
+
+    def _motion_authority_delivery_gap_envelope_fresh(
+        self,
+        lease: MotionAuthorityDeliveryGapLease,
+        *,
+        now_sec: float,
+    ) -> bool:
+        """Re-evaluate the committed envelope's age at every hold tick."""
+        envelope = lease.envelope
+        envelope_receipt_time_sec = self._lease_receipt_time(
+            lease, "envelope_receipt_time_sec"
+        )
+        receipt_age_sec = now_sec - envelope_receipt_time_sec
+        command_age_sec = float(envelope.command_age_sec)
+        current_command_age_sec = command_age_sec + receipt_age_sec
+        if (
+            not math.isfinite(receipt_age_sec)
+            or receipt_age_sec < 0.0
+            or not math.isfinite(command_age_sec)
+            or command_age_sec < 0.0
+            or not math.isfinite(current_command_age_sec)
+            or current_command_age_sec
+            > float(self.pure_pursuit_envelope_timeout_sec)
+        ):
+            return False
+
+        # Keep the same ROS-time rules as _validate_pure_pursuit_envelope:
+        # clock-zero, future-stamp tolerance, and current header age are all
+        # fail-closed while a delivery-gap lease is being held.
+        header_stamp_ns = self._stamp_ns(envelope.header.stamp)
+        now_ros_ns = int(self.get_clock().now().nanoseconds)
+        future_tolerance_ns = int(
+            self.pure_pursuit_envelope_future_stamp_tolerance_sec * 1.0e9
+        )
+        if now_ros_ns == 0 and header_stamp_ns != 0:
+            return False
+        if now_ros_ns > 0 and header_stamp_ns > now_ros_ns + future_tolerance_ns:
+            return False
+        if (
+            now_ros_ns > 0
+            and (now_ros_ns - header_stamp_ns) * 1.0e-9
+            > float(self.pure_pursuit_envelope_timeout_sec)
+        ):
+            return False
+        return True
+
+    def _direct_motion_authority_successor_lease_sample(
+        self,
+        *,
+        successor_generation: int,
+        now_sec: float,
+        authority_selection: SafetyAuthoritySelection,
+        ros_clock_stalled: bool,
+        active_control_fault_reason: str,
+        deadline_missed: bool,
+    ) -> Optional[PurePursuitMotionSample]:
+        """Return only a committed N cohort during a bounded N+1 gap.
+
+        This never treats an N+1 delivery as authority for N.  It merely keeps
+        the immutable final command and the exact N contract alive until the
+        direct successor is complete, and cannot renew itself from timer ticks
+        or retransmissions.
+        """
+        lease = self.motion_authority_delivery_gap_lease
+        if lease is None:
+            return None
+        if (
+            self.external_stop_latched
+            or self.control_fault_latched
+            or bool(active_control_fault_reason)
+            or bool(ros_clock_stalled)
+            or bool(deadline_missed)
+            or self.finish_stop_latch.latched
+            or not self.finish_stop_latch.armed
+            or self.pure_pursuit_envelope_fault_latched
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        lease_age_sec = now_sec - float(lease.acquired_steady_time_sec)
+        if (
+            not math.isfinite(lease_age_sec)
+            or not 0.0 <= lease_age_sec
+            <= self._motion_authority_delivery_gap_lease_timeout_sec()
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        # Acquisition is not a receipt.  Every original N input must remain
+        # fresh at this tick; otherwise a pre-aged cohort cannot gain a new
+        # delivery-gap lifetime merely because the lease was minted later.
+        original_receipts = (
+            ("plan_receipt_time_sec", self.overtake_plan_timeout_sec),
+            ("constraint_receipt_time_sec", self.safety_constraint_timeout_sec),
+            (
+                "tracking_receipt_time_sec",
+                self.pure_pursuit_tracking_status_timeout_sec,
+            ),
+            ("envelope_receipt_time_sec", self.pure_pursuit_envelope_timeout_sec),
+            ("command_receipt_time_sec", self.pure_pursuit_cmd_timeout_sec),
+        )
+        if any(
+            not self._fresh(
+                getattr(lease, receipt_name, None),
+                now_sec,
+                timeout_sec,
+            )
+            for receipt_name, timeout_sec in original_receipts
+            if getattr(lease, receipt_name, None) is not None
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        # Older in-tree fixtures constructed leases before the immutable
+        # receipt fields existed.  Their acquisition time remains the only
+        # defensible fallback and is still bounded by the short lease above.
+        if any(
+            not self._fresh(
+                self._lease_receipt_time(lease, receipt_name),
+                now_sec,
+                timeout_sec,
+            )
+            for receipt_name, timeout_sec in original_receipts
+            if getattr(lease, receipt_name, None) is None
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        if (
+            not math.isfinite(float(lease.envelope.command_age_sec))
+            or float(lease.envelope.command_age_sec) < 0.0
+            or float(lease.envelope.command_age_sec)
+            > float(self.pure_pursuit_envelope_timeout_sec)
+            or (
+                lease.envelope_header_stamp_ns is not None
+                and int(lease.envelope_header_stamp_ns)
+                != int(self._stamp_ns(lease.envelope.header.stamp))
+            )
+            or (
+                lease.command_header_stamp_ns is not None
+                and int(lease.command_header_stamp_ns)
+                != int(self._stamp_ns(lease.final_command.stamp))
+            )
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        if not self._motion_authority_delivery_gap_envelope_fresh(
+            lease, now_sec=now_sec
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        direct_successor = (
+            1 if int(lease.plan_generation) >= 16_777_215
+            else int(lease.plan_generation) + 1
+        )
+        current_generation_hold = bool(
+            int(successor_generation) == int(lease.plan_generation)
+        )
+        if current_generation_hold:
+            # Constraint-first delivery can leave the active plan at N while
+            # a valid N+1 constraint (and possibly its envelope) is already
+            # observed.  Keep the committed N identity immutable until Plan
+            # N+1 joins; do not require a successor plan in this branch.
+            current_identity = self.overtake_plan_motion_identity_cache.get(
+                int(lease.plan_generation)
+            )
+            if (
+                current_identity is None
+                or tuple(current_identity) != tuple(lease.plan_identity)
+                or (
+                    lease.plan_lateral_stop_fingerprint is not None
+                    and self.overtake_plan_lateral_stop_fingerprint_cache.get(
+                        int(lease.plan_generation)
+                    )
+                    != lease.plan_lateral_stop_fingerprint
+                )
+            ):
+                self._invalidate_motion_authority_delivery_gap_lease()
+                return None
+            successor_identity = None
+            successor_plan = None
+        else:
+            if int(successor_generation) != direct_successor:
+                self._invalidate_motion_authority_delivery_gap_lease()
+                return None
+            successor_identity = self.overtake_plan_motion_identity_cache.get(
+                int(successor_generation)
+            )
+            successor_plan = self.overtake_plan_cache.get(
+                int(successor_generation)
+            )
+            if (
+                successor_identity is None
+                or successor_plan is None
+                or not bool(successor_plan[0])
+                or not bool(successor_plan[3])
+                or not bool(successor_plan[4])
+                or not bool(successor_identity[11])
+                or int(successor_identity[8]) != int(OvertakePlan.PASSING)
+                or int(successor_identity[6]) <= int(lease.plan_identity[6])
+                or tuple(successor_identity[:6]) != tuple(lease.plan_identity[:6])
+                # candidate_revision is intentionally a direct successor, not an
+                # equality: State writes its wire generation into this field.
+                or int(successor_identity[9]) != int(lease.plan_identity[9]) + 1
+                or bytes(successor_identity[10]) != bytes(lease.plan_identity[10])
+                or self.overtake_plan_lateral_stop_fingerprint_cache.get(
+                    int(successor_generation)
+                )
+                != self.overtake_plan_lateral_stop_fingerprint_cache.get(
+                    int(lease.plan_generation)
+                )
+            ):
+                self._invalidate_motion_authority_delivery_gap_lease()
+                return None
+        # A current successor constraint must either be wholly absent, or be
+        # an exact fresh release with no tightening. Anything received but
+        # malformed/STOP/stale is a hard negative, never a delivery gap.
+        successor_stamp_ns = (
+            int(self.safety_constraint.header_stamp_ns)
+            if current_generation_hold and self.safety_constraint is not None
+            else int(successor_identity[6])
+        )
+        if current_generation_hold and self.safety_constraint is None:
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        successor_constraint_generation = (
+            direct_successor if current_generation_hold else int(successor_generation)
+        )
+        successor_constraint = self.safety_constraint_contract_cache.get(
+            (int(successor_constraint_generation), successor_stamp_ns)
+        )
+        latest_constraint = self.safety_constraint
+        committed_constraint_state = self._coerce_safety_constraint_state(
+            lease.constraint
+        )
+        committed_constraint_stamp_ns = (
+            int(lease.constraint_header_stamp_ns)
+            if lease.constraint_header_stamp_ns is not None
+            else int(committed_constraint_state.header_stamp_ns)
+        )
+        committed_constraint_fingerprint = (
+            lease.constraint_payload_fingerprint
+            if lease.constraint_payload_fingerprint is not None
+            else self._motion_constraint_payload_fingerprint(
+                committed_constraint_state
+            )
+        )
+        if (
+            latest_constraint is not None
+            and int(latest_constraint.plan_generation)
+            not in (int(lease.plan_generation), int(successor_constraint_generation))
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        if (
+            latest_constraint is not None
+            and int(latest_constraint.plan_generation)
+            == int(lease.plan_generation)
+            and int(latest_constraint.header_stamp_ns)
+            == committed_constraint_stamp_ns
+            and self._motion_constraint_payload_fingerprint(latest_constraint)
+            != committed_constraint_fingerprint
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        if (
+            latest_constraint is not None
+            and successor_constraint is not None
+            and int(latest_constraint.plan_generation)
+            == int(successor_constraint_generation)
+            and self._motion_constraint_payload_fingerprint(latest_constraint)
+            != self._motion_constraint_payload_fingerprint(
+                successor_constraint[0]
+            )
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        if (
+            latest_constraint is not None
+            and int(latest_constraint.plan_generation)
+            == int(successor_constraint_generation)
+            and successor_constraint is None
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        if latest_constraint is not None:
+            latest_constraint_receipt = self.safety_constraint_time_sec
+            latest_expected_stamp = (
+                successor_stamp_ns
+                if int(latest_constraint.plan_generation)
+                == int(successor_constraint_generation)
+                else int(lease.plan_identity[6])
+            )
+            if not self._motion_release_constraint_valid(
+                latest_constraint,
+                receipt_time_sec=latest_constraint_receipt,
+                now_sec=now_sec,
+                expected_generation=int(latest_constraint.plan_generation),
+                expected_stamp_ns=latest_expected_stamp,
+            ):
+                self._invalidate_motion_authority_delivery_gap_lease()
+                return None
+        if successor_constraint is not None:
+            constraint, receipt_time_sec = successor_constraint
+            if (
+                not self._motion_release_constraint_valid(
+                    constraint,
+                    receipt_time_sec=receipt_time_sec,
+                    now_sec=now_sec,
+                    expected_generation=int(successor_constraint_generation),
+                    expected_stamp_ns=successor_stamp_ns,
+                )
+                or float(constraint.speed_limit_mps)
+                < float(lease.constraint.speed_limit_mps)
+                or float(constraint.required_brake_decel_mps2)
+                > float(lease.constraint.required_brake_decel_mps2)
+            ):
+                self._invalidate_motion_authority_delivery_gap_lease()
+                return None
+            # Constraint N+1 may arrive before PP N+1. It is safe to retain
+            # the exact committed N command only while the N+1 envelope is
+            # wholly absent; the envelope loop below ends this lease on its
+            # first received successor sample, valid or invalid.
+        if authority_selection.rendezvous_state not in (
+            SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            SafetyAuthorityRendezvousState.EXACT_CURRENT,
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        if current_generation_hold:
+            for identity, record in self.pure_pursuit_envelope_cache.items():
+                if int(identity[3]) != int(direct_successor):
+                    continue
+                if not bool(record[2]) or not self._fresh(
+                    record[1], now_sec, self.pure_pursuit_envelope_timeout_sec
+                ):
+                    self._invalidate_motion_authority_delivery_gap_lease()
+                    return None
+        for identity, record in self.pure_pursuit_envelope_cache.items():
+            if not current_generation_hold and int(identity[3]) == int(
+                successor_generation
+            ):
+                # Any received current envelope means the successor is not
+                # wholly missing. Invalid, unusable, stale, or regressed data
+                # additionally remains a hard negative via the latch/record.
+                self._invalidate_motion_authority_delivery_gap_lease()
+                return None
+        if (
+            not self.steering_limiter.has_last_steering
+            or self.steering_limiter.last_source != "pure_pursuit"
+            or not math.isfinite(
+                float(lease.final_command.lateral.steering_tire_angle)
+            )
+            or not math.isclose(
+                float(self.steering_limiter.last_steering_rad),
+                float(lease.final_command.lateral.steering_tire_angle),
+                rel_tol=0.0,
+                abs_tol=1.0e-9,
+            )
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return None
+        envelope = copy.deepcopy(lease.envelope)
+        proof = ControllerTrackingStatus()
+        proof.header.stamp = copy.deepcopy(envelope.header.stamp)
+        proof.header.frame_id = "base_link"
+        proof.plan_generation = int(lease.plan_generation)
+        proof.mpc_horizon_usable = bool(envelope.mpc_horizon_usable)
+        proof.pp_command_fresh = bool(envelope.pp_command_fresh)
+        proof.trajectory_tracking_usable = bool(
+            envelope.trajectory_tracking_usable
+        )
+        proof.command_age_sec = float(envelope.command_age_sec)
+        proof.reason = "committed_direct_successor_delivery_gap"
+        return self._build_selected_pp_motion_sample(
+            envelope.command,
+            self._lease_receipt_time(
+                lease, "command_receipt_time_sec"
+            ),
+            authority_proof=proof,
+            authority_proof_receipt_time_sec=self._lease_receipt_time(
+                lease, "tracking_receipt_time_sec"
+            ),
+            authority_proof_valid=True,
+            observed_proof=proof,
+            observed_proof_receipt_time_sec=self._lease_receipt_time(
+                lease, "tracking_receipt_time_sec"
+            ),
+            observed_proof_valid=True,
+            envelope_identity=self._pure_pursuit_envelope_identity(envelope),
+        )
+
+    def _commit_motion_authority_delivery_gap_lease(
+        self,
+        *,
+        plan_identity: tuple,
+        constraint: SafetyConstraintState,
+        envelope: ControllerCommandEnvelope,
+        final_command: AckermannControlCommand,
+        now_sec: float,
+        selected_sample: Optional[PurePursuitMotionSample] = None,
+    ) -> None:
+        """Mint once per exact commit; timer republishes never extend it."""
+        previous = self.motion_authority_delivery_gap_lease
+        tombstone = self.motion_authority_delivery_gap_tombstone
+        envelope_identity = self._pure_pursuit_envelope_identity(envelope)
+        plan_generation = int(plan_identity[7])
+
+        # The committed final command is part of the immutable envelope
+        # provenance.  A helper caller must not mint a lease for a command
+        # whose payload differs from the stored atomic PP command.
+        envelope_command = envelope.command
+        envelope_command_values = (
+            float(envelope_command.longitudinal.speed),
+            float(envelope_command.longitudinal.acceleration),
+            float(envelope_command.longitudinal.jerk),
+            float(envelope_command.lateral.steering_tire_angle),
+            float(envelope_command.lateral.steering_tire_rotation_rate),
+        )
+        final_command_values = (
+            float(final_command.longitudinal.speed),
+            float(final_command.longitudinal.acceleration),
+            float(final_command.longitudinal.jerk),
+            float(final_command.lateral.steering_tire_angle),
+            float(final_command.lateral.steering_tire_rotation_rate),
+        )
+        if (
+            not all(
+                math.isfinite(value)
+                for value in (*envelope_command_values, *final_command_values)
+            )
+            or envelope_command_values != final_command_values
+        ):
+            self._invalidate_motion_authority_delivery_gap_lease()
+            return
+
+        def same_commit(
+            record: Optional[MotionAuthorityDeliveryGapLease],
+        ) -> bool:
+            return bool(
+                record is not None
+                and tuple(record.plan_identity) == tuple(plan_identity)
+                and self._pure_pursuit_envelope_identity(record.envelope)
+                == envelope_identity
+            )
+
+        # A revoked/expired cohort is a tombstone, not an invitation to mint
+        # another 40 ms. Only a genuinely new exact command identity replaces
+        # it; an explicit race epoch reset clears it elsewhere.
+        if previous is None and same_commit(tombstone):
+            return
+        if (
+            same_commit(previous)
+        ):
+            if tombstone is None:
+                self.motion_authority_delivery_gap_tombstone = previous
+            return
+        if (
+            previous is not None
+            and int(previous.plan_generation) == plan_generation
+        ):
+            # A newer PP identity from the same committed generation cannot
+            # renew or replace the held N snapshot.  The timer-side gap hold
+            # continues to use ``previous`` until the exact successor tuple
+            # completes.
+            return
+        constraint_state = self._coerce_safety_constraint_state(constraint)
+        plan_stamp_ns = int(plan_identity[6])
+        constraint_header_stamp_ns = (
+            int(constraint_state.header_stamp_ns)
+        )
+        plan_entry = self.overtake_plan_contract_cache.get(
+            (plan_generation, plan_stamp_ns)
+        )
+        constraint_entry = self.safety_constraint_contract_cache.get(
+            (plan_generation, constraint_header_stamp_ns)
+        )
+        envelope_record = self.pure_pursuit_envelope_cache.get(
+            envelope_identity
+        )
+        tracking_receipt_time_sec = (
+            selected_sample.authority_proof_receipt_time_sec
+            if selected_sample is not None
+            else None
+        )
+        if (
+            selected_sample is not None
+            and selected_sample.authority_proof_identity is not None
+        ):
+            tracking_entry = self.pure_pursuit_tracking_status_cache.get(
+                selected_sample.authority_proof_identity
+            )
+            if tracking_entry is not None:
+                # Keep the PP tracking proof's own receipt lease separate from
+                # the envelope receipt that happened to construct it.
+                tracking_receipt_time_sec = float(tracking_entry[1])
+        if tracking_receipt_time_sec is None and selected_sample is not None:
+            tracking_receipt_time_sec = selected_sample.command_receipt_time_sec
+        if tracking_receipt_time_sec is None:
+            tracking_receipt_time_sec = self.pure_pursuit_tracking_status_time_sec
+        command_receipt_time_sec = (
+            selected_sample.command_receipt_time_sec
+            if selected_sample is not None
+            else None
+        )
+        if command_receipt_time_sec is None:
+            command_receipt_time_sec = self.pure_pursuit_cmd_time_sec
+        committed = MotionAuthorityDeliveryGapLease(
+            plan_generation=plan_generation,
+            plan_identity=tuple(plan_identity),
+            constraint=constraint_state,
+            envelope=copy.deepcopy(envelope),
+            final_command=copy.deepcopy(final_command),
+            acquired_steady_time_sec=float(now_sec),
+            plan_receipt_time_sec=(
+                float(plan_entry[1])
+                if plan_entry is not None
+                else (
+                    float(self.overtake_plan_time_sec)
+                    if self.overtake_plan_time_sec is not None
+                    else None
+                )
+            ),
+            constraint_receipt_time_sec=(
+                float(constraint_entry[1])
+                if constraint_entry is not None
+                else (
+                    float(self.safety_constraint_time_sec)
+                    if self.safety_constraint_time_sec is not None
+                    else None
+                )
+            ),
+            tracking_receipt_time_sec=(
+                float(tracking_receipt_time_sec)
+                if tracking_receipt_time_sec is not None
+                else None
+            ),
+            envelope_receipt_time_sec=(
+                float(envelope_record[1])
+                if envelope_record is not None
+                else (
+                    float(self.pure_pursuit_envelope_last_receipt_time_sec)
+                    if self.pure_pursuit_envelope_last_receipt_time_sec
+                    is not None
+                    else None
+                )
+            ),
+            command_receipt_time_sec=(
+                float(command_receipt_time_sec)
+                if command_receipt_time_sec is not None
+                else None
+            ),
+            plan_header_stamp_ns=plan_stamp_ns,
+            constraint_header_stamp_ns=constraint_header_stamp_ns,
+            tracking_header_stamp_ns=(
+                int(selected_sample.authority_proof_identity[0])
+                if selected_sample is not None
+                and selected_sample.authority_proof_identity is not None
+                else None
+            ),
+            envelope_header_stamp_ns=self._stamp_ns(envelope.header.stamp),
+            command_header_stamp_ns=self._stamp_ns(final_command.stamp),
+            plan_lateral_stop_fingerprint=(
+                self.overtake_plan_lateral_stop_fingerprint_cache.get(
+                    plan_generation
+                )
+            ),
+            constraint_payload_fingerprint=(
+                self._motion_constraint_payload_fingerprint(constraint_state)
+            ),
+        )
+        self.motion_authority_delivery_gap_lease = committed
+        self.motion_authority_delivery_gap_tombstone = committed
 
     def _capture_motion_authority_warmup_proof(
         self,
@@ -4558,6 +5453,7 @@ class HybridControlMuxNode(Node):
             "pp_command_sequence": int(envelope.command_sequence),
             "pp_command_stamp": copy.deepcopy(envelope.header.stamp),
             "receipt_time_sec": float(now_sec),
+            "continuity_time_sec": float(now_sec),
         }
         return True
 
@@ -4663,6 +5559,7 @@ class HybridControlMuxNode(Node):
             self.finish_stop_latch.observe_vehicle_state(str(msg.data))
             if self.finish_stop_latch.latched and not was_latched:
                 self.motion_authority_warmup_proof = None
+                self._invalidate_motion_authority_delivery_gap_lease()
                 self._invalidate_verified_stop_steering()
                 self._snapshot_finish_terminal_reference()
                 self._invalidate_free_run_live_exact_record("finish_latched")
@@ -4681,10 +5578,54 @@ class HybridControlMuxNode(Node):
             frame_id=str(msg.header.frame_id),
             reason=str(msg.reason),
         )
+        constraint_contract_key = (
+            int(constraint.plan_generation),
+            int(header_stamp_ns),
+        )
+        cached_contract_entry = self.safety_constraint_contract_cache.get(
+            constraint_contract_key
+        )
+        same_stamp_payload_conflict = bool(
+            cached_contract_entry is not None
+            and self._motion_constraint_payload_fingerprint(
+                cached_contract_entry[0]
+            )
+            != self._motion_constraint_payload_fingerprint(constraint)
+        )
+        if same_stamp_payload_conflict:
+            # Same identity with a different payload is a tainted contract;
+            # never leave the original cached release available for a later
+            # exact PP switch.
+            self.safety_constraint_contract_cache.pop(
+                constraint_contract_key, None
+            )
+            cached_latest_entry = self.safety_constraint_cache.get(
+                int(constraint.plan_generation)
+            )
+            if (
+                cached_latest_entry is not None
+                and int(cached_latest_entry[0].header_stamp_ns)
+                == int(header_stamp_ns)
+            ):
+                self.safety_constraint_cache.pop(
+                    int(constraint.plan_generation), None
+                )
+            self._invalidate_motion_authority_delivery_gap_lease()
+        previous_constraint_header_stamp_ns = (
+            self.safety_constraint_header_stamp_ns
+        )
         self.safety_constraint = constraint
         self.safety_constraint_timestamp_regressed = bool(
-            self.safety_constraint_header_stamp_ns is not None
-            and header_stamp_ns < self.safety_constraint_header_stamp_ns
+            same_stamp_payload_conflict
+            or (
+                previous_constraint_header_stamp_ns is not None
+                and header_stamp_ns < previous_constraint_header_stamp_ns
+            )
+            or (
+                self.safety_constraint_timestamp_regressed
+                and previous_constraint_header_stamp_ns is not None
+                and header_stamp_ns <= previous_constraint_header_stamp_ns
+            )
         )
         (
             receipt_time_sec,
@@ -4697,11 +5638,61 @@ class HybridControlMuxNode(Node):
         )
         self.safety_constraint_time_sec = receipt_time_sec
         self.safety_constraint_header_stamp_ns = maximum_stamp_ns
+        delivery_gap_lease = self.motion_authority_delivery_gap_lease
+        if delivery_gap_lease is not None:
+            committed_constraint_state = self._coerce_safety_constraint_state(
+                delivery_gap_lease.constraint
+            )
+            committed_constraint_stamp_ns = (
+                int(delivery_gap_lease.constraint_header_stamp_ns)
+                if delivery_gap_lease.constraint_header_stamp_ns is not None
+                else int(committed_constraint_state.header_stamp_ns)
+            )
+            committed_constraint_fingerprint = (
+                delivery_gap_lease.constraint_payload_fingerprint
+                if delivery_gap_lease.constraint_payload_fingerprint is not None
+                else self._motion_constraint_payload_fingerprint(
+                    committed_constraint_state
+                )
+            )
+            if (
+                int(constraint.plan_generation)
+                == int(delivery_gap_lease.plan_generation)
+                and int(header_stamp_ns) == committed_constraint_stamp_ns
+                and self._motion_constraint_payload_fingerprint(constraint)
+                != committed_constraint_fingerprint
+            ):
+                self._invalidate_motion_authority_delivery_gap_lease()
+                delivery_gap_lease = None
+        if delivery_gap_lease is not None:
+            direct_successor = (
+                1
+                if int(delivery_gap_lease.plan_generation) >= 16_777_215
+                else int(delivery_gap_lease.plan_generation) + 1
+            )
+            if int(constraint.plan_generation) in (
+                int(delivery_gap_lease.plan_generation),
+                direct_successor,
+            ) and (
+                not self._motion_release_constraint_valid(
+                    constraint,
+                    receipt_time_sec=receipt_time_sec,
+                    now_sec=self.now_sec(),
+                    expected_generation=int(constraint.plan_generation),
+                    expected_stamp_ns=header_stamp_ns,
+                )
+                or float(constraint.speed_limit_mps)
+                < float(delivery_gap_lease.constraint.speed_limit_mps)
+                or float(constraint.required_brake_decel_mps2)
+                > float(delivery_gap_lease.constraint.required_brake_decel_mps2)
+            ):
+                self._invalidate_motion_authority_delivery_gap_lease()
         if (
             not constraint.valid
             or constraint.stop_requested
             or self.safety_constraint_timestamp_regressed
         ):
+            self._invalidate_motion_authority_delivery_gap_lease()
             self._invalidate_free_run_live_exact_record(
                 "safety_constraint_barrier"
             )
@@ -4721,6 +5712,50 @@ class HybridControlMuxNode(Node):
 
     def on_overtake_plan(self, msg: OvertakePlan) -> None:
         header_stamp_ns = self._stamp_ns(msg.header.stamp)
+        delivery_gap_lease = self.motion_authority_delivery_gap_lease
+        if (
+            delivery_gap_lease is not None
+            and int(msg.plan_generation) == int(delivery_gap_lease.plan_generation)
+        ):
+            incoming_identity = (
+                int(msg.race_arm_epoch),
+                int(msg.planner_instance_id),
+                int(msg.attempt_id),
+                str(msg.target_vehicle_id),
+                int(msg.pass_direction),
+                int(msg.connector_transaction_id),
+                int(header_stamp_ns),
+                int(msg.plan_generation),
+                int(msg.phase),
+                int(msg.candidate_revision),
+                bytes(msg.candidate_content_sha256),
+                bool(msg.aw2_identity_schema_version == 1),
+            )
+            committed_fingerprint = (
+                delivery_gap_lease.plan_lateral_stop_fingerprint
+                or self.overtake_plan_lateral_stop_fingerprint_cache.get(
+                    int(msg.plan_generation)
+                )
+            )
+            incoming_fingerprint = self._overtake_plan_lateral_stop_fingerprint(
+                msg
+            )
+            if (
+                tuple(incoming_identity) != tuple(delivery_gap_lease.plan_identity)
+                or (
+                    committed_fingerprint is not None
+                    and incoming_fingerprint != committed_fingerprint
+                )
+                or str(msg.header.frame_id) != "map"
+                or str(msg.trajectory.header.frame_id)
+                != str(msg.header.frame_id)
+                or self._stamp_ns(msg.trajectory.header.stamp)
+                != header_stamp_ns
+            ):
+                # This check is intentionally before the normal monotonic
+                # callback gate: a same-generation mutation arriving with an
+                # older stamp must still revoke committed N immediately.
+                self._invalidate_motion_authority_delivery_gap_lease()
         if self.free_run_live_exact_observe_enabled:
             computed_free_run_digest = self._canonical_free_run_plan_digest(msg)
             claimed_free_run_digest = bytes(
@@ -4923,35 +5958,7 @@ class HybridControlMuxNode(Node):
                     for point in msg.trajectory.points
                 )
                 lateral_stop_fingerprint = (
-                    bool(msg.trajectory_authorized),
-                    bool(msg.lateral_maneuver_required),
-                    int(msg.attempt_id),
-                    str(msg.target_vehicle_id),
-                    int(msg.phase),
-                    int(msg.pass_direction),
-                    int(msg.lateral_stop_authority_kind),
-                    int(msg.lateral_stop_transaction_pass_direction),
-                    int(msg.lateral_stop_authority_token),
-                    tuple(
-                        (
-                            int(point.time_from_start.sec),
-                            int(point.time_from_start.nanosec),
-                            float(point.pose.position.x),
-                            float(point.pose.position.y),
-                            float(point.pose.position.z),
-                            float(point.pose.orientation.x),
-                            float(point.pose.orientation.y),
-                            float(point.pose.orientation.z),
-                            float(point.pose.orientation.w),
-                            float(point.longitudinal_velocity_mps),
-                            float(point.lateral_velocity_mps),
-                            float(point.acceleration_mps2),
-                            float(point.heading_rate_rps),
-                            float(point.front_wheel_angle_rad),
-                            float(point.rear_wheel_angle_rad),
-                        )
-                        for point in msg.trajectory.points
-                    ),
+                    self._overtake_plan_lateral_stop_fingerprint(msg)
                 )
                 previous_trajectory_xy = self.overtake_plan_trajectory_cache.get(
                     self.overtake_plan_generation
@@ -4972,6 +5979,29 @@ class HybridControlMuxNode(Node):
                     self.overtake_plan_lateral_stop_taint_cache[
                         self.overtake_plan_generation
                     ] = True
+                delivery_gap_lease = (
+                    self.motion_authority_delivery_gap_lease
+                )
+                if (
+                    delivery_gap_lease is not None
+                    and int(delivery_gap_lease.plan_generation)
+                    == int(self.overtake_plan_generation)
+                    and (
+                        not self.overtake_plan_valid
+                        or
+                        tuple(motion_identity)
+                        != tuple(delivery_gap_lease.plan_identity)
+                        or bool(
+                            self.overtake_plan_lateral_stop_taint_cache.get(
+                                self.overtake_plan_generation, False
+                            )
+                        )
+                    )
+                ):
+                    # The committed N identity is immutable. A same-
+                    # generation plan/trajectory mutation is a hard negative,
+                    # even if the callback is otherwise structurally valid.
+                    self._invalidate_motion_authority_delivery_gap_lease()
                 self._remember_bounded(
                     self.overtake_plan_trajectory_cache,
                     self.overtake_plan_generation,
@@ -5170,6 +6200,95 @@ class HybridControlMuxNode(Node):
         authority_plan_generation = (
             safety_authority_selection.authority_plan_generation
         )
+        active_control_fault_reason = ""
+        if watchdog.deadline_missed:
+            active_control_fault_reason = "control_loop_deadline_missed"
+        elif ros_clock_watchdog.stalled:
+            active_control_fault_reason = ros_clock_watchdog.reason
+
+        # Validate a direct successor delivery gap before touching the shared
+        # authority latch.  If this is the N+1 preview, evaluate committed N
+        # below; the preview itself is pure and cannot advance the latch.
+        lease_sample_candidate: Optional[PurePursuitMotionSample] = None
+        lease_current_generation_hold = False
+        motion_authority_delivery_gap_lease_revoke_stop = False
+        delivery_gap_lease = self.motion_authority_delivery_gap_lease
+        if (
+            delivery_gap_lease is not None
+            and tracking_plan_generation > 0
+            and int(tracking_plan_generation)
+            == int(delivery_gap_lease.plan_generation)
+            and self.overtake_plan_generation is not None
+            and int(self.overtake_plan_generation)
+            == int(delivery_gap_lease.plan_generation)
+            and self.safety_constraint is not None
+            and int(self.safety_constraint.plan_generation)
+            == (
+                1
+                if int(delivery_gap_lease.plan_generation) >= 16_777_215
+                else int(delivery_gap_lease.plan_generation) + 1
+            )
+        ):
+            lease_current_generation_hold = True
+            lease_sample_candidate = (
+                self._direct_motion_authority_successor_lease_sample(
+                    successor_generation=int(tracking_plan_generation),
+                    now_sec=now_sec,
+                    authority_selection=safety_authority_selection,
+                    ros_clock_stalled=ros_clock_watchdog.stalled,
+                    active_control_fault_reason=active_control_fault_reason,
+                    deadline_missed=watchdog.deadline_missed,
+                )
+            )
+        elif (
+            delivery_gap_lease is not None
+            and tracking_plan_generation > 0
+            and int(tracking_plan_generation)
+            == (
+                1
+                if int(delivery_gap_lease.plan_generation) >= 16_777_215
+                else int(delivery_gap_lease.plan_generation) + 1
+            )
+        ):
+            lease_sample_candidate = (
+                self._direct_motion_authority_successor_lease_sample(
+                    successor_generation=int(tracking_plan_generation),
+                    now_sec=now_sec,
+                    authority_selection=safety_authority_selection,
+                    ros_clock_stalled=ros_clock_watchdog.stalled,
+                    active_control_fault_reason=active_control_fault_reason,
+                    deadline_missed=watchdog.deadline_missed,
+                )
+            )
+        if (
+            lease_current_generation_hold
+            and delivery_gap_lease is not None
+            and lease_sample_candidate is None
+            and self.motion_authority_delivery_gap_lease is None
+        ):
+            # The direct preview helper revokes the committed N cohort on any
+            # hard negative (expiry, stale receipt, successor mismatch, or
+            # final-command provenance failure).  Do not let the same timer
+            # cycle fall back to a newer cached N sample and mint authority
+            # again; the first post-revoke cycle is an explicit STOP.
+            motion_authority_delivery_gap_lease_revoke_stop = True
+        selected_authority_constraint = authority_constraint
+        selected_authority_constraint_time_sec = authority_constraint_time_sec
+        selected_authority_plan_generation = authority_plan_generation
+        if lease_sample_candidate is not None:
+            delivery_gap_lease = self.motion_authority_delivery_gap_lease
+            if delivery_gap_lease is not None:
+                authority_constraint = copy.deepcopy(
+                    self._coerce_safety_constraint_state(
+                        delivery_gap_lease.constraint
+                    )
+                )
+                authority_constraint_time_sec = self._lease_receipt_time(
+                    delivery_gap_lease, "constraint_receipt_time_sec"
+                )
+                authority_plan_generation = int(
+                    delivery_gap_lease.plan_generation
+                )
         constraint_decision = self.safety_authority.evaluate(
             authority_constraint if self.safety_constraint_enabled else None,
             received_time_sec=(
@@ -5203,16 +6322,12 @@ class HybridControlMuxNode(Node):
                 plan_generation=int(constraint_decision.plan_generation),
                 reason="safety_authority_contract_unpaired",
             )
-        active_control_fault_reason = ""
-        if watchdog.deadline_missed:
-            active_control_fault_reason = "control_loop_deadline_missed"
-        elif ros_clock_watchdog.stalled:
-            active_control_fault_reason = ros_clock_watchdog.reason
         if active_control_fault_reason:
             self.control_fault_latched = True
             self.control_fault_clear_cycles = 0
             self.control_fault_reason = active_control_fault_reason
             self.control_fault_last_release_stamp_ns = None
+            self._invalidate_motion_authority_delivery_gap_lease()
         elif self.control_fault_latched:
             explicit_safe_release = (
                 not constraint_decision.stop_required
@@ -5272,6 +6387,7 @@ class HybridControlMuxNode(Node):
             or self.control_fault_latched
             or self.external_stop_latched
             or self.finish_stop_latch.latched
+            or self.safety_constraint_timestamp_regressed
             or (
                 self.race_arm_required
                 and (
@@ -5361,6 +6477,93 @@ class HybridControlMuxNode(Node):
             ros_clock_stalled=ros_clock_watchdog.stalled,
             debug_rejection_sink=pp_selection_debug_rejections,
         )
+        current_plan_entry = self.overtake_plan_cache.get(
+            int(tracking_plan_generation)
+        )
+        passing_previous_sample = bool(
+            selected_pp_motion_sample is not None
+            and selected_pp_motion_sample.authority_proof is not None
+            and current_plan_entry is not None
+            and int(current_plan_entry[5]) == int(OvertakePlan.PASSING)
+            and int(selected_pp_motion_sample.authority_proof.plan_generation)
+            != int(tracking_plan_generation)
+        )
+        if passing_previous_sample:
+            # Cache selection remains available to the historic STOP and
+            # ATTACK_FOLLOW paths, but a PASSING predecessor cannot become
+            # positive motion unless the dedicated committed lease below
+            # accepts this exact successor gap.
+            selected_pp_motion_sample = None
+        if selected_pp_motion_sample is None:
+            selected_pp_motion_sample = (
+                self._select_pass_warmup_acquisition_sample(
+                    tracking_plan_generation=tracking_plan_generation,
+                    now_sec=now_sec,
+                    ros_clock_stalled=ros_clock_watchdog.stalled,
+                )
+            )
+        if motion_authority_delivery_gap_lease_revoke_stop:
+            selected_pp_motion_sample = None
+        motion_authority_delivery_gap_lease_active = False
+        if (
+            lease_current_generation_hold
+            and lease_sample_candidate is not None
+            and self.motion_authority_delivery_gap_lease is not None
+        ):
+            lease = self.motion_authority_delivery_gap_lease
+            # A constraint-first N+1 preview must keep the immutable N sample
+            # ahead of any newer same-generation envelope in the cache.
+            selected_pp_motion_sample = lease_sample_candidate
+            tracking_plan_generation = int(lease.plan_generation)
+            authority_plan_generation = int(lease.plan_generation)
+            authority_constraint = self._coerce_safety_constraint_state(
+                lease.constraint
+            )
+            authority_constraint_time_sec = self._lease_receipt_time(
+                lease, "constraint_receipt_time_sec"
+            )
+            motion_authority_delivery_gap_lease_active = True
+        elif selected_pp_motion_sample is None and lease_sample_candidate is not None:
+            lease = self.motion_authority_delivery_gap_lease
+            if lease is not None:
+                # Use the exact committed N tuple verbatim.  N+1 remains
+                # unpaired and is never relabelled as this command.
+                selected_pp_motion_sample = lease_sample_candidate
+                tracking_plan_generation = int(lease.plan_generation)
+                authority_plan_generation = int(lease.plan_generation)
+                authority_constraint = self._coerce_safety_constraint_state(
+                    lease.constraint
+                )
+                authority_constraint_time_sec = self._lease_receipt_time(
+                    lease, "constraint_receipt_time_sec"
+                )
+                motion_authority_delivery_gap_lease_active = True
+        elif (
+            lease_sample_candidate is not None
+            and selected_pp_motion_sample is not None
+            and selected_pp_motion_sample.authority_proof is not None
+            and int(selected_pp_motion_sample.authority_proof.plan_generation)
+            == int(tracking_plan_generation)
+            and selected_authority_plan_generation is not None
+            and int(selected_authority_plan_generation)
+            == int(tracking_plan_generation)
+        ):
+            # Exact N+1 PP completes the tuple.  Restore the selector's
+            # authority inputs and advance the shared latch exactly once now;
+            # the earlier preview evaluated neither N+1 nor any successor.
+            authority_constraint = selected_authority_constraint
+            authority_constraint_time_sec = selected_authority_constraint_time_sec
+            authority_plan_generation = selected_authority_plan_generation
+            constraint_decision = self.safety_authority.evaluate(
+                authority_constraint if self.safety_constraint_enabled else None,
+                received_time_sec=(
+                    authority_constraint_time_sec
+                    if self.safety_constraint_enabled
+                    else None
+                ),
+                now_sec=now_sec,
+                active_plan_generation=authority_plan_generation,
+            )
         # Snapshot the selector's local result once.  The measurement record
         # below must not re-read the mutable envelope cache after arbitration.
         selector_watermark_identity = (
@@ -5424,6 +6627,11 @@ class HybridControlMuxNode(Node):
         elif self.control_fault_latched:
             decision_source = "stop"
             reason = self.control_fault_reason or "control_fault_latched"
+            fallback_active = True
+            solved_cycles = 0
+        elif motion_authority_delivery_gap_lease_revoke_stop:
+            decision_source = "stop"
+            reason = "motion_authority_delivery_gap_lease_revoked"
             fallback_active = True
             solved_cycles = 0
         elif (
@@ -5636,6 +6844,47 @@ class HybridControlMuxNode(Node):
             and int(pp_tracking_status.plan_generation)
             == int(tracking_plan_generation)
         )
+        tracking_evidence_generation = (
+            int(pp_tracking_status.plan_generation)
+            if pp_tracking_status is not None
+            else 0
+        )
+        tracking_evidence_identity = (
+            self.overtake_plan_motion_identity_cache.get(
+                tracking_evidence_generation
+            )
+        )
+        current_tracking_identity = (
+            self.overtake_plan_motion_identity_cache.get(
+                int(tracking_plan_generation)
+            )
+            if tracking_plan_generation > 0
+            else None
+        )
+        tracking_generation_distance = (
+            int(tracking_plan_generation) - tracking_evidence_generation
+            if int(tracking_plan_generation) > tracking_evidence_generation
+            else (16_777_215 - tracking_evidence_generation)
+            + int(tracking_plan_generation)
+        )
+        # Replanning may change Cartesian samples while the same target/side
+        # transaction continues. Current Plan/Constraint and command binding
+        # validate that geometry independently; this delivery bridge therefore
+        # follows maneuver identity instead of requiring byte-identical points.
+        tracking_delivery_stable_successor = bool(
+            tracking_evidence_identity is not None
+            and current_tracking_identity is not None
+            and tracking_evidence_generation != int(tracking_plan_generation)
+            and 0 < tracking_generation_distance <= (16_777_215 // 2)
+            and tuple(current_tracking_identity[:6])
+            == tuple(tracking_evidence_identity[:6])
+            and int(current_tracking_identity[6])
+            > int(tracking_evidence_identity[6])
+            and int(current_tracking_identity[8])
+            == int(tracking_evidence_identity[8])
+            and int(current_tracking_identity[9])
+            > int(tracking_evidence_identity[9])
+        )
         matched_pp_tracking_previous_generation_usable = bool(
             pp_tracking_status_fresh
             and pp_tracking_status_valid
@@ -5643,8 +6892,11 @@ class HybridControlMuxNode(Node):
             and bool(pp_tracking_status.pp_command_fresh)
             and bool(pp_tracking_status.trajectory_tracking_usable)
             and tracking_plan_generation > 0
-            and int(pp_tracking_status.plan_generation)
-            == tracking_previous_generation
+            and (
+                int(pp_tracking_status.plan_generation)
+                == tracking_previous_generation
+                or tracking_delivery_stable_successor
+            )
         )
         pp_tracking_delivery_gap_usable = bool(
             not pp_tracking_proof_usable
@@ -6049,6 +7301,7 @@ class HybridControlMuxNode(Node):
             in (
                 "safety_constraint_applied",
                 "safety_constraint_retransmit",
+                "safety_constraint_relaxation_not_authorized",
             )
             and not self.safety_authority_contract_unpaired
             and not self.external_stop_latched
@@ -6061,6 +7314,26 @@ class HybridControlMuxNode(Node):
             lateral_stop_fault_free
             and lateral_stop_plan_authorized
             and constraint_decision_matches_authority
+        )
+        pass_warmup_steering_acquisition_usable = bool(
+            constraint_decision.stop_required
+            and selected_input_source == "pure_pursuit"
+            and pp_cmd_fresh
+            and selected_pp_command_valid
+            and pure_pursuit_command_within_tracking_steering_limit
+            and pp_tracking_status is not None
+            and bool(
+                pp_tracking_status.pass_warmup_steering_acquisition_active
+            )
+            and not bool(pp_tracking_status.pass_warmup_motion_ready)
+            and authority_plan_generation is not None
+            and int(tracking_plan_generation)
+            == int(authority_plan_generation)
+            and lateral_stop_authority_usable
+            and not self.external_stop_latched
+            and not self.control_fault_latched
+            and not active_control_fault_reason
+            and not ros_clock_watchdog.stalled
         )
         maneuver_lateral_stop_tracking_usable = bool(
             constraint_decision.stop_required
@@ -6129,7 +7402,30 @@ class HybridControlMuxNode(Node):
             # retain a Stage-A proof. Any other Planner STOP (including
             # collision/wall/CBF rejection), invalid/stale constraint, or
             # unpaired plan/constraint revokes it immediately.
-            self.motion_authority_warmup_proof = None
+            typed_stop_authority = (
+                self.overtake_plan_lateral_stop_authority_cache.get(
+                    int(authority_plan_generation)
+                )
+                if authority_plan_generation is not None
+                else None
+            )
+            exact_pass_warmup_stop = bool(
+                not self.safety_authority_contract_unpaired
+                and authority_constraint is not None
+                and authority_constraint.valid
+                and authority_constraint.stop_requested
+                and not authority_constraint.release_authorized
+                and typed_stop_authority is not None
+                and int(typed_stop_authority[0])
+                == int(OvertakePlan.LATERAL_STOP_PASS_WARMUP)
+                and int(typed_stop_authority[2]) > 0
+                and bool(typed_stop_authority[7])
+            )
+            if not retain_warmup_proof_in_stop_state(
+                exact_pass_warmup_stop=exact_pass_warmup_stop,
+                rendezvous_state=safety_authority_selection.rendezvous_state,
+            ):
+                self.motion_authority_warmup_proof = None
         baseline_stop_tracking_usable = bool(
             constraint_decision.stop_required
             and constraint_decision.reason
@@ -6386,6 +7682,100 @@ class HybridControlMuxNode(Node):
                 abs_tol=1.0e-9,
             )
         )
+        verified_lateral_generation = (
+            int(self.last_verified_lateral_stop_plan_generation)
+            if self.last_verified_lateral_stop_plan_generation is not None
+            else 0
+        )
+        current_lateral_generation = (
+            int(authority_plan_generation)
+            if authority_plan_generation is not None
+            else 0
+        )
+        verified_lateral_identity = self.overtake_plan_motion_identity_cache.get(
+            verified_lateral_generation
+        )
+        current_lateral_identity = self.overtake_plan_motion_identity_cache.get(
+            current_lateral_generation
+        )
+        verified_lateral_typed = (
+            self.overtake_plan_lateral_stop_authority_cache.get(
+                verified_lateral_generation
+            )
+        )
+        current_lateral_typed = (
+            self.overtake_plan_lateral_stop_authority_cache.get(
+                current_lateral_generation
+            )
+        )
+        lateral_generation_distance = (
+            current_lateral_generation - verified_lateral_generation
+            if current_lateral_generation > verified_lateral_generation
+            else (16_777_215 - verified_lateral_generation)
+            + current_lateral_generation
+        )
+        # This bridge can retain only an already verified steering angle while
+        # longitudinal STOP remains asserted. Maneuver identity and typed token
+        # continuity are required below; replanned point equality is not.
+        lateral_hold_stable_successor = bool(
+            verified_lateral_identity is not None
+            and current_lateral_identity is not None
+            and verified_lateral_generation != current_lateral_generation
+            and 0 < lateral_generation_distance <= (16_777_215 // 2)
+            and tuple(current_lateral_identity[:6])
+            == tuple(verified_lateral_identity[:6])
+            and int(current_lateral_identity[6])
+            > int(verified_lateral_identity[6])
+            and int(current_lateral_identity[8])
+            == int(OvertakePlan.PASSING)
+            and int(current_lateral_identity[9])
+            > int(verified_lateral_identity[9])
+        )
+        lateral_hold_generation_continuous = bool(
+            verified_lateral_generation == current_lateral_generation
+            or lateral_hold_stable_successor
+        )
+        pass_warmup_acquisition_steering_hold_usable = bool(
+            constraint_decision.stop_required
+            and constraint_decision.reason
+            in (
+                "safety_constraint_applied",
+                "safety_constraint_retransmit",
+                "safety_constraint_relaxation_not_authorized",
+            )
+            and not self.safety_authority_contract_unpaired
+            and authority_constraint is not None
+            and authority_constraint.valid
+            and authority_constraint.stop_requested
+            and not authority_constraint.release_authorized
+            and int(authority_constraint.plan_generation)
+            == current_lateral_generation
+            and current_lateral_identity is not None
+            and int(authority_constraint.header_stamp_ns)
+            == int(current_lateral_identity[6])
+            and current_lateral_typed is not None
+            and int(current_lateral_typed[0])
+            == int(OvertakePlan.LATERAL_STOP_PASS_WARMUP)
+            and int(current_lateral_typed[2]) > 0
+            and bool(current_lateral_typed[7])
+            and verified_lateral_typed is not None
+            and int(verified_lateral_typed[0])
+            == int(OvertakePlan.LATERAL_STOP_PASS_WARMUP)
+            and int(verified_lateral_typed[1]) == int(current_lateral_typed[1])
+            and int(verified_lateral_typed[2]) == int(current_lateral_typed[2])
+            and lateral_hold_generation_continuous
+            and self.last_verified_lateral_stop_steering_rad is not None
+            and math.isfinite(self.last_verified_lateral_stop_steering_rad)
+            and math.isfinite(last_verified_lateral_stop_steering_age_sec)
+            and 0.0 <= last_verified_lateral_stop_steering_age_sec
+            <= self.lateral_stop_steering_hold_timeout_sec
+            and not self.external_stop_latched
+            and not self.finish_stop_latch.latched
+            and not self.control_fault_latched
+            and not active_control_fault_reason
+            and not ros_clock_watchdog.stalled
+            and not watchdog.deadline_missed
+        )
         maneuver_lateral_stop_steering_hold_usable = bool(
             constraint_decision.stop_required
             and not lateral_stop_tracking_usable
@@ -6410,11 +7800,7 @@ class HybridControlMuxNode(Node):
                 )
             )
             and self.last_verified_lateral_stop_plan_generation is not None
-            and int(self.last_verified_lateral_stop_plan_generation)
-            in (
-                int(authority_plan_generation) - 1,
-                int(authority_plan_generation),
-            )
+            and lateral_hold_generation_continuous
             and self.last_verified_lateral_stop_steering_rad is not None
             and math.isfinite(self.last_verified_lateral_stop_steering_rad)
             and math.isfinite(last_verified_lateral_stop_steering_age_sec)
@@ -6485,6 +7871,7 @@ class HybridControlMuxNode(Node):
         lateral_stop_steering_hold_usable = bool(
             maneuver_lateral_stop_steering_hold_usable
             or baseline_stop_steering_hold_usable
+            or pass_warmup_acquisition_steering_hold_usable
         )
         planner_stop_release_contract_ready = bool(
             constraint_decision.stop_required
@@ -6582,6 +7969,16 @@ class HybridControlMuxNode(Node):
                 plan_generation=int(constraint_decision.plan_generation),
                 reason="controller_tracking_generation_unverified",
             )
+        if (
+            pass_warmup_acquisition_steering_hold_usable
+            and decision_source == "stop"
+        ):
+            cmd = self._stop_command(now_sec)
+            cmd.lateral.steering_tire_angle = float(
+                self.last_verified_lateral_stop_steering_rad
+            )
+            decision_source = "pure_pursuit"
+            reason = "pass_warmup_acquisition_delivery_gap_hold"
         if self.safety_constraint_enabled:
             cmd, decision_source, reason = self._apply_safety_constraint(
                 cmd,
@@ -6589,10 +7986,16 @@ class HybridControlMuxNode(Node):
                 reason,
                 constraint_decision,
                 now_sec,
-                lateral_tracking_usable=lateral_stop_tracking_usable,
+                lateral_tracking_usable=(
+                    lateral_stop_tracking_usable
+                    or pass_warmup_steering_acquisition_usable
+                ),
                 lateral_hold_steering_rad=(
                     self.last_verified_lateral_stop_steering_rad
-                    if maneuver_lateral_stop_steering_hold_usable
+                    if (
+                        maneuver_lateral_stop_steering_hold_usable
+                        or pass_warmup_acquisition_steering_hold_usable
+                    )
                     else (
                         self.last_verified_baseline_stop_steering_rad
                         if baseline_stop_steering_hold_usable
@@ -6760,6 +8163,31 @@ class HybridControlMuxNode(Node):
         motion_authority_grant_published_reason = ""
         pass_motion_grant_commit_steady_ns = -1
         if pass_motion_grant_required:
+            grant_tracking_plan_generation = int(tracking_plan_generation)
+            grant_authority_plan_generation = authority_plan_generation
+            grant_authority_constraint = authority_constraint
+            if (
+                motion_pp_tracking_continuity_usable
+                and selected_pp_motion_sample is not None
+                and selected_pp_motion_sample.authority_proof is not None
+            ):
+                # The selected command remains the older fully coherent
+                # Plan/Constraint/PP tuple.  The continuity predicate above
+                # has independently required the latest exact released
+                # successor as an additional safety guard; do not relabel the
+                # older envelope as that newer generation.
+                continuity_generation = int(
+                    selected_pp_motion_sample.authority_proof.plan_generation
+                )
+                continuity_constraint_entry = (
+                    self.safety_constraint_cache.get(continuity_generation)
+                )
+                if continuity_constraint_entry is not None:
+                    grant_tracking_plan_generation = continuity_generation
+                    grant_authority_plan_generation = continuity_generation
+                    grant_authority_constraint = (
+                        continuity_constraint_entry[0]
+                    )
             (
                 pass_motion_grant_valid,
                 pass_motion_grant_reason,
@@ -6768,9 +8196,9 @@ class HybridControlMuxNode(Node):
             ) = self._motion_authority_grant_eligible(
                 final_command=cmd,
                 selected_sample=selected_pp_motion_sample,
-                tracking_plan_generation=tracking_plan_generation,
-                authority_plan_generation=authority_plan_generation,
-                authority_constraint=authority_constraint,
+                tracking_plan_generation=grant_tracking_plan_generation,
+                authority_plan_generation=grant_authority_plan_generation,
+                authority_constraint=grant_authority_constraint,
                 constraint_decision=constraint_decision,
                 decision_source=decision_source,
                 now_sec=now_sec,
@@ -6778,6 +8206,7 @@ class HybridControlMuxNode(Node):
                 ros_clock_stalled=ros_clock_watchdog.stalled,
                 deadline_missed=watchdog.deadline_missed,
                 steering_result=steering_result,
+                delivery_gap_lease_active=motion_authority_delivery_gap_lease_active,
             )
             if not pass_motion_grant_valid:
                 cmd = self._stop_command(now_sec)
@@ -6813,18 +8242,27 @@ class HybridControlMuxNode(Node):
             and pp_cmd_fresh
             and selected_pp_command_valid
             and pure_pursuit_command_within_tracking_steering_limit
-            and pp_tracking_proof_usable
-            and lateral_stop_tracking_usable
+            and (
+                (
+                    pp_tracking_proof_usable
+                    and lateral_stop_tracking_usable
+                )
+                or pass_warmup_steering_acquisition_usable
+            )
             and math.isfinite(steering_result.limited_steering_rad)
             and not self.external_stop_latched
             and not self.control_fault_latched
             and not active_control_fault_reason
         ):
-            self.last_verified_tracking_steering_rad = (
-                steering_result.limited_steering_rad
-            )
-            self.last_verified_tracking_steering_time_sec = now_sec
-            if maneuver_lateral_stop_tracking_usable:
+            if pp_tracking_proof_usable and lateral_stop_tracking_usable:
+                self.last_verified_tracking_steering_rad = (
+                    steering_result.limited_steering_rad
+                )
+                self.last_verified_tracking_steering_time_sec = now_sec
+            if (
+                maneuver_lateral_stop_tracking_usable
+                or pass_warmup_steering_acquisition_usable
+            ):
                 self.last_verified_lateral_stop_steering_rad = (
                     steering_result.limited_steering_rad
                 )
@@ -6853,12 +8291,29 @@ class HybridControlMuxNode(Node):
             # The typed message is observability for an internal commit. It is
             # deliberately published before the exact bound positive command,
             # but is never consumed back into Mux as authority.
+            if (
+                not motion_authority_delivery_gap_lease_active
+                and pass_motion_grant_envelope is not None
+                and pass_motion_grant_identity is not None
+                and grant_authority_constraint is not None
+            ):
+                # Mint only after all exact checks, including final limiter
+                # binding, succeeded.  The helper preserves acquisition time
+                # for a timer-republished identical commit.
+                self._commit_motion_authority_delivery_gap_lease(
+                    plan_identity=pass_motion_grant_identity,
+                    constraint=grant_authority_constraint,
+                    envelope=pass_motion_grant_envelope,
+                    final_command=cmd,
+                    now_sec=now_sec,
+                    selected_sample=selected_pp_motion_sample,
+                )
             self._publish_motion_authority_grant(
                 valid=True,
                 reason="committed",
                 envelope=pass_motion_grant_envelope,
                 plan_identity=pass_motion_grant_identity,
-                constraint=authority_constraint,
+                constraint=grant_authority_constraint,
                 final_command=cmd,
             )
             if self.mux_runtime_measurement_enabled:
@@ -7421,12 +8876,16 @@ class HybridControlMuxNode(Node):
             tracking_status.reason = "final_source_not_pure_pursuit"
         elif constraint_decision.stop_required:
             tracking_status.reason = (
-                "longitudinal_safety_stop_with_lateral_tracking"
-                if lateral_stop_tracking_usable
+                "pass_warmup_zero_speed_steering_acquisition"
+                if pass_warmup_steering_acquisition_usable
                 else (
-                    "longitudinal_safety_stop_with_lateral_hold"
-                    if lateral_stop_steering_hold_usable
-                    else "safety_constraint_stop"
+                    "longitudinal_safety_stop_with_lateral_tracking"
+                    if lateral_stop_tracking_usable
+                    else (
+                        "longitudinal_safety_stop_with_lateral_hold"
+                        if lateral_stop_steering_hold_usable
+                        else "safety_constraint_stop"
+                    )
                 )
             )
         elif pp_tracking_status is None:
@@ -7651,6 +9110,53 @@ class HybridControlMuxNode(Node):
             for entry in self.safety_constraint_contract_cache.values()
         ]
         latest_constraint = self.safety_constraint
+        latest_constraint_generation = (
+            int(latest_constraint.plan_generation)
+            if latest_constraint is not None
+            else 0
+        )
+        latest_constraint_identity = (
+            self.overtake_plan_motion_identity_cache.get(
+                latest_constraint_generation
+            )
+        )
+        tracking_plan_identity = (
+            self.overtake_plan_motion_identity_cache.get(
+                int(tracking_plan_generation)
+            )
+            if tracking_plan_generation >= 0
+            else None
+        )
+        stable_release_delivery_successor = bool(
+            latest_constraint is not None
+            and latest_constraint.valid
+            and not latest_constraint.stop_requested
+            and latest_constraint.release_authorized
+            and latest_constraint_identity is not None
+            and tracking_plan_identity is not None
+            and latest_constraint_generation != int(tracking_plan_generation)
+            and tuple(tracking_plan_identity[:6])
+            == tuple(latest_constraint_identity[:6])
+            and int(tracking_plan_identity[6])
+            > int(latest_constraint_identity[6])
+            and int(tracking_plan_identity[8])
+            == int(latest_constraint_identity[8])
+            == int(OvertakePlan.PASSING)
+            and int(tracking_plan_identity[9])
+            > int(latest_constraint_identity[9])
+            and bytes(tracking_plan_identity[10])
+            == bytes(latest_constraint_identity[10])
+            and tuple(
+                self.overtake_plan_trajectory_cache.get(
+                    int(tracking_plan_generation), ()
+                )
+            )
+            == tuple(
+                self.overtake_plan_trajectory_cache.get(
+                    latest_constraint_generation, ()
+                )
+            )
+        )
         plan_generation_regressed = bool(
             tracking_plan_generation >= 0
             and cached_plan_generations
@@ -7697,6 +9203,7 @@ class HybridControlMuxNode(Node):
                     - int(tracking_plan_generation)
                 )
                 > 1
+                and not stable_release_delivery_successor
             )
         ):
             base_rendezvous_state = (
@@ -7793,11 +9300,15 @@ class HybridControlMuxNode(Node):
             and latest_constraint is not None
             and latest_constraint.valid
             and not latest_constraint.stop_requested
-            and abs(
-                int(latest_constraint.plan_generation)
-                - int(tracking_plan_generation)
+            and latest_constraint.release_authorized
+            and (
+                abs(
+                    int(latest_constraint.plan_generation)
+                    - int(tracking_plan_generation)
+                )
+                <= 1
+                or stable_release_delivery_successor
             )
-            <= 1
             and (
                 int(latest_constraint.plan_generation)
                 != int(tracking_plan_generation)
@@ -7815,24 +9326,64 @@ class HybridControlMuxNode(Node):
             else base_rendezvous_state
         )
         if latest_constraint is not None:
+            if (
+                self.safety_constraint_timestamp_regressed
+                and matched_constraint is not None
+            ):
+                return SafetyAuthoritySelection(
+                    matched_constraint,
+                    matched_constraint_time_sec,
+                    matched_plan_generation,
+                    SafetyAuthorityRendezvousState.REGRESSION_OR_GAP,
+                )
+            if self.safety_constraint_timestamp_regressed and matched_entries:
+                # A same-identity payload conflict is a supervisory STOP
+                # barrier.  Keep the last exact historical cohort as the
+                # authority input so evaluating this tainted successor cannot
+                # advance the shared latch before a newer identity recovers.
+                (
+                    _,
+                    historical_constraint,
+                    historical_time_sec,
+                    historical_plan_generation,
+                ) = max(matched_entries, key=lambda entry: (entry[0], entry[3]))
+                return SafetyAuthoritySelection(
+                    historical_constraint,
+                    historical_time_sec,
+                    historical_plan_generation,
+                    SafetyAuthorityRendezvousState.REGRESSION_OR_GAP,
+                )
             must_apply_immediately = bool(
                 self.safety_constraint_timestamp_regressed
                 or not latest_constraint.valid
                 or latest_constraint.stop_requested
+                or not latest_constraint.release_authorized
             )
             if matched_constraint is not None:
-                strictly_non_relaxing = bool(
+                latest_constraint_well_formed = bool(
+                    self.safety_authority._valid(latest_constraint)
+                )
+                strict_tightening = bool(
                     latest_constraint.speed_limit_mps
-                    <= matched_constraint.speed_limit_mps
-                    and latest_constraint.required_brake_decel_mps2
-                    >= matched_constraint.required_brake_decel_mps2
+                    < matched_constraint.speed_limit_mps
+                    or latest_constraint.required_brake_decel_mps2
+                    > matched_constraint.required_brake_decel_mps2
+                )
+                unpaired_release_successor = bool(
+                    normal_delivery_gap
+                    and int(latest_constraint.plan_generation)
+                    != int(tracking_plan_generation)
                 )
                 must_apply_immediately = bool(
                     must_apply_immediately
                     or (
                         latest_constraint.constraint_generation
                         > matched_constraint.constraint_generation
-                        and strictly_non_relaxing
+                        and (
+                            not latest_constraint_well_formed
+                            or strict_tightening
+                            or not unpaired_release_successor
+                        )
                     )
                 )
             if must_apply_immediately:
@@ -7847,6 +9398,30 @@ class HybridControlMuxNode(Node):
                         else SafetyAuthorityRendezvousState.REGRESSION_OR_GAP
                     ),
                 )
+
+        # A valid, non-tightening successor constraint may arrive before its
+        # plan.  The current exact N pair remains authoritative in that
+        # interval; do not label it as an unpaired STOP or advance the shared
+        # latch to the constraint-only N+1 preview.
+        if (
+            matched_constraint is not None
+            and normal_delivery_gap
+            and latest_constraint is not None
+            and int(latest_constraint.plan_generation)
+            != int(tracking_plan_generation)
+        ):
+            if self.motion_authority_delivery_gap_lease is None:
+                self.safety_authority_contract_unpaired = True
+            return SafetyAuthoritySelection(
+                matched_constraint,
+                matched_constraint_time_sec,
+                matched_plan_generation,
+                (
+                    SafetyAuthorityRendezvousState.EXACT_CURRENT
+                    if self.motion_authority_delivery_gap_lease is not None
+                    else SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP
+                ),
+            )
 
         if matched_constraint is not None and not normal_delivery_gap:
             return SafetyAuthoritySelection(
@@ -7971,35 +9546,50 @@ class HybridControlMuxNode(Node):
             and transaction_pass_direction == published_pass_direction
             and str(constraint.reason).strip() == "release_pending_safe_cycles"
         )
-        return bool(
-            plan_valid
-            and trajectory_authorized
-            and lateral_maneuver_required
-            and typed_immutable
-            and typed_phase == phase
-            and typed_published_pass_direction == published_pass_direction
-            and attempt_id > 0
-            and bool(str(target_vehicle_id).strip())
-            and typed_target_vehicle_id == target_vehicle_id
-            and authority_token > 0
-            and (current_d_hold or pass_warmup)
-            and constraint.valid
-            and constraint.stop_requested
-            and not constraint.release_authorized
-            and int(constraint.plan_generation) == int(plan_generation)
-            and int(constraint.header_stamp_ns) == int(plan_stamp_ns)
-            and int(tracking_status.plan_generation) == int(plan_generation)
-            and bool(tracking_status.trajectory_tracking_usable)
-            and int(tracking_status.lateral_stop_authority_kind)
-            == authority_kind
-            and int(tracking_status.lateral_stop_transaction_pass_direction)
-            == transaction_pass_direction
-            and int(tracking_status.lateral_stop_authority_token)
-            == authority_token
-            and self._fresh(
-                plan_time_sec, now_sec, self.overtake_plan_timeout_sec
+        tracking_or_warmup_acquisition = bool(
+            tracking_status.trajectory_tracking_usable
+            or (
+                pass_warmup
+                and tracking_status.pass_warmup_steering_acquisition_active
+                and not tracking_status.pass_warmup_motion_ready
             )
         )
+        checks = {
+            "plan_valid": plan_valid,
+            "trajectory_authorized": trajectory_authorized,
+            "lateral_maneuver_required": lateral_maneuver_required,
+            "typed_immutable": typed_immutable,
+            "typed_phase": typed_phase == phase,
+            "typed_direction": typed_published_pass_direction
+            == published_pass_direction,
+            "attempt": attempt_id > 0,
+            "target": bool(str(target_vehicle_id).strip())
+            and typed_target_vehicle_id == target_vehicle_id,
+            "token": authority_token > 0,
+            "stop_kind": current_d_hold or pass_warmup,
+            "constraint_valid": constraint.valid,
+            "constraint_stop": constraint.stop_requested
+            and not constraint.release_authorized,
+            "constraint_generation": int(constraint.plan_generation)
+            == int(plan_generation),
+            "constraint_stamp": int(constraint.header_stamp_ns)
+            == int(plan_stamp_ns),
+            "tracking_generation": int(tracking_status.plan_generation)
+            == int(plan_generation),
+            "tracking_or_acquisition": tracking_or_warmup_acquisition,
+            "tracking_kind": int(tracking_status.lateral_stop_authority_kind)
+            == authority_kind,
+            "tracking_direction": int(
+                tracking_status.lateral_stop_transaction_pass_direction
+            )
+            == transaction_pass_direction,
+            "tracking_token": int(tracking_status.lateral_stop_authority_token)
+            == authority_token,
+            "fresh": self._fresh(
+                plan_time_sec, now_sec, self.overtake_plan_timeout_sec
+            ),
+        }
+        return all(checks.values())
 
     def _maneuver_transport_continuity_authorized(
         self,
@@ -8102,14 +9692,12 @@ class HybridControlMuxNode(Node):
         ):
             return False
 
-        previous_generation = (
-            16_777_215
-            if int(tracking_plan_generation) <= 1
-            else int(tracking_plan_generation) - 1
+        previous_generation = int(
+            selected_motion_sample.authority_proof.plan_generation
         )
         if (
-            int(selected_motion_sample.authority_proof.plan_generation)
-            != previous_generation
+            previous_generation <= 0
+            or previous_generation == int(tracking_plan_generation)
         ):
             return False
         command_values = (
@@ -9707,6 +11295,43 @@ class HybridControlMuxNode(Node):
     @staticmethod
     def _stamp_ns(stamp) -> int:
         return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    @classmethod
+    def _overtake_plan_lateral_stop_fingerprint(
+        cls, msg: OvertakePlan
+    ) -> tuple:
+        """Capture the immutable plan/trajectory payload used by lease joins."""
+        return (
+            bool(msg.trajectory_authorized),
+            bool(msg.lateral_maneuver_required),
+            int(msg.attempt_id),
+            str(msg.target_vehicle_id),
+            int(msg.phase),
+            int(msg.pass_direction),
+            int(msg.lateral_stop_authority_kind),
+            int(msg.lateral_stop_transaction_pass_direction),
+            int(msg.lateral_stop_authority_token),
+            tuple(
+                (
+                    int(point.time_from_start.sec),
+                    int(point.time_from_start.nanosec),
+                    float(point.pose.position.x),
+                    float(point.pose.position.y),
+                    float(point.pose.position.z),
+                    float(point.pose.orientation.x),
+                    float(point.pose.orientation.y),
+                    float(point.pose.orientation.z),
+                    float(point.pose.orientation.w),
+                    float(point.longitudinal_velocity_mps),
+                    float(point.lateral_velocity_mps),
+                    float(point.acceleration_mps2),
+                    float(point.heading_rate_rps),
+                    float(point.front_wheel_angle_rad),
+                    float(point.rear_wheel_angle_rad),
+                )
+                for point in msg.trajectory.points
+            ),
+        )
 
     @staticmethod
     def _tracking_status_binds_pure_pursuit_command(

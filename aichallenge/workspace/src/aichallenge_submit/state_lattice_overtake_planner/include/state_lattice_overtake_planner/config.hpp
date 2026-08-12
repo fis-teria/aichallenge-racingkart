@@ -47,6 +47,9 @@ struct PlannerConfig {
   // the existing safety-evaluated resampling path enabled; the node-owned live
   // publication gate remains independently default OFF.
   bool experimental_exact_spatial_follow_shadow_enabled{true};
+  // Derived by the node after live V4, V2 transport and safety configuration
+  // have all passed validation. This is not a user-facing independent bypass.
+  bool exact_cartesian_execution_enabled{false};
   std::vector<int> cost_levels{6, 9, 12, 15, 18, 60, 70, 80, 90, 100};
   std::vector<double> wall_distance_thresholds_m{0.1, 0.3, 0.5};
   std::vector<double> object_distance_thresholds_m{0.8, 1.0, 1.3, 1.5, 1.7};

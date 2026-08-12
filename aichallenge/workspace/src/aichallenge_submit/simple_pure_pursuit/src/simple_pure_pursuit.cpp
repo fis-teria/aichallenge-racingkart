@@ -1,4 +1,5 @@
 #include "simple_pure_pursuit/simple_pure_pursuit.hpp"
+#include "simple_pure_pursuit/pass_warmup_acquisition.hpp"
 
 #include "overtake_transport_contract/c002ay0_canonical.hpp"
 #include "simple_pure_pursuit/overtake_override_contract.hpp"
@@ -1198,6 +1199,54 @@ void SimplePurePursuit::publishFreeRunExecutionAck(
   pub_free_run_execution_ack_->publish(ack);
 }
 
+void SimplePurePursuit::applyStateLatticeV2CycleResult(
+    const overtake_transport_contract::state_lattice_v2::CycleResult &result) {
+  if (state_lattice_v4_poc_identity_gate_enabled_ &&
+      result.availability_present && result.availability_identity.has_value()) {
+    state_lattice_v4_poc_identity_ = result.availability_identity;
+  } else {
+    state_lattice_v4_poc_identity_.reset();
+  }
+  // Keep an exact, availability-bound Cartesian cache whenever the typed
+  // proposal channel is enabled. Global V2 command activation remains a
+  // separate experimental mode; V4 may consume this cache only after its
+  // own spatial authority heartbeat and identity checks succeed.
+  if (result.accepted.has_value()) {
+    const auto converted =
+        stateLatticeV2ProposalToTrajectory(result.accepted.value());
+    if (converted.has_value()) {
+      StateLatticeV2ControlTrajectoryCache cache;
+      cache.identity = result.accepted->identity;
+      cache.proposal =
+          std::make_shared<const AuthorizedCartesianTrajectoryV2>(
+              result.accepted.value());
+      cache.trajectory =
+          std::make_shared<Trajectory>(std::move(converted.value()));
+      cache.receive_steady_sec = steadyNowSec();
+      state_lattice_v2_control_trajectory_cache_ = std::move(cache);
+    } else {
+      state_lattice_v2_control_trajectory_cache_.reset();
+    }
+  }
+  const bool current_v2_rejected_this_cycle =
+      stateLatticeV2CurrentAvailabilityRejected(result);
+  const bool exact_cached_availability =
+      !current_v2_rejected_this_cycle && result.availability_present &&
+      result.availability_identity.has_value() &&
+      state_lattice_v2_control_trajectory_cache_.has_value() &&
+      state_lattice_v2_control_trajectory_cache_->trajectory != nullptr &&
+      stateLatticeV2IdentityMatches(
+          state_lattice_v2_control_trajectory_cache_->identity,
+          result.availability_identity.value());
+  if (exact_cached_availability) {
+    (void)activatePendingStateLatticeV4Contract(
+        result.availability_identity.value());
+  }
+  if (!exact_cached_availability) {
+    state_lattice_v2_control_trajectory_cache_.reset();
+  }
+}
+
 void SimplePurePursuit::onTimer() {
   const auto stamp = get_clock()->now();
   const double now_sec = steadyNowSec();
@@ -1206,41 +1255,7 @@ void SimplePurePursuit::onTimer() {
     const auto v2_result = state_lattice_v2_binding_store_->beginCycle(
         stamp_msg, steadyNowNanoseconds());
     publishStateLatticeV2BindingStatus(stamp_msg, v2_result);
-    if (state_lattice_v4_poc_identity_gate_enabled_ &&
-        v2_result.availability_present &&
-        v2_result.availability_identity.has_value()) {
-      state_lattice_v4_poc_identity_ = v2_result.availability_identity;
-    } else {
-      state_lattice_v4_poc_identity_.reset();
-    }
-    if (state_lattice_v2_command_activation_enabled_) {
-      if (v2_result.accepted.has_value()) {
-        const auto converted =
-            stateLatticeV2ProposalToTrajectory(v2_result.accepted.value());
-        if (converted.has_value()) {
-          StateLatticeV2ControlTrajectoryCache cache;
-          cache.identity = v2_result.accepted->identity;
-          cache.trajectory =
-              std::make_shared<Trajectory>(std::move(converted.value()));
-          state_lattice_v2_control_trajectory_cache_ = std::move(cache);
-        } else {
-          state_lattice_v2_control_trajectory_cache_.reset();
-        }
-      }
-      const bool current_v2_rejected_this_cycle =
-          stateLatticeV2CurrentAvailabilityRejected(v2_result);
-      const bool exact_cached_availability =
-          !current_v2_rejected_this_cycle && v2_result.availability_present &&
-          v2_result.availability_identity.has_value() &&
-          state_lattice_v2_control_trajectory_cache_.has_value() &&
-          state_lattice_v2_control_trajectory_cache_->trajectory != nullptr &&
-          stateLatticeV2IdentityMatches(
-              state_lattice_v2_control_trajectory_cache_->identity,
-              v2_result.availability_identity.value());
-      if (!exact_cached_availability) {
-        state_lattice_v2_control_trajectory_cache_.reset();
-      }
-    }
+    applyStateLatticeV2CycleResult(v2_result);
   }
   const auto plan_snapshot = overtake_plan_store_.beginControlCycle();
   const builtin_interfaces::msg::Time stamp_msg = stamp;
@@ -1265,17 +1280,23 @@ void SimplePurePursuit::onTimer() {
   // falls back to the baseline trajectory or legacy override stream.
   if (state_lattice_v2_command_activation_enabled_ &&
       !state_lattice_v2_control_trajectory_cache_.has_value()) {
+    const bool rendezvous_pending = stateLatticeV4RendezvousPending();
     FreshnessResult invalid;
     invalid.ages = freshness.ages;
-    invalid.reason = "state_lattice_v2_unavailable";
+    invalid.reason = rendezvous_pending
+                         ? "override_contract_missing_or_stale"
+                         : "state_lattice_v2_unavailable";
     publishStaleDebug(stamp, invalid);
-    resetSteeringLimiter();
+    if (!rendezvous_pending) {
+      resetSteeringLimiter();
+    }
     if (stop_on_stale_input_ ||
         state_lattice_v4_poc_command_activation_enabled_) {
-      publishStopForStaleInput(stamp, invalid);
+      publishStopForStaleInput(stamp, invalid, true);
     }
     publishControllerTrackingStatus(stamp, nullptr, nullptr, nullptr, nullptr,
-                                    now_sec, plan_snapshot.get());
+                                    now_sec, plan_snapshot.get(),
+                                    rendezvous_pending);
     c002ay1_observation.record().flags |=
         overtake_transport_contract::c002ay1::kFlagEmitted;
     c002ay1_observation.setReturnReason(
@@ -1299,26 +1320,41 @@ void SimplePurePursuit::onTimer() {
       !overtake_longitudinal_offsets_m_.empty();
   const bool v4_identity_matches =
       !v4_identity_required ||
-      (trajectory_ != nullptr && state_lattice_v4_poc_identity_.has_value() &&
-       v4PocIdentityMatches(
-           state_lattice_v4_poc_identity_.value(),
-           overtake_override_generation_, trajectory_->header.frame_id,
-           trajectory_->header.stamp, reference_source_generation_));
+      (state_lattice_v4_poc_command_activation_enabled_
+           ? v4PocCommandContractReady(now_sec)
+           : (trajectory_ != nullptr &&
+              state_lattice_v4_poc_identity_.has_value() &&
+              v4PocIdentityMatches(
+                  state_lattice_v4_poc_identity_.value(),
+                  overtake_override_generation_, trajectory_->header.frame_id,
+                  trajectory_->header.stamp, reference_source_generation_)));
   const bool v2_authority_fresh =
       state_lattice_v2_command_activation_enabled_ &&
       state_lattice_v2_control_trajectory_cache_.has_value();
   if (state_lattice_v4_poc_command_activation_enabled_ &&
       (state_lattice_v2_command_activation_enabled_ ||
        !v4PocCommandContractAvailable(now_sec))) {
+    const bool rendezvous_pending = stateLatticeV4RendezvousPending();
     FreshnessResult invalid;
     invalid.ages = freshness.ages;
     invalid.ages.override_age_sec = override_contract_age_sec;
-    invalid.reason = "state_lattice_v4_unavailable";
+    invalid.reason = rendezvous_pending
+                         ? "override_contract_missing_or_stale"
+                         : "state_lattice_v4_unavailable";
     publishStaleDebug(stamp, invalid);
-    resetSteeringLimiter();
-    publishStopForStaleInput(stamp, invalid);
+    // V2 geometry and its V4 authority heartbeat arrive independently. No
+    // command is emitted while only one half is present, but a fresh newer
+    // half may retain the last published steering reference so an otherwise
+    // continuous acquisition is not restarted by callback ordering. Exact
+    // identity is still required before activation; stale or same-generation
+    // evidence falls through to the established reset.
+    if (!rendezvous_pending) {
+      resetSteeringLimiter();
+    }
+    publishStopForStaleInput(stamp, invalid, true);
     publishControllerTrackingStatus(stamp, nullptr, nullptr, nullptr, nullptr,
-                                    now_sec, plan_snapshot.get());
+                                    now_sec, plan_snapshot.get(),
+                                    rendezvous_pending);
     c002ay1_observation.record().flags |=
         overtake_transport_contract::c002ay1::kFlagEmitted;
     c002ay1_observation.setReturnReason(
@@ -1455,7 +1491,7 @@ void SimplePurePursuit::onTimer() {
       publishControllerTrackingStatus(stamp, &context, &cmd, &longitudinal,
                                       &lateral, now_sec, plan_snapshot.get());
   const auto command_envelope = publishControllerCommandEnvelope(
-      cmd, tracking_status, plan_snapshot.get());
+      cmd, tracking_status, plan_snapshot.get(), &context);
   if (command_envelope.has_value()) {
     publishControllerExecutionEnvelope(command_envelope.value(), &context,
                                        &control_pose, &lateral, now_sec,
@@ -1627,6 +1663,23 @@ bool SimplePurePursuit::v4PocCommandContractReady(double now_sec) const {
     return false;
   }
 
+  // Exact command activation consumes the immutable Cartesian proposal
+  // accepted by BindingStore. Its source/base identity is already bound and
+  // lease-checked there. A newer baseline callback must not invalidate that
+  // still-current proposal by comparing it against a different trajectory.
+  if (state_lattice_v4_poc_command_activation_enabled_) {
+    if (!state_lattice_v2_control_trajectory_cache_.has_value()) {
+      return false;
+    }
+    const auto &cache = state_lattice_v2_control_trajectory_cache_.value();
+    return cache.trajectory != nullptr && cache.proposal != nullptr &&
+           cache.identity.plan_generation == overtake_override_generation_ &&
+           stateLatticeV2IdentityMatches(
+               cache.identity, state_lattice_v4_poc_identity_.value()) &&
+           stateLatticeV2IdentityMatches(cache.identity,
+                                         cache.proposal->identity);
+  }
+
   return v4PocIdentityMatches(
       state_lattice_v4_poc_identity_.value(), overtake_override_generation_,
       trajectory_->header.frame_id, trajectory_->header.stamp,
@@ -1685,6 +1738,7 @@ SimplePurePursuit::selectControlTrajectory(
   if (state_lattice_v2_command_activation_enabled_) {
     const auto &cache = state_lattice_v2_control_trajectory_cache_.value();
     context.owned_trajectory = cache.trajectory;
+    context.selected_cartesian_proposal = cache.proposal;
     context.base_trajectory = context.owned_trajectory.get();
     context.trajectory = context.owned_trajectory.get();
     context.source = "state_lattice_v2";
@@ -1695,6 +1749,51 @@ SimplePurePursuit::selectControlTrajectory(
     context.nearest_index =
         findNearestIndex(context.trajectory->points, control_pose.position);
     context.base_nearest_index = context.nearest_index;
+    context.valid = true;
+    return context;
+  }
+  const bool v4_cartesian_required =
+      state_lattice_v4_poc_command_activation_enabled_ &&
+      state_lattice_v4_poc_identity_gate_enabled_ &&
+      overtake_override_contract_kind_ ==
+          OvertakeOverrideContractKind::SPATIAL_LATERAL_AND_SPEED_V4 &&
+      overtake_lateral_override_active_;
+  if (v4_cartesian_required) {
+    if (!state_lattice_v4_poc_identity_gate_enabled_ ||
+        !state_lattice_v4_poc_identity_.has_value() ||
+        !state_lattice_v2_control_trajectory_cache_.has_value() ||
+        state_lattice_v2_control_trajectory_cache_->trajectory == nullptr ||
+        !stateLatticeV2IdentityMatches(
+            state_lattice_v2_control_trajectory_cache_->identity,
+            state_lattice_v4_poc_identity_.value())) {
+      context.invalid_reason = "state_lattice_v4_cartesian_unavailable";
+      return context;
+    }
+    const auto &cache = state_lattice_v2_control_trajectory_cache_.value();
+    context.owned_trajectory = cache.trajectory;
+    context.selected_cartesian_proposal = cache.proposal;
+    context.base_trajectory = trajectory_.get();
+    context.trajectory = context.owned_trajectory.get();
+    context.source = "state_lattice_v4_cartesian";
+    context.v4_poc_contract = true;
+    context.v4_poc_identity_required = true;
+    context.v4_poc_identity_matched = true;
+    context.v4_poc_geometry_applied = true;
+    context.v4_poc_generation = overtake_override_generation_;
+    context.overtake_override_applied = true;
+    context.overtake_override_apply_reason = "typed_cartesian_exact";
+    context.overtake_spatial_horizon_required_arc_m =
+        lookahead_min_distance_;
+    if (context.trajectory == nullptr || context.trajectory->points.empty() ||
+        context.base_trajectory == nullptr ||
+        context.base_trajectory->points.empty()) {
+      context.invalid_reason = "state_lattice_v4_cartesian_empty";
+      return context;
+    }
+    context.nearest_index =
+        findNearestIndex(context.trajectory->points, control_pose.position);
+    context.base_nearest_index = findNearestIndex(
+        context.base_trajectory->points, control_pose.position);
     context.valid = true;
     return context;
   }
@@ -1971,6 +2070,9 @@ SimplePurePursuit::LateralCommand SimplePurePursuit::computeLateralCommand(
   result.steering_limits_valid = bounded.valid;
   result.steering_angle_limited = bounded.angle_limited;
   result.steering_rate_limited = bounded.rate_limited;
+  result.measured_steering_rad = control_pose.current_steering_rad;
+  result.measured_steering_age_sec = control_pose.steering_age_sec;
+  result.measured_steering_fresh = fresh_measured_steering;
   result.requested_steering_tire_rotation_rate_radps =
       bounded.requested_rate_radps;
   result.steering_tire_rotation_rate_radps = bounded.bounded_rate_radps;
@@ -2664,7 +2766,8 @@ void SimplePurePursuit::captureControllerAppliedShadow(
 }
 
 void SimplePurePursuit::publishStopForStaleInput(
-    const rclcpp::Time &stamp, const FreshnessResult &freshness) {
+    const rclcpp::Time &stamp, const FreshnessResult &freshness,
+    bool refresh_base_attestation) {
   auto cmd = zeroAckermannControlCommand(stamp);
   cmd.longitudinal.acceleration = -1.5;
   if (recovery_mode_) {
@@ -2682,12 +2785,21 @@ void SimplePurePursuit::publishStopForStaleInput(
       plan_snapshot != nullptr && plan_snapshot->plan != nullptr
           ? plan_snapshot->plan->plan_generation
           : 0U;
-  const auto command_envelope =
-      publishControllerCommandEnvelope(cmd, status, plan_snapshot.get());
+  const auto command_envelope = publishControllerCommandEnvelope(
+      cmd, status, plan_snapshot.get(), nullptr);
   if (command_envelope.has_value()) {
     publishControllerExecutionEnvelope(command_envelope.value(), nullptr,
                                        nullptr, nullptr, steadyNowSec(),
                                        plan_snapshot.get());
+    if (refresh_base_attestation && trajectory_ != nullptr &&
+        !trajectory_->points.empty() && odometry_ != nullptr) {
+      ControlTrajectoryContext base_context;
+      base_context.base_trajectory = trajectory_.get();
+      base_context.base_nearest_index =
+          findNearestIndex(trajectory_->points, odometry_->pose.pose.position);
+      publishStateLatticeV2BaseAttestation(command_envelope.value(),
+                                           base_context);
+    }
   }
   pub_cmd_->publish(cmd);
   resetSteeringLimiter();
@@ -2763,6 +2875,7 @@ void SimplePurePursuit::onOvertakeOverride(
   const double now_sec = steadyNowSec();
   const auto contract = parseOvertakeOverrideContract(msg->data);
   if (!contract.has_value()) {
+    pending_state_lattice_v4_contract_.reset();
     if (const auto &retained = overtake_speed_only_latch_.retained();
         retained.has_value()) {
       applyReceivedOvertakeOverride(retained.value());
@@ -2774,6 +2887,7 @@ void SimplePurePursuit::onOvertakeOverride(
     return;
   }
   if (contract->kind == OvertakeOverrideContractKind::INACTIVE) {
+    pending_state_lattice_v4_contract_.reset();
     overtake_source_payload_ = canonicalizeSourcePayload(*msg);
     aw2_overtake_source_wire_ = serializeAw2SourceWire(*msg);
     overtake_source_generation_ = contract->generation;
@@ -2786,8 +2900,26 @@ void SimplePurePursuit::onOvertakeOverride(
     return;
   }
 
-  overtake_source_payload_ = canonicalizeSourcePayload(*msg);
-  aw2_overtake_source_wire_ = serializeAw2SourceWire(*msg);
+  auto source_payload = canonicalizeSourcePayload(*msg);
+  auto source_wire = serializeAw2SourceWire(*msg);
+  if (state_lattice_v4_poc_command_activation_enabled_ &&
+      state_lattice_v4_poc_identity_gate_enabled_ &&
+      contract->kind == OvertakeOverrideContractKind::
+                            SPATIAL_LATERAL_AND_SPEED_V4) {
+    pending_state_lattice_v4_contract_ = PendingStateLatticeV4Contract{
+        contract.value(), std::move(source_payload), std::move(source_wire),
+        now_sec};
+    if (state_lattice_v2_control_trajectory_cache_.has_value() &&
+        state_lattice_v2_control_trajectory_cache_->trajectory != nullptr &&
+        state_lattice_v2_control_trajectory_cache_->identity.plan_generation ==
+            contract->generation) {
+      (void)activatePendingStateLatticeV4Contract(
+          state_lattice_v2_control_trajectory_cache_->identity);
+    }
+    return;
+  }
+  overtake_source_payload_ = std::move(source_payload);
+  aw2_overtake_source_wire_ = std::move(source_wire);
   overtake_source_generation_ = contract->generation;
   overtake_speed_only_latch_.observeValid(contract.value());
   applyReceivedOvertakeOverride(contract.value());
@@ -2796,6 +2928,68 @@ void SimplePurePursuit::onOvertakeOverride(
   last_valid_override_contract_generation_ = contract->generation;
   last_valid_override_contract_inactive_ = false;
   last_valid_override_contract_received_ = true;
+}
+
+bool SimplePurePursuit::activatePendingStateLatticeV4Contract(
+    const multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity &identity) {
+  if (!pending_state_lattice_v4_contract_.has_value() ||
+      pending_state_lattice_v4_contract_->contract.generation !=
+          identity.plan_generation ||
+      pending_state_lattice_v4_contract_->contract.kind !=
+          OvertakeOverrideContractKind::SPATIAL_LATERAL_AND_SPEED_V4) {
+    return false;
+  }
+  auto pending = std::move(pending_state_lattice_v4_contract_.value());
+  pending_state_lattice_v4_contract_.reset();
+  overtake_source_payload_ = std::move(pending.source_payload);
+  aw2_overtake_source_wire_ = std::move(pending.source_wire);
+  overtake_source_generation_ = pending.contract.generation;
+  overtake_speed_only_latch_.observeValid(pending.contract);
+  applyReceivedOvertakeOverride(pending.contract);
+  last_overtake_override_sec_ = pending.receive_steady_sec;
+  last_valid_override_contract_sec_ = pending.receive_steady_sec;
+  last_valid_override_contract_generation_ = pending.contract.generation;
+  last_valid_override_contract_inactive_ = false;
+  last_valid_override_contract_received_ = true;
+  return true;
+}
+
+bool SimplePurePursuit::stateLatticeV4RendezvousPending() const {
+  if (!state_lattice_v4_poc_command_activation_enabled_ ||
+      !state_lattice_v4_poc_identity_gate_enabled_) {
+    return false;
+  }
+  const double now_sec = steadyNowSec();
+  const auto fresh = [this, now_sec](double receive_sec) {
+    const double age_sec = inputAgeSec(receive_sec, now_sec);
+    return ageFresh(age_sec, overtake_override_timeout_sec_) &&
+           ageFresh(age_sec, max_override_age_sec_);
+  };
+  const auto newer_generation = [](std::uint32_t current,
+                                   std::uint32_t candidate) {
+    if (current == 0U || candidate == 0U || current == candidate) {
+      return false;
+    }
+    constexpr std::uint32_t kMaxGeneration = 16777215U;
+    constexpr std::uint32_t kHalfRange = kMaxGeneration / 2U;
+    const std::uint32_t distance = candidate > current
+                                       ? candidate - current
+                                       : (kMaxGeneration - current) + candidate;
+    return distance > 0U && distance <= kHalfRange;
+  };
+  const bool v2_arrived_first =
+      state_lattice_v2_control_trajectory_cache_.has_value() &&
+      fresh(state_lattice_v2_control_trajectory_cache_->receive_steady_sec) &&
+      newer_generation(overtake_override_generation_,
+                       state_lattice_v2_control_trajectory_cache_
+                           ->identity.plan_generation);
+  const bool v4_arrived_first =
+      pending_state_lattice_v4_contract_.has_value() &&
+      fresh(pending_state_lattice_v4_contract_->receive_steady_sec) &&
+      newer_generation(
+          overtake_override_generation_,
+          pending_state_lattice_v4_contract_->contract.generation);
+  return v2_arrived_first || v4_arrived_first;
 }
 
 void SimplePurePursuit::applyReceivedOvertakeOverride(
@@ -3259,12 +3453,26 @@ ControllerTrackingStatus SimplePurePursuit::publishControllerTrackingStatus(
     const rclcpp::Time &stamp, const ControlTrajectoryContext *context,
     const AckermannControlCommand *command,
     const LongitudinalCommand *longitudinal, const LateralCommand *lateral,
-    double now_sec, const ControlCyclePlanSnapshot *plan_snapshot) {
+    double now_sec, const ControlCyclePlanSnapshot *plan_snapshot,
+    bool state_lattice_delivery_gap) {
   const bool command_finite =
       command != nullptr && std::isfinite(command->longitudinal.speed) &&
       std::isfinite(command->longitudinal.acceleration) &&
       std::isfinite(command->lateral.steering_tire_angle);
   const double contract_age_sec = now_sec - last_valid_override_contract_sec_;
+  const bool v4_cartesian_contract_fresh =
+      use_overtake_reference_override_ &&
+      last_valid_override_contract_received_ &&
+      !last_valid_override_contract_inactive_ && context != nullptr &&
+      context->source == "state_lattice_v4_cartesian" &&
+      context->v4_poc_geometry_applied &&
+      context->selected_cartesian_proposal != nullptr &&
+      last_valid_override_contract_generation_ ==
+          context->selected_cartesian_proposal->identity.plan_generation &&
+      overtake_override_generation_ ==
+          context->selected_cartesian_proposal->identity.plan_generation &&
+      ageFresh(contract_age_sec, overtake_override_timeout_sec_) &&
+      ageFresh(contract_age_sec, max_override_age_sec_);
   const bool contract_fresh =
       use_overtake_reference_override_ &&
       last_valid_override_contract_received_ &&
@@ -3279,15 +3487,16 @@ ControllerTrackingStatus SimplePurePursuit::publishControllerTrackingStatus(
       context != nullptr && !overtake_override_active_ &&
       !context->overtake_override_applied;
   const bool lateral_override_applied =
-      contract_fresh && !last_valid_override_contract_inactive_ &&
-      context != nullptr && !overtake_speed_only_active_ &&
-      ((context->overtake_override_applied && overtake_override_active_ &&
-        overtake_override_generation_ ==
-            last_valid_override_contract_generation_) ||
-       (context->mpc_horizon_applied &&
-        context->applied_horizon_generation ==
-            last_valid_override_contract_generation_ &&
-        context->applied_horizon_source == "solver_prediction"));
+      v4_cartesian_contract_fresh ||
+      (contract_fresh && !last_valid_override_contract_inactive_ &&
+       context != nullptr && !overtake_speed_only_active_ &&
+       ((context->overtake_override_applied && overtake_override_active_ &&
+         overtake_override_generation_ ==
+             last_valid_override_contract_generation_) ||
+        (context->mpc_horizon_applied &&
+         context->applied_horizon_generation ==
+             last_valid_override_contract_generation_ &&
+         context->applied_horizon_source == "solver_prediction")));
   const bool speed_only_contract_applied = speedOnlyTrackingContractApplied(
       contract_fresh, last_valid_override_contract_inactive_,
       overtake_speed_only_active_, overtake_lateral_override_active_,
@@ -3295,16 +3504,20 @@ ControllerTrackingStatus SimplePurePursuit::publishControllerTrackingStatus(
       longitudinal != nullptr ? longitudinal->overtake_speed_cap_mps : 0.0,
       command != nullptr ? command->longitudinal.speed
                          : std::numeric_limits<double>::quiet_NaN());
+  // Angle/rate limiting is the normal actuator-safe PP output path.  A finite
+  // command bounded by valid hard limits remains executable; convergence of
+  // measured steering is diagnostic evidence, not a prerequisite for starting
+  // longitudinal motion on the candidate's already-limited entry speed.
   const bool steering_execution_usable =
-      lateral != nullptr && lateral->steering_limits_valid &&
-      (context == nullptr ||
-       (!context->overtake_override_applied &&
-        context->source != "state_lattice_v2") ||
-       (!lateral->steering_angle_limited && !lateral->steering_rate_limited));
+      lateral != nullptr && lateral->steering_limits_valid;
   const bool v2_control_applied =
       state_lattice_v2_command_activation_enabled_ && context != nullptr &&
       context->source == "state_lattice_v2" &&
       state_lattice_v2_control_trajectory_cache_.has_value();
+  const bool v4_cartesian_control_applied =
+      context != nullptr && context->source == "state_lattice_v4_cartesian" &&
+      context->v4_poc_geometry_applied &&
+      context->selected_cartesian_proposal != nullptr;
   const bool tracking_usable =
       !recovery_mode_ && command_finite && context != nullptr &&
       context->valid && steering_execution_usable &&
@@ -3312,11 +3525,39 @@ ControllerTrackingStatus SimplePurePursuit::publishControllerTrackingStatus(
        speed_only_contract_applied ||
        lateral_override_applied);
 
+  const bool pass_warmup_plan_matches =
+      command_finite && context != nullptr && lateral != nullptr &&
+      lateral_override_applied && plan_snapshot != nullptr &&
+      plan_snapshot->plan != nullptr &&
+      context->selected_cartesian_proposal != nullptr &&
+      lateral->measured_steering_fresh &&
+      plan_snapshot->plan->plan_generation ==
+          context->selected_cartesian_proposal->identity.plan_generation &&
+      plan_snapshot->plan->trajectory_authorized &&
+      plan_snapshot->plan->lateral_maneuver_required &&
+      plan_snapshot->plan->lateral_stop_authority_kind ==
+          OvertakePlan::LATERAL_STOP_PASS_WARMUP &&
+      plan_snapshot->plan->lateral_stop_transaction_pass_direction != 0 &&
+      plan_snapshot->plan->lateral_stop_authority_token != 0U;
+  const double measured_tolerance_rad =
+      std::max(1.0e-6, free_run_live_exact_hard_steering_rate_limit_radps_ *
+                           steering_command_nominal_dt_sec_);
+  const auto pass_warmup_acquisition =
+      pass_warmup_plan_matches
+          ? evaluatePassWarmupSteeringAcquisition(
+                lateral->requested_output_steering_tire_angle_rad,
+                lateral->steering_tire_angle_rad,
+                lateral->raw_steering_tire_angle_rad,
+                lateral->measured_steering_rad,
+                lateral->measured_steering_age_sec,
+                steering_status_timeout_sec_, 1.0e-9,
+                measured_tolerance_rad)
+          : PassWarmupSteeringAcquisition{};
   ControllerTrackingStatus status;
   status.header.stamp = stamp;
   status.header.frame_id = "base_link";
   status.plan_generation =
-      v2_control_applied
+      (v2_control_applied || v4_cartesian_control_applied)
           ? state_lattice_v2_control_trajectory_cache_->identity.plan_generation
           : (plan_snapshot != nullptr && plan_snapshot->plan != nullptr
                  ? plan_snapshot->plan->plan_generation
@@ -3325,6 +3566,17 @@ ControllerTrackingStatus SimplePurePursuit::publishControllerTrackingStatus(
       context != nullptr && context->mpc_horizon_applied;
   status.pp_command_fresh = command_finite;
   status.trajectory_tracking_usable = tracking_usable;
+  status.pass_warmup_steering_acquisition_active =
+      pass_warmup_plan_matches && pass_warmup_acquisition.evidence_valid &&
+      !pass_warmup_acquisition.motion_ready;
+  status.pass_warmup_requested_steering_limited =
+      pass_warmup_plan_matches &&
+      pass_warmup_acquisition.acquisition_required;
+  status.pass_warmup_measured_steering_converged =
+      pass_warmup_plan_matches &&
+      pass_warmup_acquisition.measured_steering_converged;
+  status.pass_warmup_motion_ready =
+      pass_warmup_plan_matches && pass_warmup_acquisition.motion_ready;
   // STOP transportのN-1継続性はplan/constraint履歴を所有するMuxだけが判定する。
   status.safety_constraint_release_ready = false;
   status.attack_follow_stop_transport_release_ready = false;
@@ -3333,7 +3585,8 @@ ControllerTrackingStatus SimplePurePursuit::publishControllerTrackingStatus(
   status.lateral_stop_transaction_pass_direction = 0;
   status.lateral_stop_authority_token = 0U;
   const bool typed_lateral_stop_plan_applied =
-      tracking_usable && lateral_override_applied && plan_snapshot != nullptr &&
+      (tracking_usable || status.pass_warmup_steering_acquisition_active) &&
+      lateral_override_applied && plan_snapshot != nullptr &&
       plan_snapshot->plan != nullptr &&
       plan_snapshot->plan->plan_generation == status.plan_generation &&
       plan_snapshot->plan->trajectory_authorized &&
@@ -3367,6 +3620,8 @@ ControllerTrackingStatus SimplePurePursuit::publishControllerTrackingStatus(
     status.reason = "ready";
   } else if (recovery_mode_) {
     status.reason = "recovery_mode";
+  } else if (state_lattice_delivery_gap && !command_finite) {
+    status.reason = "override_contract_missing_or_stale";
   } else if (!command_finite) {
     status.reason = "command_missing_or_nonfinite";
   } else if (context == nullptr || !context->valid) {
@@ -3375,7 +3630,8 @@ ControllerTrackingStatus SimplePurePursuit::publishControllerTrackingStatus(
     status.reason = lateral != nullptr && lateral->steering_limits_valid
                         ? "authorized_trajectory_requires_steering_saturation"
                         : "steering_command_limit_invalid";
-  } else if (!v2_control_applied && !contract_fresh) {
+  } else if (!v2_control_applied && !contract_fresh &&
+             !v4_cartesian_contract_fresh) {
     status.reason = "override_contract_missing_or_stale";
   } else if (!inactive_contract_applied && !speed_only_contract_applied &&
              !lateral_override_applied) {
@@ -3393,7 +3649,8 @@ std::optional<ControllerCommandEnvelope>
 SimplePurePursuit::publishControllerCommandEnvelope(
     const AckermannControlCommand &command,
     const ControllerTrackingStatus &tracking_status,
-    const ControlCyclePlanSnapshot *plan_snapshot) {
+    const ControlCyclePlanSnapshot *plan_snapshot,
+    const ControlTrajectoryContext *context) {
   if (!pub_command_envelope_) {
     return std::nullopt;
   }
@@ -3405,7 +3662,9 @@ SimplePurePursuit::publishControllerCommandEnvelope(
   ++command_sequence_;
   const auto envelope = makeControllerCommandEnvelopeV1(
       command, tracking_status, producer_instance_id_, command_sequence_,
-      plan_snapshot != nullptr ? plan_snapshot->plan.get() : nullptr);
+      plan_snapshot != nullptr ? plan_snapshot->plan.get() : nullptr,
+      context != nullptr ? context->selected_cartesian_proposal.get()
+                         : nullptr);
   pub_command_envelope_->publish(envelope);
   return envelope;
 }

@@ -3,6 +3,12 @@ uint32 plan_generation
 bool mpc_horizon_usable
 bool pp_command_fresh
 bool trajectory_tracking_usable
+# PASS_WARMUP can apply a bounded steering step while longitudinal motion is
+# held at zero.  This is acquisition evidence, not permission to move.
+bool pass_warmup_steering_acquisition_active
+bool pass_warmup_requested_steering_limited
+bool pass_warmup_measured_steering_converged
+bool pass_warmup_motion_ready
 # final sourceがplannerの停止constraintだけでstop中でも、現在generationの
 # PP command・trajectory proofが揃い、外部停止/watchdog実故障が無い時だけtrue。
 bool safety_constraint_release_ready

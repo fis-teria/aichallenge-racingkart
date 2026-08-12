@@ -25,6 +25,9 @@ hybrid_control_mux_node:
     ros_clock_stall_timeout_sec: 0.20
     race_arm_required: true
     motion_authority_grant_lease_sec: 0.04
+    # 完全照合・commit済みPASSING cohortを、direct successorのtopic到着差だけで
+    # 継続できるsteady-clock上限 [s]。0より大きく0.04以下でなければ起動失敗。
+    motion_authority_delivery_gap_lease_sec: 0.04
     motion_authority_warmup_proof_timeout_sec: 0.50
     control_fault_clear_safe_cycles: 3
     lateral_stop_steering_hold_timeout_sec: 0.12

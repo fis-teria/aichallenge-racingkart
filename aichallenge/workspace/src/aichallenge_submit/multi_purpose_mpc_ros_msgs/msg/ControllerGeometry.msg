@@ -11,7 +11,7 @@ uint32 curvature_last_read_source_index
 uint32 lookahead_selected_source_index
 uint32 required_horizon_end_source_index
 bool lookahead_endpoint_fallback
-multi_purpose_mpc_ros_msgs/CandidateExecutionPoint[<=100] points
+multi_purpose_mpc_ros_msgs/CandidateExecutionPoint[<=256] points
 uint8[32] geometry_sha256
 float64 total_arc_length_m
 float64 required_spatial_horizon_m

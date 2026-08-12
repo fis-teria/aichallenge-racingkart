@@ -62,6 +62,12 @@ stateLatticeSafetyEvaluatorConfigDigest(const PlannerConfig &config,
                                         const GridMap &map,
                                         const FrenetFrame &frame);
 
+bool baseSnapshotCurrentForProposal(
+    const multi_purpose_mpc_ros_msgs::msg::ControllerBaseTrajectorySnapshot
+        &base,
+    const builtin_interfaces::msg::Time &plan_stamp,
+    double maximum_snapshot_age_sec);
+
 Ay0ShadowProposalResult buildAy0ShadowProposal(
     const multi_purpose_mpc_ros_msgs::msg::ControllerBaseTrajectorySnapshot
         &base,

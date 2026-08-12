@@ -49,7 +49,7 @@ bool trajectory_authorized_legacy
 bool lateral_maneuver_required_legacy
 
 bool typed_trajectory_present
-multi_purpose_mpc_ros_msgs/CandidateExecutionPoint[<=100] geometry_points
+multi_purpose_mpc_ros_msgs/CandidateExecutionPoint[<=256] geometry_points
 uint8[32] delivered_geometry_sha256
 
 uint8 source_kind

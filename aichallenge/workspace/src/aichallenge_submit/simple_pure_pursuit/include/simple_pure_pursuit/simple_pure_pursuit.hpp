@@ -146,11 +146,33 @@ makeControllerCommandEnvelopeV1(const AckermannControlCommand &command,
                                 const ControllerTrackingStatus &tracking_status,
                                 std::uint64_t producer_instance_id,
                                 std::uint64_t command_sequence,
-                                const OvertakePlan *typed_plan = nullptr) {
+                                const OvertakePlan *typed_plan = nullptr,
+                                const AuthorizedCartesianTrajectoryV2
+                                    *selected_cartesian = nullptr) {
   ControllerCommandEnvelope envelope;
   envelope.header = tracking_status.header;
+  const bool selected_cartesian_matches =
+      selected_cartesian != nullptr &&
+      selected_cartesian->schema_version ==
+          AuthorizedCartesianTrajectoryV2::SCHEMA_V2_NON_AUTHORITATIVE &&
+      selected_cartesian->identity.plan_generation ==
+          tracking_status.plan_generation &&
+      selected_cartesian->proposal.plan_sample_key.plan_generation ==
+          tracking_status.plan_generation &&
+      selected_cartesian->identity.canonical_sha256 ==
+          selected_cartesian->proposal.payload_sha256 &&
+      selected_cartesian->proposal.plan_sample_key.planner_instance_id != 0U &&
+      selected_cartesian->proposal.plan_sample_key.race_arm_epoch != 0U &&
+      selected_cartesian->proposal.plan_sample_key.attempt_id != 0U &&
+      !selected_cartesian->proposal.plan_sample_key.target_vehicle_id.empty() &&
+      (selected_cartesian->proposal.plan_sample_key.pass_direction == -1 ||
+       selected_cartesian->proposal.plan_sample_key.pass_direction == 1) &&
+      selected_cartesian->proposal.plan_sample_key.connector_transaction_id !=
+          0U &&
+      selected_cartesian->proposal.candidate_revision != 0U;
   const bool typed_plan_matches =
-      typed_plan != nullptr && typed_plan->aw2_identity_schema_version == 1U &&
+      !selected_cartesian_matches && typed_plan != nullptr &&
+      typed_plan->aw2_identity_schema_version == 1U &&
       typed_plan->plan_generation == tracking_status.plan_generation &&
       typed_plan->planner_instance_id != 0U &&
       typed_plan->race_arm_epoch != 0U && typed_plan->attempt_id != 0U &&
@@ -158,7 +180,8 @@ makeControllerCommandEnvelopeV1(const AckermannControlCommand &command,
       (typed_plan->pass_direction == -1 || typed_plan->pass_direction == 1) &&
       typed_plan->connector_transaction_id != 0U &&
       typed_plan->candidate_revision != 0U;
-  envelope.schema_version = typed_plan_matches ? 2U : 1U;
+  envelope.schema_version =
+      selected_cartesian_matches || typed_plan_matches ? 2U : 1U;
   envelope.producer_instance_id = producer_instance_id;
   envelope.command_sequence = command_sequence;
   envelope.plan_generation = tracking_status.plan_generation;
@@ -175,7 +198,13 @@ makeControllerCommandEnvelopeV1(const AckermannControlCommand &command,
       tracking_status.lateral_stop_authority_token;
   envelope.command_age_sec = tracking_status.command_age_sec;
   envelope.reason = tracking_status.reason;
-  if (typed_plan_matches) {
+  if (selected_cartesian_matches) {
+    envelope.plan_sample_key = selected_cartesian->proposal.plan_sample_key;
+    envelope.candidate_revision =
+        selected_cartesian->proposal.candidate_revision;
+    envelope.candidate_content_sha256 =
+        selected_cartesian->proposal.geometry_sha256;
+  } else if (typed_plan_matches) {
     envelope.plan_sample_key.race_arm_epoch = typed_plan->race_arm_epoch;
     envelope.plan_sample_key.planner_instance_id =
         typed_plan->planner_instance_id;
@@ -192,9 +221,14 @@ makeControllerCommandEnvelopeV1(const AckermannControlCommand &command,
   return envelope;
 }
 
-inline constexpr std::size_t kMaxExecutionTrajectoryPoints = 100U;
+inline constexpr std::size_t kMaxExecutionTrajectoryPoints =
+    aw2_shadow::kMaxGeometryPoints;
 inline constexpr std::size_t kMaxExecutionRolloutSamples = 100U;
 inline constexpr std::size_t kMaxExecutionSourcePayloadBytes = 4096U;
+static_assert(
+    kMaxExecutionTrajectoryPoints ==
+        overtake_transport_contract::c002ay0::kMaxCartesianPoints,
+    "controller evidence capacity must match the fixed V4 Cartesian bound");
 
 struct CanonicalSourcePayload {
   std::vector<std::uint8_t> bytes;
@@ -573,9 +607,19 @@ public:
   struct StateLatticeV2ControlTrajectoryCache {
     multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity identity;
     std::shared_ptr<Trajectory> trajectory;
+    std::shared_ptr<const AuthorizedCartesianTrajectoryV2> proposal;
+    double receive_steady_sec{0.0};
   };
   std::optional<StateLatticeV2ControlTrajectoryCache>
       state_lattice_v2_control_trajectory_cache_;
+  struct PendingStateLatticeV4Contract {
+    OvertakeOverrideContract contract;
+    CanonicalSourcePayload source_payload;
+    Aw2CanonicalSourceWire source_wire;
+    double receive_steady_sec{0.0};
+  };
+  std::optional<PendingStateLatticeV4Contract>
+      pending_state_lattice_v4_contract_;
   std::uint8_t state_lattice_v2_base_attestation_stage_{0U};
   std::uint8_t state_lattice_v2_base_attestation_build_result_{255U};
   std::uint8_t state_lattice_v2_base_attestation_build_diagnostic_{0U};
@@ -628,6 +672,8 @@ private:
     bool valid{false};
     std::string invalid_reason{"empty_trajectory"};
     std::shared_ptr<Trajectory> owned_trajectory;
+    std::shared_ptr<const AuthorizedCartesianTrajectoryV2>
+        selected_cartesian_proposal;
     const Trajectory *base_trajectory{nullptr};
     const Trajectory *trajectory{nullptr};
     std::size_t base_nearest_index{0};
@@ -693,6 +739,9 @@ private:
     bool steering_limits_valid{false};
     bool steering_angle_limited{false};
     bool steering_rate_limited{false};
+    double measured_steering_rad{0.0};
+    double measured_steering_age_sec{-1.0};
+    bool measured_steering_fresh{false};
     std::size_t curvature_last_read_trajectory_index{0U};
     std::size_t lookahead_selected_trajectory_index{0U};
     bool lookahead_endpoint_fallback{false};
@@ -701,6 +750,8 @@ private:
   void onTimer();
   void publishStateLatticeV2BindingStatus(
       const builtin_interfaces::msg::Time &stamp,
+      const overtake_transport_contract::state_lattice_v2::CycleResult &result);
+  void applyStateLatticeV2CycleResult(
       const overtake_transport_contract::state_lattice_v2::CycleResult &result);
   double steadyNowSec() const;
   ControlPosePrediction predictControlPose(double now_sec) const;
@@ -729,18 +780,21 @@ private:
   void resetSteeringLimiter();
   void publishLookaheadPoint(double x, double y, double z);
   void publishStopForStaleInput(const rclcpp::Time &stamp,
-                                const FreshnessResult &freshness);
+                                const FreshnessResult &freshness,
+                                bool refresh_base_attestation = false);
   void publishStaleDebug(const rclcpp::Time &stamp,
                          const FreshnessResult &freshness);
   ControllerTrackingStatus publishControllerTrackingStatus(
       const rclcpp::Time &stamp, const ControlTrajectoryContext *context,
       const AckermannControlCommand *command,
       const LongitudinalCommand *longitudinal, const LateralCommand *lateral,
-      double now_sec, const ControlCyclePlanSnapshot *plan_snapshot);
+      double now_sec, const ControlCyclePlanSnapshot *plan_snapshot,
+      bool state_lattice_delivery_gap = false);
   std::optional<ControllerCommandEnvelope> publishControllerCommandEnvelope(
       const AckermannControlCommand &command,
       const ControllerTrackingStatus &tracking_status,
-      const ControlCyclePlanSnapshot *plan_snapshot);
+      const ControlCyclePlanSnapshot *plan_snapshot,
+      const ControlTrajectoryContext *context);
   void publishControllerExecutionEnvelope(
       const ControllerCommandEnvelope &command_envelope,
       const ControlTrajectoryContext *context,
@@ -787,6 +841,9 @@ private:
                                      const Trajectory &control_trajectory);
   void clearOvertakeOverride();
   void applyReceivedOvertakeOverride(const OvertakeOverrideContract &contract);
+  bool activatePendingStateLatticeV4Contract(
+      const multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity &identity);
+  bool stateLatticeV4RendezvousPending() const;
   bool hasLatchedSpeedOnlyCap() const;
   bool applyOvertakeOverride(Trajectory &trajectory,
                              std::size_t nearest_traj_point_idx, double now_sec,

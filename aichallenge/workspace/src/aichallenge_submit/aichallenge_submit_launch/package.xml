@@ -46,6 +46,9 @@
   <exec_depend>multi_data_monitor</exec_depend>
   <exec_depend>generic_type_utility</exec_depend>
   <exec_depend>topic_tools</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>autoware_auto_control_msgs</exec_depend>
+  <exec_depend>autoware_auto_vehicle_msgs</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_index_python</test_depend>

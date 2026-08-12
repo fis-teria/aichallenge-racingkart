@@ -2,6 +2,7 @@
 #include "state_lattice_overtake_planner/c002ay0_shadow_proposal_capture.hpp"
 #include "state_lattice_overtake_planner/c002ay0_shadow_proposal_worker.hpp"
 #include "state_lattice_overtake_planner/lattice_planner.hpp"
+#include "state_lattice_overtake_planner/state_lattice_authority_projection.hpp"
 
 #include "fixtures/dev3_20260728_010706.hpp"
 
@@ -212,6 +213,8 @@ TEST(C002Ay0ShadowProposal, D2DenseCandidatePreservesExactCartesianAndBase) {
   EXPECT_EQ(trajectory.base_geometry_sha256, base.base_geometry_sha256);
   EXPECT_EQ(trajectory.base_source_sha256, base.base_source_sha256);
   EXPECT_EQ(trajectory.base_snapshot_sha256, base.snapshot_sha256);
+  EXPECT_EQ(trajectory.safety_valid_until.sec, 100);
+  EXPECT_EQ(trajectory.safety_valid_until.nanosec, 130000000U);
   ASSERT_EQ(trajectory.points.size(), context.candidate.dense.size());
   for (std::size_t index = 0U; index < trajectory.points.size(); ++index) {
     const auto &actual = trajectory.points[index];
@@ -230,6 +233,309 @@ TEST(C002Ay0ShadowProposal, D2DenseCandidatePreservesExactCartesianAndBase) {
                    context.ego.y);
   EXPECT_EQ(contract::validateTrajectoryAgainstBaseSnapshotV1(base, trajectory),
             contract::ValidationError::NONE);
+}
+
+TEST(StateLatticeAuthorityProjection,
+     SafetyEvaluatedCandidateReleasesWithoutControllerFeedbackRoundTrip) {
+  const auto context = makeD2Context();
+  const auto built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), context.candidate, context.ego, context.opponents,
+      context.config, evidence(context), time(100, 30000000U), identity());
+  ASSERT_TRUE(built.valid()) << built.reason;
+
+  const auto initial = sl::projectStateLatticeAuthority(
+      built.trajectory, nullptr, nullptr, false, true,
+      built.trajectory.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(initial.valid) << initial.reason;
+  EXPECT_FALSE(initial.warmup);
+  EXPECT_EQ(initial.plan.lateral_stop_authority_kind,
+            initial.plan.LATERAL_STOP_NONE);
+  EXPECT_FALSE(initial.constraint.stop_requested);
+  EXPECT_TRUE(initial.constraint.release_authorized);
+  EXPECT_GT(initial.constraint.speed_limit_mps, 0.0F);
+  EXPECT_EQ(initial.plan.candidate_content_sha256,
+            built.trajectory.geometry_sha256);
+  ASSERT_EQ(initial.plan.trajectory.points.size(),
+            built.trajectory.points.size());
+
+  multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus tracking;
+  tracking.plan_generation = built.trajectory.plan_sample_key.plan_generation;
+  tracking.pp_command_fresh = true;
+  tracking.pp_command_binding_valid = true;
+  tracking.trajectory_tracking_usable = true;
+  tracking.pass_warmup_motion_ready = true;
+  tracking.pass_warmup_steering_acquisition_active = false;
+  tracking.lateral_stop_authority_kind =
+      initial.plan.LATERAL_STOP_PASS_WARMUP;
+  tracking.lateral_stop_transaction_pass_direction =
+      built.trajectory.plan_sample_key.pass_direction;
+  tracking.lateral_stop_authority_token = built.trajectory.authority_token;
+  const auto ready = sl::projectStateLatticeAuthority(
+      built.trajectory, &tracking, nullptr, false, true,
+      built.trajectory.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(ready.valid) << ready.reason;
+  EXPECT_FALSE(ready.warmup);
+  EXPECT_EQ(ready.plan.lateral_stop_authority_kind,
+            ready.plan.LATERAL_STOP_NONE);
+  EXPECT_FALSE(ready.constraint.stop_requested);
+  EXPECT_TRUE(ready.constraint.release_authorized);
+  EXPECT_FLOAT_EQ(ready.constraint.speed_limit_mps,
+                  initial.constraint.speed_limit_mps);
+  EXPECT_EQ(ready.plan.candidate_content_sha256,
+            initial.plan.candidate_content_sha256);
+}
+
+TEST(StateLatticeAuthorityProjection,
+     CurrentBoundedCommandReleasesWithoutZeroSpeedSteeringConvergence) {
+  const auto context = makeD2Context();
+  const auto built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), context.candidate, context.ego, context.opponents,
+      context.config, evidence(context), time(100, 30000000U), identity());
+  ASSERT_TRUE(built.valid());
+
+  multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus tracking;
+  tracking.plan_generation = built.trajectory.plan_sample_key.plan_generation;
+  tracking.pp_command_fresh = true;
+  tracking.pp_command_binding_valid = true;
+  tracking.trajectory_tracking_usable = true;
+  tracking.pass_warmup_motion_ready = false;
+  tracking.pass_warmup_steering_acquisition_active = true;
+  tracking.lateral_stop_authority_kind =
+      multi_purpose_mpc_ros_msgs::msg::OvertakePlan::
+          LATERAL_STOP_PASS_WARMUP;
+  tracking.lateral_stop_transaction_pass_direction =
+      built.trajectory.plan_sample_key.pass_direction;
+  tracking.lateral_stop_authority_token = built.trajectory.authority_token;
+
+  const auto released = sl::projectStateLatticeAuthority(
+      built.trajectory, &tracking, nullptr, false, true,
+      built.trajectory.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(released.valid) << released.reason;
+  EXPECT_FALSE(released.warmup);
+  EXPECT_TRUE(released.constraint.release_authorized);
+  EXPECT_FALSE(released.constraint.stop_requested);
+  EXPECT_FLOAT_EQ(released.constraint.speed_limit_mps,
+                  built.trajectory.points.front().longitudinal_velocity_mps);
+}
+
+TEST(StateLatticeAuthorityProjection,
+     RaceAuthorityFailsClosedAndTrackingMismatchIsLeftToMux) {
+  const auto context = makeD2Context();
+  const auto built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), context.candidate, context.ego, context.opponents,
+      context.config, evidence(context), time(100, 30000000U), identity());
+  ASSERT_TRUE(built.valid()) << built.reason;
+  const auto disarmed = sl::projectStateLatticeAuthority(
+      built.trajectory, nullptr, nullptr, false, false,
+      built.trajectory.plan_sample_key.race_arm_epoch);
+  EXPECT_FALSE(disarmed.valid);
+
+  multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus mismatched;
+  mismatched.plan_generation =
+      built.trajectory.plan_sample_key.plan_generation + 1U;
+  mismatched.trajectory_tracking_usable = true;
+  mismatched.pass_warmup_motion_ready = true;
+  mismatched.lateral_stop_authority_kind =
+      multi_purpose_mpc_ros_msgs::msg::OvertakePlan::
+          LATERAL_STOP_PASS_WARMUP;
+  mismatched.lateral_stop_transaction_pass_direction =
+      built.trajectory.plan_sample_key.pass_direction;
+  mismatched.lateral_stop_authority_token = built.trajectory.authority_token;
+  const auto held = sl::projectStateLatticeAuthority(
+      built.trajectory, &mismatched, nullptr, false, true,
+      built.trajectory.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(held.valid) << held.reason;
+  EXPECT_FALSE(held.warmup);
+  EXPECT_FALSE(held.constraint.stop_requested);
+  EXPECT_TRUE(held.constraint.release_authorized);
+}
+
+TEST(StateLatticeAuthorityProjection,
+     FreshDirectPredecessorReadinessReleasesRevalidatedSuccessor) {
+  const auto context = makeD2Context();
+  const auto built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), context.candidate, context.ego, context.opponents,
+      context.config, evidence(context), time(100, 30000000U), identity());
+  ASSERT_TRUE(built.valid()) << built.reason;
+
+  auto successor_identity = identity();
+  successor_identity.plan_generation += 2U;
+  successor_identity.candidate_revision += 2U;
+  ++successor_identity.safety_snapshot_id;
+  const auto successor_built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), context.candidate, context.ego, context.opponents,
+      context.config, evidence(context), time(100, 80000000U),
+      successor_identity);
+  ASSERT_TRUE(successor_built.valid()) << successor_built.reason;
+  const auto &successor = successor_built.trajectory;
+
+  multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus tracking;
+  tracking.plan_generation = built.trajectory.plan_sample_key.plan_generation;
+  tracking.pp_command_fresh = true;
+  tracking.pp_command_binding_valid = true;
+  tracking.trajectory_tracking_usable = true;
+  tracking.pass_warmup_motion_ready = true;
+  tracking.pass_warmup_steering_acquisition_active = false;
+  tracking.lateral_stop_authority_kind =
+      multi_purpose_mpc_ros_msgs::msg::OvertakePlan::LATERAL_STOP_PASS_WARMUP;
+  tracking.lateral_stop_transaction_pass_direction =
+      built.trajectory.plan_sample_key.pass_direction;
+  tracking.lateral_stop_authority_token = built.trajectory.authority_token;
+
+  const auto ready = sl::projectStateLatticeAuthority(
+      successor, &tracking, &built.trajectory, true, true,
+      successor.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(ready.valid) << ready.reason;
+  EXPECT_FALSE(ready.warmup);
+  EXPECT_EQ(ready.plan.plan_generation,
+            successor.plan_sample_key.plan_generation);
+  EXPECT_EQ(ready.constraint.plan_generation,
+            successor.plan_sample_key.plan_generation);
+  EXPECT_EQ(ready.plan.candidate_revision,
+            successor.candidate_revision);
+  EXPECT_EQ(ready.plan.candidate_content_sha256,
+            successor.geometry_sha256);
+  EXPECT_EQ(ready.plan.trajectory.points.size(),
+            successor.points.size());
+
+  const auto stale = sl::projectStateLatticeAuthority(
+      successor, &tracking, &built.trajectory, false, true,
+      successor.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(stale.valid) << stale.reason;
+  EXPECT_FALSE(stale.warmup);
+  EXPECT_TRUE(stale.constraint.release_authorized);
+  EXPECT_EQ(stale.plan.plan_generation,
+            successor.plan_sample_key.plan_generation);
+}
+
+TEST(StateLatticeAuthorityProjection,
+     FreshReleasedPredecessorTrackingContinuesReplannedSuccessor) {
+  const auto context = makeD2Context();
+  const auto built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), context.candidate, context.ego, context.opponents,
+      context.config, evidence(context), time(100, 30000000U), identity());
+  ASSERT_TRUE(built.valid()) << built.reason;
+
+  auto successor_identity = identity();
+  successor_identity.plan_generation += 2U;
+  successor_identity.candidate_revision += 2U;
+  ++successor_identity.safety_snapshot_id;
+  auto replanned_candidate = context.candidate;
+  for (auto &point : replanned_candidate.representative) {
+    point.x += 1.0e-5;
+  }
+  for (auto &point : replanned_candidate.dense) {
+    point.x += 1.0e-5;
+  }
+  auto replanned_ego = context.ego;
+  replanned_ego.x += 1.0e-5;
+  replanned_ego.frenet =
+      context.frame.project(replanned_ego.x, replanned_ego.y,
+                            replanned_ego.yaw);
+  sl::LatticePlanner evaluator(context.config, &context.frame, &context.map);
+  ASSERT_TRUE(evaluator.evaluateTrajectory(
+      &replanned_candidate, context.opponents,
+      std::abs(replanned_ego.speed_mps)));
+  const auto successor_built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), replanned_candidate, replanned_ego, context.opponents,
+      context.config, evidence(context), time(100, 80000000U),
+      successor_identity);
+  ASSERT_TRUE(successor_built.valid()) << successor_built.reason;
+  ASSERT_NE(successor_built.trajectory.geometry_sha256,
+            built.trajectory.geometry_sha256);
+
+  multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus tracking;
+  tracking.plan_generation = built.trajectory.plan_sample_key.plan_generation;
+  tracking.trajectory_tracking_usable = true;
+  tracking.pass_warmup_motion_ready = false;
+  tracking.pass_warmup_steering_acquisition_active = false;
+  tracking.lateral_stop_authority_kind =
+      multi_purpose_mpc_ros_msgs::msg::OvertakePlan::LATERAL_STOP_NONE;
+  tracking.lateral_stop_transaction_pass_direction = 0;
+  tracking.lateral_stop_authority_token = 0U;
+
+  const auto continued = sl::projectStateLatticeAuthority(
+      successor_built.trajectory, &tracking, &built.trajectory, true, true,
+      successor_built.trajectory.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(continued.valid) << continued.reason;
+  EXPECT_FALSE(continued.warmup);
+  EXPECT_TRUE(continued.constraint.release_authorized);
+
+  auto changed_transaction_identity = successor_identity;
+  ++changed_transaction_identity.connector_transaction_id;
+  ++changed_transaction_identity.safety_snapshot_id;
+  const auto changed_transaction_built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), replanned_candidate, replanned_ego, context.opponents,
+      context.config, evidence(context), time(100, 90000000U),
+      changed_transaction_identity);
+  ASSERT_TRUE(changed_transaction_built.valid())
+      << changed_transaction_built.reason;
+  const auto &changed_transaction = changed_transaction_built.trajectory;
+  const auto changed_transaction_result = sl::projectStateLatticeAuthority(
+      changed_transaction, &tracking, &built.trajectory, true, true,
+      changed_transaction.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(changed_transaction_result.valid)
+      << changed_transaction_result.reason;
+  EXPECT_FALSE(changed_transaction_result.warmup);
+  EXPECT_TRUE(changed_transaction_result.constraint.release_authorized);
+
+  const auto stale = sl::projectStateLatticeAuthority(
+      successor_built.trajectory, &tracking, &built.trajectory, false, true,
+      successor_built.trajectory.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(stale.valid) << stale.reason;
+  EXPECT_FALSE(stale.warmup);
+  EXPECT_TRUE(stale.constraint.release_authorized);
+
+  auto later_identity = successor_identity;
+  later_identity.plan_generation += 4U;
+  later_identity.candidate_revision += 4U;
+  later_identity.safety_snapshot_id += 2U;
+  const auto later_built = sl::buildAy0ShadowProposal(
+      makeBaseSnapshot(), context.candidate, context.ego, context.opponents,
+      context.config, evidence(context), time(100, 180000000U),
+      later_identity);
+  ASSERT_TRUE(later_built.valid()) << later_built.reason;
+  const auto bounded_continuation = sl::projectStateLatticeAuthority(
+      later_built.trajectory, &tracking, &built.trajectory, true, true,
+      later_built.trajectory.plan_sample_key.race_arm_epoch);
+  ASSERT_TRUE(bounded_continuation.valid) << bounded_continuation.reason;
+  EXPECT_FALSE(bounded_continuation.warmup);
+}
+
+TEST(StateLatticeAuthorityProjection,
+     TransactionIdentityIsStableUntilTargetOrSideChanges) {
+  sl::StateLatticeAuthorityTransactionState state;
+  const auto *first = state.select("D2", -1);
+  ASSERT_NE(first, nullptr);
+  const auto first_value = *first;
+  const auto *held = state.select("D2", -1);
+  ASSERT_NE(held, nullptr);
+  EXPECT_EQ(held->attempt_id, first_value.attempt_id);
+  EXPECT_EQ(held->connector_transaction_id,
+            first_value.connector_transaction_id);
+  EXPECT_EQ(held->authority_token, first_value.authority_token);
+
+  const auto *changed = state.select("D2", 1);
+  ASSERT_NE(changed, nullptr);
+  EXPECT_GT(changed->attempt_id, first_value.attempt_id);
+  EXPECT_NE(changed->authority_token, first_value.authority_token);
+  EXPECT_EQ(state.select("", 0), nullptr);
+}
+
+TEST(C002Ay0ShadowProposal,
+     SafetyLeaseCoversTwoPlannerPeriodsButNeverExceedsInputFreshness) {
+  auto context = makeD2Context();
+  const auto base = makeBaseSnapshot();
+  context.config.planner_rate_hz = 20.0;
+  context.config.ego_stale_sec = 0.06;
+  context.config.opponent_stale_sec = 0.50;
+  const auto result = sl::buildAy0ShadowProposal(
+      base, context.candidate, context.ego, context.opponents, context.config,
+      evidence(context), time(100, 30000000U), identity());
+
+  ASSERT_TRUE(result.valid()) << result.reason;
+  EXPECT_EQ(result.trajectory.safety_valid_until.sec, 100);
+  EXPECT_EQ(result.trajectory.safety_valid_until.nanosec, 90000000U);
 }
 
 TEST(C002Ay0ShadowProposal, TrackabilityProfileIsBoundToConfigProvenance) {
@@ -251,6 +557,28 @@ TEST(C002Ay0ShadowProposal, TrackabilityProfileIsBoundToConfigProvenance) {
   EXPECT_NE(shadow_digest, pure_pursuit_digest);
   EXPECT_NE(shadow_digest, instant_digest);
   EXPECT_NE(pure_pursuit_digest, instant_digest);
+}
+
+TEST(C002Ay0ShadowProposal,
+     BaseCurrentPreflightMatchesBuilderTimeBoundaries) {
+  auto base = makeBaseSnapshot();
+  base.record_stamp = time(100, 100000000U);
+  base.base_source_stamp = time(100, 50000000U);
+  base.lease_valid_until = time(101);
+
+  EXPECT_TRUE(sl::baseSnapshotCurrentForProposal(
+      base, time(100, 200000000U), 0.10));
+  EXPECT_FALSE(sl::baseSnapshotCurrentForProposal(
+      base, time(100, 200000001U), 0.10));
+
+  base.record_stamp = time(100, 900000000U);
+  base.base_source_stamp = time(100, 950000000U);
+  EXPECT_FALSE(sl::baseSnapshotCurrentForProposal(
+      base, time(100, 900000000U), 0.10));
+
+  base.base_source_stamp = time(100, 850000000U);
+  EXPECT_FALSE(sl::baseSnapshotCurrentForProposal(base, time(101), 0.10));
+  EXPECT_FALSE(sl::baseSnapshotCurrentForProposal(base, time(100), 0.0));
 }
 
 TEST(C002Ay0ShadowProposal, InvalidStaleAndMutatedInputsNeverPublishValid) {

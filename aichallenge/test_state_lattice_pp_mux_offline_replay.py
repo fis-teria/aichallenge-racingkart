@@ -57,23 +57,50 @@ def test_launch_is_private_and_uses_production_nodes() -> None:
     assert group_remaps["/tf"] == "$(var root)/input/tf"
     assert group_remaps["/tf_static"] == "$(var root)/input/tf_static"
     nodes = {node.attrib["name"]: node for node in root.iter("node")}
-    lattice = nodes["test_only_offline_state_lattice_planner"]
+    lattice = nodes["state_lattice_overtake_planner_node"]
     assert lattice.attrib["pkg"] == "state_lattice_overtake_planner"
     lattice_params = {p.attrib.get("name"): p.attrib.get("value") for p in lattice.findall("param")}
-    assert lattice_params["live_control_output_enabled"] == "false"
+    assert lattice_params["live_control_output_enabled"] == "$(var exact_cartesian_enabled)"
     assert lattice_params["experimental_spatial_reference_override_live_publish_enabled"] == "true"
     assert lattice_params["instant_control_enabled"] == "false"
-    assert lattice_params["controller_trackability_profile"] == "shadow_only"
+    assert lattice_params["controller_trackability_profile"] == "$(var controller_trackability_profile)"
+    assert lattice_params["own_vehicle_id"] == "$(var own_vehicle_id)"
+    assert lattice_params["state_lattice_v2_live_proposal_publish_enabled"] == "$(var exact_cartesian_enabled)"
+    assert lattice_params["state_lattice_v2_base_attestation_accept_enabled"] == "$(var exact_cartesian_enabled)"
     assert lattice_params["ego_state_topic"].startswith("$(var root)/")
     assert lattice_params["opponent_topic"].startswith("$(var root)/")
     assert lattice_params["mpc_health_topic"].startswith("$(var root)/")
+    lattice_remaps = {
+        item.attrib["from"]: item.attrib["to"]
+        for item in lattice.findall("remap")
+    }
+    assert lattice_remaps["/overtake/reference_override"] == (
+        "$(var root)/planner/reference_override"
+    )
 
     planner = nodes["test_only_offline_overtake_planner"]
     assert planner.attrib["pkg"] == "overtake_planner"
-    assert planner.attrib["if"] == "$(var regenerated_mode)"
+    assert planner.attrib["if"] == "$(var use_current_authority)"
+    planner_params = {
+        item.attrib.get("name"): item.attrib.get("value")
+        for item in planner.findall("param")
+    }
+    assert planner_params["own_vehicle_id"] == "$(var own_vehicle_id)"
     planner_destinations = {r.attrib["to"] for r in planner.findall("remap")}
     assert "$(var root)/planner/plan" in planner_destinations
     assert "$(var root)/planner/safety_constraint" in planner_destinations
+
+    actuator = nodes["test_only_offline_steering_actuator"]
+    assert actuator.attrib["pkg"] == "aichallenge_submit_launch"
+    assert actuator.attrib["if"] == "$(var steering_feedback_enabled)"
+    actuator_params = {
+        item.attrib.get("name"): item.attrib.get("value")
+        for item in actuator.findall("param")
+    }
+    assert actuator_params["input_control_topic"] == "$(var root)/output/control_cmd"
+    assert actuator_params["output_steering_topic"] == "$(var root)/input/steering_status"
+    assert float(actuator_params["max_steering_rate_radps"]) > 0.0
+    assert float(actuator_params["max_steering_angle_rad"]) > 0.0
 
     mux = nodes["test_only_offline_hybrid_control_mux"]
     assert mux.attrib["pkg"] == "hybrid_control_mux"
@@ -147,6 +174,10 @@ def test_harness_is_bounded_localhost_only_and_exact() -> None:
         'assert_topic_contract pp_ack',
         'assert_topic_contract mux_grant',
         'assert_topic_contract final_control',
+        'assert_topic_contract steering_feedback',
+        'TEST_ONLY_REPLAY_STEERING_FEEDBACK_ENABLED',
+        'steering feedback requires exact Cartesian mode',
+        'expected_nodes+=(/test_only_offline_steering_actuator)',
         "recorder_node=/rosbag2_recorder",
         "assert_all_topics_private /events/write_split",
         '"/tf:=${PRIVATE_ROOT}/input/tf"',

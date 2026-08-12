@@ -349,6 +349,8 @@ def run_supervisor_fixture(
     bootstrap_status: int = 0,
     ready_domains: str = "1,2",
     gate_deadline_offset_sec: float | None = None,
+    runtime_image: str = "aichallenge-2025-eval",
+    write_attestation: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     repo_root = Path(__file__).resolve().parents[1]
     fake_bin = tmp_path / "bin"
@@ -396,7 +398,10 @@ esac
     fake_docker.chmod(0o755)
     log_path = tmp_path / "docker.log"
     run_host_dir = tmp_path / "output" / "fixture-run"
-    write_fixture_attestation(run_host_dir)
+    if write_attestation:
+        write_fixture_attestation(run_host_dir)
+    else:
+        (run_host_dir / "provenance").mkdir(parents=True)
     environment = dict(os.environ)
     environment.update(
         {
@@ -407,6 +412,7 @@ esac
             "RUN_HOST_DIR": str(run_host_dir),
             "AWSIM_READY_DOMAINS": ready_domains,
             "AUTOWARE_COMMAND_MODE": command_mode,
+            "AUTOWARE_RUNTIME_IMAGE": runtime_image,
             "FAKE_DOCKER_LOG": str(log_path),
             "FAKE_EXEC_ARGV_LOG": str(tmp_path / "exec-argv.bin"),
             "FAKE_BOOTSTRAP_STATUS": str(bootstrap_status),
@@ -435,6 +441,18 @@ esac
     )
     calls = log_path.read_text(encoding="utf-8").splitlines() if log_path.exists() else []
     return result, calls
+
+
+def test_dev_runtime_does_not_require_packaged_eval_attestation(
+    tmp_path: Path,
+) -> None:
+    result, calls = run_supervisor_fixture(
+        tmp_path,
+        runtime_image="aichallenge-2025-dev",
+        write_attestation=False,
+    )
+    assert result.returncode == 0
+    assert any("request_awsim_start.bash" in call for call in calls)
 
 
 @pytest.mark.parametrize("command_mode", ["run", "exec"])

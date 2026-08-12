@@ -74,6 +74,7 @@
       <arg name="state_lattice_v2_base_attestation_accept_enabled" value="$(var state_lattice_v2_live_proposal_publish_enabled)"/>
       <arg name="state_lattice_v2_expected_pp_producer_instance_id" value="$(var state_lattice_v2_pp_producer_instance_id)"/>
       <arg name="state_lattice_v2_expected_pp_session_id" value="$(var state_lattice_v2_session_id)"/>
+      <arg name="state_lattice_authority_publish_enabled" value="$(var state_lattice_v4_poc_command_activation_enabled)"/>
       <arg name="controller_trackability_profile" value="pure_pursuit"/>
       <arg name="safety_evaluation_enabled" value="true"/>
       <arg name="c002ay0_state_lattice_shadow_enabled" value="$(var c002ay0_state_lattice_shadow_enabled)"/>

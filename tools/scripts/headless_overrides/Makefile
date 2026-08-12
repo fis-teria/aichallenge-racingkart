@@ -1,8 +1,70 @@
 # make file inspired by https://roborovsky-racers.github.io/RoborovskyNote/
 SHELL := /bin/bash
 
+# Gate2 is an authority-bearing dispatch path.  Reject shell/make startup
+# injection before any Gate2 prerequisite or recipe is evaluated, and never
+# export those controls to a recursive dispatch.  `MAKEFLAGS` is Make's own
+# state; only the harmless no-print-directory form is accepted here.
+GATE2_PROTECTED_GOALS := gate2 gate2-wrapper-authorization gate2-live-authority-flags gate2-current-artifact-admission planner-pp-control-smoke planner-pp-control-smoke-eval
+GATE2_PROTECTED_GOAL_REQUESTED := $(filter $(GATE2_PROTECTED_GOALS),$(MAKECMDGOALS))
+ifneq ($(strip $(GATE2_PROTECTED_GOAL_REQUESTED)),)
+# Keep the shell and recursive-make entry points owned by this file.  A
+# command-line value must be rejected even when it happens to equal the
+# reviewed default; an untrusted environment value is rejected unless it is
+# the ordinary host `/bin/bash` setting which GNU Make otherwise ignores.
+ifneq ($(origin SHELL),file)
+$(error PRECONDITION_NOT_MET: gate2_make_variable_override:SHELL)
+endif
+GATE2_RAW_SHELL := $(strip $(shell /usr/bin/printenv SHELL 2>/dev/null))
+ifneq ($(GATE2_RAW_SHELL),)
+ifneq ($(GATE2_RAW_SHELL),/bin/bash)
+$(error PRECONDITION_NOT_MET: gate2_make_environment_override:SHELL)
+endif
+endif
+ifneq ($(filter command line environment override command line override environment override,$(origin MAKE)),)
+$(error PRECONDITION_NOT_MET: gate2_make_variable_override:MAKE)
+endif
+# These values select the target-specific runtime and command service.  A
+# top-level command-line/environment value would override the target-specific
+# reviewed assignments.  The existing planner recipe intentionally forwards
+# its fixed values to one recursive Make invocation, so that inner dispatch is
+# allowed to carry those already-reviewed values.
+GATE2_DISPATCH_OVERRIDE_VARS := AUTOWARE_SERVICE AUTOWARE_COMMAND_SERVICE AUTOWARE_COMMAND_MODE AUTOWARE_RUNTIME_IMAGE AWSIM_START_TARGET AUTOWARE_RUN_MODE AUTOSTART_DEBUG_VISUALIZATION CONTROL_METHOD RUN_KIND
+GATE2_DISPATCH_OVERRIDES := $(foreach var,$(GATE2_DISPATCH_OVERRIDE_VARS),$(if $(filter command line environment override command line override environment override,$(origin $(var))),$(var)))
+ifeq ($(MAKELEVEL),0)
+ifneq ($(strip $(GATE2_DISPATCH_OVERRIDES)),)
+$(error PRECONDITION_NOT_MET: gate2_dispatch_variable_override:$(strip $(GATE2_DISPATCH_OVERRIDES)))
+endif
+endif
+ifneq ($(strip $(BASH_ENV)),)
+$(error PRECONDITION_NOT_MET: gate2_make_environment_injection:BASH_ENV)
+endif
+ifneq ($(strip $(ENV)),)
+$(error PRECONDITION_NOT_MET: gate2_make_environment_injection:ENV)
+endif
+ifneq ($(strip $(SHELLOPTS)),)
+$(error PRECONDITION_NOT_MET: gate2_make_environment_injection:SHELLOPTS)
+endif
+ifneq ($(strip $(MAKEFILES)),)
+$(error PRECONDITION_NOT_MET: gate2_make_environment_injection:MAKEFILES)
+endif
+GATE2_RAW_GNUMAKEFLAGS := $(strip $(shell /usr/bin/printenv GNUMAKEFLAGS 2>/dev/null))
+ifneq ($(strip $(GATE2_RAW_GNUMAKEFLAGS)),)
+$(error PRECONDITION_NOT_MET: gate2_make_environment_injection:GNUMAKEFLAGS)
+endif
+# Recursive make may combine harmless short flags (for example `nw` from
+# `make -n`).  Reject every other make flag before any authority-bearing
+# prerequisite or recipe is evaluated.
+GATE2_MAKEFLAGS_UNSAFE := $(foreach flag,$(filter-out --no-print-directory --,$(strip $(MAKEFLAGS))),$(if $(subst n,,$(subst s,,$(subst w,,$(flag)))),$(flag)))
+ifneq ($(strip $(GATE2_MAKEFLAGS_UNSAFE)),)
+$(error PRECONDITION_NOT_MET: gate2_makeflags_invalid)
+endif
+unexport BASH_ENV ENV SHELLOPTS MAKEFILES GNUMAKEFLAGS MAKEOVERRIDES MFLAGS
+export RUN_ID AIC_TEST_GATE2_REVIEWED_EXECUTION_ID AIC_TEST_GATE2_REVIEW_ATTEMPT_ID AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256 AIC_TEST_GATE2_CAPABILITY_PATH
+endif
+
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-command-mode-run autoware-command-mode-exec autoware-request-initialpose autoware-request-control awsim-request-start awsim-request-start-run awsim-request-start-exec awsim-request-start-and-watch-d1 awsim-request-reset autoware-driver-zenoh \
-	capture-run-fingerprint verify-run-fingerprint simulator dev dev2 dev3 dev4 gate1 gate2 gate3 planner-pp-control-smoke planner-pp-control-smoke-eval state-lattice-test-only-observe state-lattice-test-only-replay driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
+	capture-run-fingerprint verify-run-fingerprint simulator dev dev2 dev3 dev4 gate1 gate2 gate3 planner-pp-control-smoke planner-pp-control-smoke-eval gate2-live-authority-flags gate2-wrapper-authorization gate2-current-artifact-admission state-lattice-test-only-observe state-lattice-test-only-replay driver zenoh download rviz2 down down2 down3 down4 ps autoware-bash
 
 # Used by docker-compose.yml for build/eval artifact ownership.
 HOST_UID ?= $(shell id -u)
@@ -69,6 +131,24 @@ capture-run-fingerprint:
 	STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID="$(STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID)" \
 	STATE_LATTICE_V2_SESSION_ID="$(STATE_LATTICE_V2_SESSION_ID)" \
 	STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED="$(STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED)" \
+	AIC_TEST_GATE2_REVIEW_ANCHOR_PATH="$(AIC_TEST_GATE2_REVIEW_ANCHOR_PATH)" \
+	AIC_TEST_GATE2_REVIEW_ANCHOR_SHA256="$(AIC_TEST_GATE2_REVIEW_ANCHOR_SHA256)" \
+	AIC_TEST_GATE2_REVIEW_STATE_PATH="$(AIC_TEST_GATE2_REVIEW_STATE_PATH)" \
+	AIC_TEST_GATE2_REVIEW_STATE_SHA256="$(AIC_TEST_GATE2_REVIEW_STATE_SHA256)" \
+	AIC_TEST_GATE2_REVIEW_RESULT_PATH="$(AIC_TEST_GATE2_REVIEW_RESULT_PATH)" \
+	AIC_TEST_GATE2_REVIEW_RESULT_SHA256="$(AIC_TEST_GATE2_REVIEW_RESULT_SHA256)" \
+	AIC_TEST_GATE2_REVIEWED_EXECUTION_ID="$(AIC_TEST_GATE2_REVIEWED_EXECUTION_ID)" \
+	AIC_TEST_GATE2_REVIEW_ATTEMPT_ID="$(AIC_TEST_GATE2_REVIEW_ATTEMPT_ID)" \
+	AIC_TEST_GATE2_REVIEWED_HANDOFF_PATH="$(AIC_TEST_GATE2_REVIEWED_HANDOFF_PATH)" \
+	AIC_TEST_GATE2_REVIEWED_HANDOFF_SHA256="$(AIC_TEST_GATE2_REVIEWED_HANDOFF_SHA256)" \
+	AIC_TEST_GATE2_REVIEW_PACKET_PATH="$(AIC_TEST_GATE2_REVIEW_PACKET_PATH)" \
+	AIC_TEST_GATE2_REVIEW_PACKET_SHA256="$(AIC_TEST_GATE2_REVIEW_PACKET_SHA256)" \
+	AIC_TEST_GATE2_REVIEW_BUNDLE_PATH="$(AIC_TEST_GATE2_REVIEW_BUNDLE_PATH)" \
+	AIC_TEST_GATE2_REVIEW_BUNDLE_SHA256="$(AIC_TEST_GATE2_REVIEW_BUNDLE_SHA256)" \
+	AIC_TEST_GATE2_REVIEW_IMAGE_ID="$(AIC_TEST_GATE2_REVIEW_IMAGE_ID)" \
+	AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256="$(AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256)" \
+	AIC_TEST_GATE2_WRAPPER_TOKEN="$(AIC_TEST_GATE2_WRAPPER_TOKEN)" \
+	AIC_TEST_GATE2_CAPABILITY_PATH="$(AIC_TEST_GATE2_CAPABILITY_PATH)" \
 	STATE_LATTICE_EXACT_SPATIAL_FOLLOW_SHADOW_ENABLED="$(if $(and $(filter planner-pp-control-smoke,$(RUN_KIND)),$(filter true,$(PLANNER_PP_CONTROL_SMOKE_LIVE_SPATIAL))),false,true)" \
 	ROSBAG="$(ROSBAG)" \
 	AWSIM_START_MODE="$(AWSIM_START_MODE)" \
@@ -82,6 +162,7 @@ capture-run-fingerprint:
 	AUTOWARE_RUN_MODE="$(AUTOWARE_RUN_MODE)" \
 	AUTOSTART_DEBUG_VISUALIZATION="$(AUTOSTART_DEBUG_VISUALIZATION)" \
 	AUTOWARE_RUNTIME_IMAGE="$(AUTOWARE_RUNTIME_IMAGE)" \
+	AIC_EXPECTED_AUTOWARE_RUNTIME_IMAGE_ID="$(AIC_EXPECTED_AUTOWARE_RUNTIME_IMAGE_ID)" \
 	D1_STALL_TIMEOUT_SEC="$(D1_STALL_TIMEOUT_SEC)" \
 	D1_STALL_ENTER_SPEED_MPS="$(D1_STALL_ENTER_SPEED_MPS)" \
 	D1_STALL_EXIT_SPEED_MPS="$(D1_STALL_EXIT_SPEED_MPS)" \
@@ -308,13 +389,13 @@ gate1 gate2 gate3: GATE_SCENARIO_ROOT := /aichallenge/simulator/AWSIM/AWSIM_Data
 planner-pp-control-smoke: CONTROL_METHOD := state_lattice_pure_pursuit
 planner-pp-control-smoke: RUN_KIND := planner-pp-control-smoke
 planner-pp-control-smoke: PLANNER_PP_CONTROL_SMOKE_LIVE_SPATIAL := true
-planner-pp-control-smoke: STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED := false
-planner-pp-control-smoke: STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED := false
+planner-pp-control-smoke: STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED := true
+planner-pp-control-smoke: STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED := true
 planner-pp-control-smoke: STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED := true
 planner-pp-control-smoke: STATE_LATTICE_V2_PRODUCER_INSTANCE_ID := 4101
 planner-pp-control-smoke: STATE_LATTICE_V2_PP_PRODUCER_INSTANCE_ID := 4201
 planner-pp-control-smoke: STATE_LATTICE_V2_SESSION_ID := 1
-planner-pp-control-smoke:
+planner-pp-control-smoke: gate2-live-authority-flags gate2-wrapper-authorization gate2-current-artifact-admission
 	@if [ "$(CONTROL_METHOD)" != "state_lattice_pure_pursuit" ]; then \
 		echo "planner-pp-control-smoke requires CONTROL_METHOD=state_lattice_pure_pursuit" >&2; \
 		exit 2; \
@@ -330,11 +411,64 @@ planner-pp-control-smoke:
 		STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED="$(STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED)" \
 		CONTROL_METHOD="state_lattice_pure_pursuit"
 
+gate2-live-authority-flags:
+	@if [ "$(STATE_LATTICE_V2_LIVE_PROPOSAL_PUBLISH_ENABLED)" != "true" ] || \
+		[ "$(STATE_LATTICE_V2_LIVE_PROPOSAL_ACCEPT_ENABLED)" != "true" ] || \
+		[ "$(STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED)" != "true" ]; then \
+		echo "planner-pp-control-smoke requires V2 publish, V2 accept, and V4 activation to be true" >&2; \
+		exit 2; \
+	fi
+
+gate2-wrapper-authorization:
+	@env -i \
+		PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+		HOME="/tmp" \
+		PYTHONPATH="$(CURDIR)/tools/aic_test" \
+		RUN_ID="$(RUN_ID)" \
+		AIC_TEST_GATE2_REVIEWED_EXECUTION_ID="$${AIC_TEST_GATE2_REVIEWED_EXECUTION_ID-}" \
+		AIC_TEST_GATE2_REVIEW_ATTEMPT_ID="$${AIC_TEST_GATE2_REVIEW_ATTEMPT_ID-}" \
+		AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256="$${AIC_TEST_GATE2_REVIEW_LAUNCH_SPEC_SHA256-}" \
+		AIC_TEST_GATE2_CAPABILITY_PATH="$${AIC_TEST_GATE2_CAPABILITY_PATH-}" \
+		python3 -m aic_test --repo-root "$(CURDIR)" \
+		verify-gate2-wrapper-capability --run-id "$(RUN_ID)"
+
+gate2-current-artifact-admission:
+	@check_artifact() { \
+		name="$$1"; source_path="$$2"; install_path="$$3"; expected_target="$$4"; expected_sha="$$5"; \
+		if [ -z "$$expected_sha" ] || ! [[ "$$expected_sha" =~ ^[0-9A-Fa-f]{64}$$ ]]; then \
+			echo "GATE2_REQUIRED_$${name}_SHA256 must be a SHA-256" >&2; exit 2; \
+		fi; \
+		if [ ! -L "$$install_path" ] || [ "$$(readlink "$$install_path")" != "$$expected_target" ]; then \
+			echo "Gate 2 install link mismatch for $$name" >&2; exit 2; \
+		fi; \
+		actual_sha="$$(sha256sum "$$source_path" | awk '{print $$1}')"; \
+		if [ "$$actual_sha" != "$${expected_sha,,}" ]; then \
+			echo "Gate 2 reviewed artifact mismatch for $$name" >&2; exit 2; \
+		fi; \
+	}; \
+	check_artifact MUX_NODE \
+		"aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/hybrid_control_mux/hybrid_control_mux_node.py" \
+		"aichallenge/workspace/install/hybrid_control_mux/lib/hybrid_control_mux/hybrid_control_mux_node.py" \
+		"/aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/hybrid_control_mux/hybrid_control_mux_node.py" \
+		"$(GATE2_REQUIRED_MUX_NODE_SHA256)"; \
+	check_artifact MUX_CONFIG \
+		"aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/hybrid_control_mux.param.yaml" \
+		"aichallenge/workspace/install/hybrid_control_mux/share/hybrid_control_mux/config/hybrid_control_mux.param.yaml" \
+		"/aichallenge/workspace/src/aichallenge_submit/hybrid_control_mux/config/hybrid_control_mux.param.yaml" \
+		"$(GATE2_REQUIRED_MUX_CONFIG_SHA256)"; \
+	check_artifact PLANNER_NODE \
+		"aichallenge/workspace/build/state_lattice_overtake_planner/state_lattice_overtake_planner_node" \
+		"aichallenge/workspace/install/state_lattice_overtake_planner/lib/state_lattice_overtake_planner/state_lattice_overtake_planner_node" \
+		"/aichallenge/workspace/build/state_lattice_overtake_planner/state_lattice_overtake_planner_node" \
+		"$(GATE2_REQUIRED_PLANNER_NODE_SHA256)"
+
 planner-pp-control-smoke-eval: AUTOWARE_SERVICE := autoware-eval-runtime
 planner-pp-control-smoke-eval: AUTOWARE_COMMAND_SERVICE := autoware-eval-command
 planner-pp-control-smoke-eval: AUTOWARE_COMMAND_MODE := exec
 planner-pp-control-smoke-eval: AUTOWARE_RUNTIME_IMAGE := aichallenge-2025-eval
-planner-pp-control-smoke-eval:
+planner-pp-control-smoke-eval: AUTOWARE_RUN_MODE := awsim-no-viz
+planner-pp-control-smoke-eval: AUTOSTART_DEBUG_VISUALIZATION := false
+planner-pp-control-smoke-eval: gate2-wrapper-authorization
 	@$(MAKE) planner-pp-control-smoke \
 		RUN_ID="$(RUN_ID)" AUTOWARE_SERVICE="$(AUTOWARE_SERVICE)" \
 		AUTOWARE_COMMAND_SERVICE="$(AUTOWARE_COMMAND_SERVICE)" \
@@ -348,6 +482,7 @@ gate1 gate3: AWSIM_START_TARGET := awsim-request-start
 gate2: AWSIM_START_TARGET := awsim-request-start-and-watch-d1
 gate2: AUTOWARE_RUN_MODE := awsim-no-viz
 gate2: AUTOSTART_DEBUG_VISUALIZATION := false
+gate2: gate2-wrapper-authorization
 gate1 gate2 gate3:
 	@echo "Start safety gate $(@:gate=%) ($(GATE_SCENARIO))"
 	@base_args="--scenario $(GATE_SCENARIO_ROOT)/$(GATE_SCENARIO)"; \

@@ -11,6 +11,7 @@
 #include "state_lattice_overtake_planner/reference_override_contract.hpp"
 #include "state_lattice_overtake_planner/state_lattice_v2_final_fence.hpp"
 #include "state_lattice_overtake_planner/state_lattice_v2_publication_state.hpp"
+#include "state_lattice_overtake_planner/state_lattice_authority_projection.hpp"
 
 #include <ament_index_cpp/get_package_prefix.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -18,8 +19,12 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <multi_purpose_mpc_ros_msgs/msg/authorized_cartesian_trajectory_v2.hpp>
 #include <multi_purpose_mpc_ros_msgs/msg/controller_base_trajectory_snapshot.hpp>
+#include <multi_purpose_mpc_ros_msgs/msg/controller_tracking_status.hpp>
+#include <multi_purpose_mpc_ros_msgs/msg/overtake_plan.hpp>
+#include <multi_purpose_mpc_ros_msgs/msg/safety_constraint.hpp>
 #include <multi_purpose_mpc_ros_msgs/msg/state_lattice_control_command.hpp>
 #include <multi_purpose_mpc_ros_msgs/msg/state_lattice_v2_base_attestation.hpp>
+#include <overtake_transport_contract/c002ay0_canonical.hpp>
 #include <multi_purpose_mpc_ros_msgs/msg/state_lattice_v2_final_fence.hpp>
 #include <multi_purpose_mpc_ros_msgs/msg/state_lattice_v2_quiesce_request.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
@@ -27,6 +32,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2/exceptions.h>
 #include <tf2/time.h>
@@ -365,6 +371,11 @@ public:
       config_error =
           "live control output requires safety_evaluation_enabled=true";
     }
+    config_.exact_cartesian_execution_enabled =
+        config_error.empty() && live_control_output_enabled_ &&
+        config_.safety_evaluation_enabled &&
+        experimental_spatial_reference_override_live_publish_enabled_ &&
+        state_lattice_v2_live_proposal_publish_enabled_;
     if (!config_error.empty()) {
       degraded_reason_ = "invalid_parameter: " + config_error;
       RCLCPP_ERROR(get_logger(), "%s", degraded_reason_.c_str());
@@ -412,6 +423,72 @@ public:
                      StateLatticeV2BaseAttestation::SharedPtr message) {
             onStateLatticeV2BaseAttestation(*message);
           });
+    }
+    if (state_lattice_authority_publish_enabled_ &&
+        state_lattice_v2_live_proposal_publish_enabled_) {
+      state_lattice_authority_plan_pub_ = create_publisher<
+          multi_purpose_mpc_ros_msgs::msg::OvertakePlan>(
+          "/overtake/plan", control_qos);
+      state_lattice_authority_constraint_pub_ = create_publisher<
+          multi_purpose_mpc_ros_msgs::msg::SafetyConstraint>(
+          "/overtake/safety_constraint", control_qos);
+      state_lattice_authority_tracking_sub_ = create_subscription<
+          multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus>(
+          state_lattice_authority_tracking_topic_, control_qos,
+          [this](const multi_purpose_mpc_ros_msgs::msg::
+                     ControllerTrackingStatus::SharedPtr message) {
+            state_lattice_authority_tracking_status_ = *message;
+            state_lattice_authority_tracking_receive_monotonic_ns_ =
+                monotonicNanoseconds();
+            if (message->trajectory_tracking_usable &&
+                !message->pass_warmup_steering_acquisition_active &&
+                (message->pass_warmup_motion_ready ||
+                 (message->lateral_stop_authority_kind ==
+                      multi_purpose_mpc_ros_msgs::msg::OvertakePlan::
+                          LATERAL_STOP_NONE &&
+                  message->lateral_stop_transaction_pass_direction == 0 &&
+                  message->lateral_stop_authority_token == 0U))) {
+              state_lattice_authority_ready_tracking_status_ = *message;
+              state_lattice_authority_ready_tracking_receive_monotonic_ns_ =
+                  state_lattice_authority_tracking_receive_monotonic_ns_;
+            }
+            if (message->trajectory_tracking_usable &&
+                !message->pass_warmup_steering_acquisition_active &&
+                message->lateral_stop_authority_kind ==
+                    multi_purpose_mpc_ros_msgs::msg::OvertakePlan::
+                        LATERAL_STOP_NONE &&
+                message->lateral_stop_transaction_pass_direction == 0 &&
+                message->lateral_stop_authority_token == 0U &&
+                state_lattice_authority_previous_proposal_.has_value() &&
+                message->plan_generation ==
+                    state_lattice_authority_previous_proposal_->plan_sample_key
+                        .plan_generation) {
+              state_lattice_authority_release_tracking_proposal_ =
+                  state_lattice_authority_previous_proposal_;
+              state_lattice_authority_release_tracking_proposal_monotonic_ns_ =
+                  state_lattice_authority_tracking_receive_monotonic_ns_;
+            }
+          });
+      state_lattice_authority_race_arm_sub_ =
+          create_subscription<std_msgs::msg::Bool>(
+              state_lattice_authority_race_arm_topic_, control_qos,
+              [this](const std_msgs::msg::Bool::SharedPtr message) {
+                if (message->data && !state_lattice_authority_race_armed_) {
+                  if (state_lattice_authority_race_arm_epoch_ !=
+                      std::numeric_limits<std::uint64_t>::max()) {
+                    ++state_lattice_authority_race_arm_epoch_;
+                  }
+                }
+                state_lattice_authority_race_armed_ = message->data;
+                if (!message->data) {
+                  state_lattice_authority_ready_tracking_status_.reset();
+                  state_lattice_authority_ready_tracking_receive_monotonic_ns_ =
+                      0U;
+                  state_lattice_authority_release_tracking_proposal_.reset();
+                  state_lattice_authority_release_tracking_proposal_monotonic_ns_ =
+                      0U;
+                }
+              });
     }
     if (!state_lattice_v2_live_proposal_publish_enabled_) {
       state_lattice_v2_final_fence_enabled_ = false;
@@ -571,6 +648,13 @@ private:
         declare_parameter<bool>("instant_control_enabled", false);
     state_lattice_v2_live_proposal_publish_enabled_ = declare_parameter<bool>(
         "state_lattice_v2_live_proposal_publish_enabled", false);
+    state_lattice_authority_publish_enabled_ = declare_parameter<bool>(
+        "state_lattice_authority_publish_enabled", false);
+    state_lattice_authority_tracking_topic_ = declare_parameter<std::string>(
+        "state_lattice_authority_tracking_topic",
+        "/hybrid_control/controller_tracking_status");
+    state_lattice_authority_race_arm_topic_ = declare_parameter<std::string>(
+        "state_lattice_authority_race_arm_topic", "/overtake/race_armed");
     const auto state_lattice_v2_producer_instance_id =
         declare_parameter<std::int64_t>("state_lattice_v2_producer_instance_id",
                                         0);
@@ -617,6 +701,15 @@ private:
       RCLCPP_WARN(get_logger(),
                   "State Lattice V2 publisher disabled: planner and direct "
                   "PP attestation identities must be explicit");
+    }
+    if (state_lattice_authority_publish_enabled_ &&
+        (!state_lattice_v2_live_proposal_publish_enabled_ ||
+         state_lattice_authority_tracking_topic_.empty() ||
+         state_lattice_authority_race_arm_topic_.empty())) {
+      state_lattice_authority_publish_enabled_ = false;
+      RCLCPP_WARN(get_logger(),
+                  "State Lattice authority disabled: V2 proposal and exact "
+                  "tracking/race topics are required");
     }
     config_.controller_trackability_profile =
         parseControllerTrackabilityProfile(declare_parameter<std::string>(
@@ -1550,30 +1643,31 @@ private:
       }
     }
 
+    const auto v2_publication_gate_stamp = now();
     const bool poc_base_identity_available =
         state_lattice_v2_live_proposal_publish_enabled_ &&
         state_lattice_v2_base_attestation_.has_value() &&
         overtake_transport_contract::state_lattice_v2::validateBaseAttestation(
             state_lattice_v2_base_attestation_.value(),
             state_lattice_v2_expected_pp_producer_instance_id_,
-            state_lattice_v2_expected_pp_session_id_, now()) ==
-            overtake_transport_contract::state_lattice_v2::RejectReason::kNone;
-    // V2 keeps its exact base-attestation gate.  The deliberately narrower
-    // V4 AWSIM PoC removes the wire copy's shadow marker only through its
-    // explicit live-publication switch.  Repository launch/runner policy
-    // limits that switch to simulation; direct parameter activation is not a
-    // supported production or real-vehicle entry point.
+            state_lattice_v2_expected_pp_session_id_,
+            v2_publication_gate_stamp) ==
+            overtake_transport_contract::state_lattice_v2::RejectReason::kNone &&
+        baseSnapshotCurrentForProposal(
+            state_lattice_v2_base_attestation_->base,
+            v2_publication_gate_stamp, config_.ego_stale_sec);
+    // Exact spatial publication first bootstraps through the speed-only wire
+    // form. Only a fresh controller base attestation may clear the shadow
+    // marker and admit V4, avoiding a V4-without-base bootstrap cycle.
     PlannerOutput wire_output = prepareWireOutputForPublication(
-        output, poc_base_identity_available,
-        experimental_spatial_reference_override_live_publish_enabled_);
+        output, poc_base_identity_available);
     const WirePublicationPolicy wire_policy{
         config_.experimental_exact_spatial_follow_shadow_enabled,
         experimental_spatial_reference_override_live_publish_enabled_};
     WirePayload prospective =
         makeWirePayload(wire_output, generation_, wire_policy);
     const bool semantic_generation_advanced =
-        !last_payload_.has_value() ||
-        !semanticallyEqual(last_payload_.value(), prospective);
+        shouldAdvanceWireGeneration(output, last_payload_, prospective);
     if (semantic_generation_advanced) {
       generation_ = nextGeneration(generation_);
       prospective = makeWirePayload(wire_output, generation_, wire_policy);
@@ -1595,7 +1689,8 @@ private:
       previous_safe_output_.reset();
     }
     publishInstantControl(output, now_sec);
-    publishStateLatticeV2Proposal(output);
+    publishStateLatticeV2Proposal(output, generation_,
+                                  poc_base_identity_available);
     captureAy0ShadowProposal(output, planning_timer_entry_monotonic_ns,
                              planner_update_begin_monotonic_ns,
                              pending_speed_evidence_identity.has_value()
@@ -1762,7 +1857,9 @@ private:
     }
   }
 
-  void publishStateLatticeV2Proposal(const PlannerOutput &output) {
+  void publishStateLatticeV2Proposal(const PlannerOutput &output,
+                                     std::uint32_t wire_generation,
+                                     bool base_identity_current) {
     const char *gate_reason = nullptr;
     if (state_lattice_v2_publication_halted_ ||
         state_lattice_v2_publication_state_.halted()) {
@@ -1778,6 +1875,8 @@ private:
       gate_reason = "emergency_stop";
     } else if (!state_lattice_v2_base_attestation_.has_value()) {
       gate_reason = "base_attestation_missing";
+    } else if (!base_identity_current) {
+      gate_reason = "base_attestation_not_current";
     } else if (output.target_id.empty()) {
       gate_reason = "target_missing";
     } else if (!output.safe_lateral) {
@@ -1815,16 +1914,41 @@ private:
     }
     Ay0ShadowProposalIdentity identity;
     identity.planner_instance_id = state_lattice_v2_producer_instance_id_;
-    identity.attempt_id = next_preparation.intent->proposal_sequence;
-    identity.connector_transaction_id = identity.attempt_id;
-    identity.authority_token = identity.attempt_id;
+    const std::int8_t pass_direction =
+        selected->goal_d_m > ego_.frenet.d ? 1 : -1;
+    const auto *authority_transaction =
+        state_lattice_authority_transaction_state_.select(output.target_id,
+                                                           pass_direction);
+    if (authority_transaction == nullptr) {
+      ++state_lattice_v2_publish_reject_count_;
+      state_lattice_v2_last_publish_reason_ = "authority_transaction_invalid";
+      return;
+    }
+    identity.attempt_id = authority_transaction->attempt_id;
+    identity.connector_transaction_id =
+        authority_transaction->connector_transaction_id;
+    identity.authority_token = authority_transaction->authority_token;
     identity.safety_snapshot_id = next_preparation.intent->proposal_sequence;
-    identity.plan_generation = next_preparation.intent->plan_generation;
-    identity.candidate_revision = next_preparation.intent->plan_generation;
+    // Bind the typed Cartesian geometry to the exact V4 semantic authority
+    // generation published earlier in this control cycle. Proposal sequence
+    // remains the independent transport ordering key.
+    identity.plan_generation = wire_generation;
+    identity.candidate_revision = wire_generation;
     identity.target_id = output.target_id;
+    OutputHorizonDiagnostic execution_diagnostic;
+    const auto execution_candidate = planner_->boundedExactCartesianExecution(
+        selected.value(), opponents_,
+        overtake_transport_contract::c002ay0::kMaxCartesianPoints,
+        &execution_diagnostic);
+    if (!execution_candidate.has_value()) {
+      ++state_lattice_v2_publish_reject_count_;
+      state_lattice_v2_last_publish_reason_ = "wire_geometry_invalid";
+      return;
+    }
     const auto plan_stamp = now();
     const auto proposal = buildAy0ShadowProposal(
-        state_lattice_v2_base_attestation_->base, selected.value(), ego_,
+        state_lattice_v2_base_attestation_->base,
+        execution_candidate.value(), ego_,
         opponents_, config_, ay0_shadow_safety_evidence_, plan_stamp, identity);
     if (!proposal.valid()) {
       ++state_lattice_v2_publish_reject_count_;
@@ -1878,7 +2002,7 @@ private:
     message.identity.producer_instance_id = producer_instance_id;
     message.identity.session_id = session_id;
     message.identity.proposal_sequence = publication_intent.proposal_sequence;
-    message.identity.plan_generation = publication_intent.plan_generation;
+    message.identity.plan_generation = wire_generation;
     message.identity.source_generation =
         proposal.trajectory.base_source_generation;
     message.identity.source_stamp = proposal.trajectory.base_source_stamp;
@@ -1947,6 +2071,101 @@ private:
           std::move(final_fence_admission.value()),
           publication_intent.proposal_sequence, committed_identity);
       publishStateLatticeV2FinalFenceIfReady();
+    }
+    if (state_lattice_authority_publish_enabled_) {
+      const auto now_monotonic_ns = monotonicNanoseconds();
+      const bool tracking_fresh =
+          state_lattice_authority_tracking_status_.has_value() &&
+          now_monotonic_ns >=
+              state_lattice_authority_tracking_receive_monotonic_ns_ &&
+          now_monotonic_ns -
+                  state_lattice_authority_tracking_receive_monotonic_ns_ <=
+              300000000ULL;
+      const bool predecessor_fresh =
+          state_lattice_authority_previous_proposal_.has_value() &&
+          now_monotonic_ns >=
+              state_lattice_authority_previous_proposal_monotonic_ns_ &&
+          now_monotonic_ns -
+                  state_lattice_authority_previous_proposal_monotonic_ns_ <=
+              120000000ULL;
+      const bool ready_tracking_fresh =
+          state_lattice_authority_ready_tracking_status_.has_value() &&
+          now_monotonic_ns >=
+              state_lattice_authority_ready_tracking_receive_monotonic_ns_ &&
+          now_monotonic_ns -
+                  state_lattice_authority_ready_tracking_receive_monotonic_ns_ <=
+              300000000ULL;
+      const auto ready_tracking_generation =
+          ready_tracking_fresh
+              ? state_lattice_authority_ready_tracking_status_->plan_generation
+              : 0U;
+      const bool ready_tracking_matches_projection =
+          ready_tracking_fresh &&
+          (ready_tracking_generation ==
+               message.proposal.plan_sample_key.plan_generation ||
+           (state_lattice_authority_previous_proposal_.has_value() &&
+            ready_tracking_generation ==
+                state_lattice_authority_previous_proposal_->plan_sample_key
+                    .plan_generation));
+      const bool release_evidence_tracking_matches =
+          ready_tracking_fresh &&
+          state_lattice_authority_ready_tracking_status_
+                  ->trajectory_tracking_usable &&
+          state_lattice_authority_ready_tracking_status_
+                  ->lateral_stop_authority_kind ==
+              multi_purpose_mpc_ros_msgs::msg::OvertakePlan::LATERAL_STOP_NONE &&
+          state_lattice_authority_release_tracking_proposal_.has_value() &&
+          ready_tracking_generation ==
+              state_lattice_authority_release_tracking_proposal_->plan_sample_key
+                  .plan_generation &&
+          now_monotonic_ns >=
+              state_lattice_authority_release_tracking_proposal_monotonic_ns_ &&
+          now_monotonic_ns -
+                  state_lattice_authority_release_tracking_proposal_monotonic_ns_ <=
+              300000000ULL;
+      const auto *projection_tracking =
+          (ready_tracking_matches_projection ||
+           release_evidence_tracking_matches)
+              ? &state_lattice_authority_ready_tracking_status_.value()
+              : (tracking_fresh
+                     ? &state_lattice_authority_tracking_status_.value()
+                     : nullptr);
+      const bool release_tracking_projection =
+          projection_tracking != nullptr &&
+          projection_tracking->trajectory_tracking_usable &&
+          projection_tracking->lateral_stop_authority_kind ==
+              multi_purpose_mpc_ros_msgs::msg::OvertakePlan::LATERAL_STOP_NONE &&
+          state_lattice_authority_release_tracking_proposal_.has_value() &&
+          projection_tracking->plan_generation ==
+              state_lattice_authority_release_tracking_proposal_->plan_sample_key
+                  .plan_generation &&
+          now_monotonic_ns >=
+              state_lattice_authority_release_tracking_proposal_monotonic_ns_ &&
+          now_monotonic_ns -
+                  state_lattice_authority_release_tracking_proposal_monotonic_ns_ <=
+              300000000ULL;
+      const auto *projection_predecessor =
+          release_tracking_projection
+              ? &state_lattice_authority_release_tracking_proposal_.value()
+              : (state_lattice_authority_previous_proposal_.has_value()
+                     ? &state_lattice_authority_previous_proposal_.value()
+                     : nullptr);
+      const auto authority = projectStateLatticeAuthority(
+          message.proposal, projection_tracking, projection_predecessor,
+          release_tracking_projection || predecessor_fresh,
+          state_lattice_authority_race_armed_,
+          state_lattice_authority_race_arm_epoch_);
+      if (authority.valid && state_lattice_authority_plan_pub_ != nullptr &&
+          state_lattice_authority_constraint_pub_ != nullptr) {
+        state_lattice_authority_plan_pub_->publish(authority.plan);
+        state_lattice_authority_constraint_pub_->publish(authority.constraint);
+        state_lattice_authority_previous_proposal_ = message.proposal;
+        state_lattice_authority_previous_proposal_monotonic_ns_ =
+            now_monotonic_ns;
+        state_lattice_authority_last_reason_ = authority.reason;
+      } else {
+        state_lattice_authority_last_reason_ = authority.reason;
+      }
     }
     state_lattice_v2_last_publish_reason_ = "published";
   }
@@ -2369,6 +2588,21 @@ private:
                                                                   : "false")
          << ",\"state_lattice_v2_last_publish_reason\":\"";
     append_json_escaped(state_lattice_v2_last_publish_reason_.c_str());
+    json << "\",\"state_lattice_authority_publish_enabled\":"
+         << (state_lattice_authority_publish_enabled_ ? "true" : "false")
+         << ",\"state_lattice_authority_race_armed\":"
+         << (state_lattice_authority_race_armed_ ? "true" : "false")
+         << ",\"state_lattice_authority_race_arm_epoch\":"
+         << state_lattice_authority_race_arm_epoch_
+         << ",\"state_lattice_authority_tracking_present\":"
+         << (state_lattice_authority_tracking_status_.has_value() ? "true"
+                                                                   : "false")
+         << ",\"state_lattice_authority_tracking_generation\":"
+         << (state_lattice_authority_tracking_status_.has_value()
+                 ? state_lattice_authority_tracking_status_->plan_generation
+                 : 0U)
+         << ",\"state_lattice_authority_last_reason\":\"";
+    append_json_escaped(state_lattice_authority_last_reason_.c_str());
     json << "\",\"ay0_shadow_worker\":{";
     const auto ay0_shadow_diagnostics =
         ay0_shadow_worker_session_ == nullptr
@@ -3024,6 +3258,30 @@ private:
   bool instant_control_enabled_{false};
   bool experimental_spatial_reference_override_live_publish_enabled_{false};
   bool state_lattice_v2_live_proposal_publish_enabled_{false};
+  bool state_lattice_authority_publish_enabled_{false};
+  std::string state_lattice_authority_tracking_topic_;
+  std::string state_lattice_authority_race_arm_topic_;
+  bool state_lattice_authority_race_armed_{false};
+  std::uint64_t state_lattice_authority_race_arm_epoch_{0U};
+  std::uint64_t state_lattice_authority_tracking_receive_monotonic_ns_{0U};
+  std::uint64_t state_lattice_authority_ready_tracking_receive_monotonic_ns_{
+      0U};
+  std::uint64_t state_lattice_authority_previous_proposal_monotonic_ns_{0U};
+  std::optional<multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus>
+      state_lattice_authority_tracking_status_;
+  std::optional<multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus>
+      state_lattice_authority_ready_tracking_status_;
+  std::uint64_t
+      state_lattice_authority_release_tracking_proposal_monotonic_ns_{0U};
+  std::optional<
+      multi_purpose_mpc_ros_msgs::msg::AuthorizedCartesianTrajectory>
+      state_lattice_authority_release_tracking_proposal_;
+  std::optional<
+      multi_purpose_mpc_ros_msgs::msg::AuthorizedCartesianTrajectory>
+      state_lattice_authority_previous_proposal_;
+  StateLatticeAuthorityTransactionState
+      state_lattice_authority_transaction_state_;
+  std::string state_lattice_authority_last_reason_{"disabled"};
   std::uint64_t state_lattice_v2_producer_instance_id_{0U};
   bool state_lattice_v2_base_attestation_accept_enabled_{false};
   std::string state_lattice_v2_expected_pp_producer_instance_id_;
@@ -3111,6 +3369,15 @@ private:
   rclcpp::Publisher<
       multi_purpose_mpc_ros_msgs::msg::AuthorizedCartesianTrajectoryV2>::
       SharedPtr state_lattice_v2_proposal_pub_;
+  rclcpp::Publisher<multi_purpose_mpc_ros_msgs::msg::OvertakePlan>::SharedPtr
+      state_lattice_authority_plan_pub_;
+  rclcpp::Publisher<multi_purpose_mpc_ros_msgs::msg::SafetyConstraint>::
+      SharedPtr state_lattice_authority_constraint_pub_;
+  rclcpp::Subscription<
+      multi_purpose_mpc_ros_msgs::msg::ControllerTrackingStatus>::SharedPtr
+      state_lattice_authority_tracking_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr
+      state_lattice_authority_race_arm_sub_;
   rclcpp::Subscription<
       multi_purpose_mpc_ros_msgs::msg::StateLatticeV2BaseAttestation>::SharedPtr
       state_lattice_v2_base_attestation_sub_;

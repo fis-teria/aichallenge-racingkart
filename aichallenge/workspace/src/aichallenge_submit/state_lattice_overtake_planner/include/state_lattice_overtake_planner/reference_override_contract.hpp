@@ -3,6 +3,7 @@
 #include "state_lattice_overtake_planner/types.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace state_lattice_overtake_planner {
@@ -27,12 +28,15 @@ struct WirePublicationPolicy {
 };
 
 PlannerOutput prepareWireOutputForPublication(
-    const PlannerOutput &output, bool v2_base_identity_available,
-    bool v4_poc_live_publish_enabled);
+    const PlannerOutput &output, bool v2_base_identity_available);
 WirePayload makeWirePayload(const PlannerOutput &output,
                             std::uint32_t generation,
                             WirePublicationPolicy policy = {});
 bool semanticallyEqual(const WirePayload &lhs, const WirePayload &rhs);
+bool shouldAdvanceWireGeneration(
+    const PlannerOutput &output,
+    const std::optional<WirePayload> &last_payload,
+    const WirePayload &prospective_payload);
 std::uint32_t nextGeneration(std::uint32_t current);
 bool deadlinePreviousOutputReusable(bool previous_fresh,
                                     bool previous_horizon_safe,
