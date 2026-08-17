@@ -341,6 +341,19 @@ struct CandidateTrajectory {
   double tangent_scale{1.0};
   // Longitudinal reference arc allocated to complete the lateral transition.
   double required_arc_m{0.0};
+  // Search-continuity evidence only. These values identify a clearance
+  // profile that passed the complete evaluator in this cycle; they never
+  // carry trajectory bytes or motion authority across cycles.
+  bool clearance_profile_applied{false};
+  double clearance_profile_join_fraction{0.0};
+  double clearance_profile_yaw_magnitude{0.0};
+  double clearance_profile_tangent_scale{0.0};
+  // Read-only search-order evidence. These counters never participate in
+  // ranking or admission; they make the bounded profile search observable to
+  // focused tests and runtime diagnostics.
+  std::size_t clearance_profile_attempt_index{0U};
+  std::size_t clearance_profile_attempts_evaluated{0U};
+  std::size_t clearance_profile_unique_attempt_limit{0U};
   std::vector<TrajectoryPoint> representative;
   std::vector<TrajectoryPoint> dense;
   int total_cost{0};
@@ -378,6 +391,11 @@ struct CandidateTrajectory {
   bool requires_entry_deceleration{false};
   bool feasible{false};
   std::string rejection_reason;
+  // Identity of the non-exempt opponent responsible for an opponent-collision
+  // rejection. Ambiguous simultaneous identities must never authorize a
+  // selected-blocker clearance recovery.
+  std::string rejection_opponent_id;
+  bool rejection_opponent_identity_ambiguous{false};
 };
 
 constexpr std::size_t kMaximumCandidateDiagnosticCount = 21U;
@@ -458,6 +476,29 @@ struct PlanningCycleMetrics {
   std::size_t candidate_diagnostic_count{0U};
   std::array<CandidateRejectionDiagnostic, kMaximumCandidateDiagnosticCount>
       candidate_diagnostics{};
+  // Read-only observability for the final accepted-path receding-horizon
+  // recovery.  This must never participate in admission or selection.  It
+  // exists so a runtime 15-candidate summary can distinguish entry rejection,
+  // join-geometry rejection, unchanged evaluator rejection, and exact
+  // Cartesian rejection without guessing from the final STOP output.
+  bool accepted_path_continuation_requested{false};
+  bool accepted_path_continuation_target_matches{false};
+  bool accepted_path_continuation_target_missing_recovery{false};
+  bool accepted_path_continuation_evaluated{false};
+  bool accepted_path_continuation_exact_binding_valid{false};
+  bool accepted_path_continuation_anchor_valid{false};
+  double accepted_path_continuation_nearest_distance_m{
+      std::numeric_limits<double>::quiet_NaN()};
+  double accepted_path_continuation_nearest_yaw_error_rad{
+      std::numeric_limits<double>::quiet_NaN()};
+  std::size_t accepted_path_continuation_join_points{0U};
+  std::size_t accepted_path_continuation_connector_attempts{0U};
+  std::size_t accepted_path_continuation_connector_generation_rejects{0U};
+  std::size_t accepted_path_continuation_evaluator_rejects{0U};
+  std::size_t accepted_path_continuation_cartesian_rejects{0U};
+  bool accepted_path_continuation_accepted{false};
+  std::string accepted_path_continuation_stage{"not_requested"};
+  std::string accepted_path_continuation_last_reject_reason;
 };
 
 // Deadline-rejected trial state has no wire generation. Clear only the

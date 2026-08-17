@@ -211,6 +211,192 @@ def test_rate_limited_commit_replays_only_immutable_limited_final():
         rclpy.shutdown()
 
 
+def test_same_generation_published_command_ratchets_gap_snapshot_without_renewal():
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        constraint = _install_committed_passing_delivery_gap_lease(mux)
+        original = mux.motion_authority_delivery_gap_lease
+        assert original is not None
+        temporal_bounds = (
+            original.acquired_steady_time_sec,
+            original.plan_receipt_time_sec,
+            original.constraint_receipt_time_sec,
+            original.tracking_receipt_time_sec,
+            original.envelope_receipt_time_sec,
+            original.command_receipt_time_sec,
+            original.gap_started_steady_time_sec,
+        )
+
+        newer_envelope = copy.deepcopy(original.envelope)
+        newer_envelope.command_sequence += 1
+        newer_envelope.header.stamp.nanosec += 10_000_000
+        newer_envelope.command.stamp = copy.deepcopy(
+            newer_envelope.header.stamp
+        )
+        newer_envelope.command.lateral.steering_tire_angle = -0.2
+        newer_final = copy.deepcopy(newer_envelope.command)
+        newer_final.lateral.steering_tire_angle = -0.04
+        newer_steering_result = SteeringLimitResult(
+            raw_steering_rad=-0.2,
+            limited_steering_rad=-0.04,
+            steering_delta_rad=-0.02,
+            angle_limited=False,
+            rate_limited=True,
+            limiter_reset=False,
+        )
+
+        # Merely receiving or validating B is insufficient.  Until the exact
+        # final bytes have actually been published, A remains authoritative.
+        mux.last_published_control_command = copy.deepcopy(
+            original.final_command
+        )
+        mux.last_published_control_source = "pure_pursuit"
+        mux._ratchet_motion_authority_delivery_gap_lease_after_publish(
+            plan_identity=original.plan_identity,
+            constraint=original.constraint,
+            envelope=newer_envelope,
+            final_command=newer_final,
+            steering_result=newer_steering_result,
+        )
+        assert (
+            mux.motion_authority_delivery_gap_lease.envelope.command_sequence
+            == original.envelope.command_sequence
+        )
+
+        mux.last_published_control_command = copy.deepcopy(newer_final)
+        mux._ratchet_motion_authority_delivery_gap_lease_after_publish(
+            plan_identity=original.plan_identity,
+            constraint=original.constraint,
+            envelope=newer_envelope,
+            final_command=newer_final,
+            steering_result=newer_steering_result,
+        )
+        ratcheted = mux.motion_authority_delivery_gap_lease
+        assert ratcheted is not None
+        assert ratcheted.envelope.command_sequence == (
+            original.envelope.command_sequence + 1
+        )
+        assert ratcheted.final_command.lateral.steering_tire_angle == (
+            pytest.approx(-0.04)
+        )
+        assert ratcheted.steering_result == newer_steering_result
+        assert (
+            ratcheted.acquired_steady_time_sec,
+            ratcheted.plan_receipt_time_sec,
+            ratcheted.constraint_receipt_time_sec,
+            ratcheted.tracking_receipt_time_sec,
+            ratcheted.envelope_receipt_time_sec,
+            ratcheted.command_receipt_time_sec,
+            ratcheted.gap_started_steady_time_sec,
+        ) == temporal_bounds
+
+        sample = mux._direct_motion_authority_successor_lease_sample(
+            successor_generation=8,
+            now_sec=mux.now_sec(),
+            authority_selection=SafetyAuthoritySelection(
+                constraint,
+                mux.now_sec(),
+                7,
+                SafetyAuthorityRendezvousState.NORMAL_DELIVERY_GAP,
+            ),
+            ros_clock_stalled=False,
+            active_control_fault_reason="",
+            deadline_missed=False,
+        )
+        assert sample is not None
+        assert sample.command.lateral.steering_tire_angle == pytest.approx(
+            -0.04
+        )
+        replay = copy.deepcopy(sample.command)
+        replay_result = mux._prepare_motion_authority_delivery_gap_replay(
+            command=replay,
+            source="pure_pursuit",
+            now_sec=mux.now_sec(),
+        )
+        assert replay_result is not None
+        assert replay.lateral.steering_tire_angle == pytest.approx(-0.04)
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "plan_identity",
+        "constraint_payload",
+        "envelope_plan_identity",
+        "non_monotonic_envelope",
+        "invalid_steering_provenance",
+    ),
+)
+def test_same_generation_published_command_ratchet_rejects_binding_mutation(
+    mutation,
+):
+    rclpy.init()
+    mux = HybridControlMuxNode()
+    mux.timer.cancel()
+    try:
+        _install_committed_passing_delivery_gap_lease(mux)
+        original = mux.motion_authority_delivery_gap_lease
+        assert original is not None
+        plan_identity = tuple(original.plan_identity)
+        constraint = copy.deepcopy(original.constraint)
+        envelope = copy.deepcopy(original.envelope)
+        envelope.command_sequence += 1
+        envelope.header.stamp.nanosec += 10_000_000
+        envelope.command.stamp = copy.deepcopy(envelope.header.stamp)
+        envelope.command.lateral.steering_tire_angle = -0.2
+        final_command = copy.deepcopy(envelope.command)
+        final_command.lateral.steering_tire_angle = -0.04
+        steering_result = SteeringLimitResult(
+            raw_steering_rad=-0.2,
+            limited_steering_rad=-0.04,
+            steering_delta_rad=-0.02,
+            angle_limited=False,
+            rate_limited=True,
+            limiter_reset=False,
+        )
+
+        if mutation == "plan_identity":
+            mutated = list(plan_identity)
+            mutated[3] = "different_target"
+            plan_identity = tuple(mutated)
+        elif mutation == "constraint_payload":
+            constraint.speed_limit_mps += 0.1
+        elif mutation == "envelope_plan_identity":
+            envelope.plan_sample_key.target_vehicle_id = "different_target"
+        elif mutation == "non_monotonic_envelope":
+            envelope.command_sequence = original.envelope.command_sequence
+        elif mutation == "invalid_steering_provenance":
+            steering_result = replace(steering_result, limiter_reset=True)
+        else:
+            raise AssertionError(f"unknown mutation: {mutation}")
+
+        mux.last_published_control_command = copy.deepcopy(final_command)
+        mux.last_published_control_source = "pure_pursuit"
+        mux._ratchet_motion_authority_delivery_gap_lease_after_publish(
+            plan_identity=plan_identity,
+            constraint=constraint,
+            envelope=envelope,
+            final_command=final_command,
+            steering_result=steering_result,
+        )
+        retained = mux.motion_authority_delivery_gap_lease
+        assert retained is not None
+        assert retained.envelope.command_sequence == (
+            original.envelope.command_sequence
+        )
+        assert retained.final_command.lateral.steering_tire_angle == (
+            original.final_command.lateral.steering_tire_angle
+        )
+    finally:
+        mux.destroy_node()
+        rclpy.shutdown()
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_reason"),
     [
@@ -3313,7 +3499,7 @@ def test_motion_authority_requires_exact_current_generation_envelope():
             stop_requested=False,
             release_authorized=True,
             speed_limit_mps=3.0,
-            required_brake_decel_mps2=1.0,
+            required_brake_decel_mps2=0.0,
             header_stamp_ns=10_000_000_000,
             frame_id="map",
             reason="release_authorized",
@@ -3321,7 +3507,7 @@ def test_motion_authority_requires_exact_current_generation_envelope():
         decision = SafetyConstraintDecision(
             stop_required=False,
             speed_limit_mps=3.0,
-            required_brake_decel_mps2=1.0,
+            required_brake_decel_mps2=0.0,
             constraint_generation=11,
             plan_generation=9,
             reason="release_authorized",
@@ -3347,6 +3533,169 @@ def test_motion_authority_requires_exact_current_generation_envelope():
         )
         assert valid
         assert reason == "ready"
+
+        # Runtime Gen263: PP requests 2.207877874 m/s2 while the selected Mux
+        # configuration safely clamps fallback acceleration to 2.0 m/s2.  The
+        # grant must bind the deterministic transformed command, not compare
+        # it with the pre-clamp envelope.
+        runtime_envelope = copy.deepcopy(envelope)
+        runtime_envelope.command.longitudinal.speed = 2.7598564624786377
+        runtime_envelope.command.longitudinal.acceleration = (
+            2.2078778743743896
+        )
+        mux.fallback_speed_mps = 10.0
+        mux.fallback_accel_max_mps2 = 2.0
+        mux.fallback_decel_min_mps2 = -1.5
+        mux.pure_pursuit_envelope_cache[identity] = (
+            mux._pure_pursuit_envelope_fingerprint(runtime_envelope),
+            now_sec,
+            True,
+            "valid",
+            runtime_envelope,
+        )
+        transformed_final = mux._fallback_command(
+            copy.deepcopy(runtime_envelope.command), now_sec
+        )
+        transformed_final, transformed_source, _ = (
+            mux._apply_safety_constraint(
+                transformed_final,
+                "pure_pursuit",
+                "selected",
+                decision,
+                now_sec,
+            )
+        )
+        assert transformed_source == "pure_pursuit"
+        assert transformed_final.longitudinal.speed == pytest.approx(
+            2.7598564624786377
+        )
+        assert transformed_final.longitudinal.acceleration == 2.0
+        transformed_steering_result = mux.steering_limiter.reset(
+            float(runtime_envelope.command.lateral.steering_tire_angle),
+            now_sec,
+            "pure_pursuit",
+        )
+        valid, reason, _, _ = mux._motion_authority_grant_eligible(
+            final_command=transformed_final,
+            selected_sample=sample,
+            tracking_plan_generation=9,
+            authority_plan_generation=9,
+            authority_constraint=constraint,
+            constraint_decision=decision,
+            decision_source="pure_pursuit",
+            now_sec=now_sec,
+            active_control_fault_reason="",
+            ros_clock_stalled=False,
+            deadline_missed=False,
+            steering_result=transformed_steering_result,
+        )
+        assert valid
+        assert reason == "ready"
+
+        unexplained_mutations = (
+            ("speed", "longitudinal", "speed", 0.01),
+            ("acceleration", "longitudinal", "acceleration", -0.1),
+            ("jerk", "longitudinal", "jerk", 0.01),
+            (
+                "steering_rate",
+                "lateral",
+                "steering_tire_rotation_rate",
+                0.01,
+            ),
+        )
+        for _, group, field, delta in unexplained_mutations:
+            unexplained_final = copy.deepcopy(transformed_final)
+            message_group = getattr(unexplained_final, group)
+            setattr(
+                message_group,
+                field,
+                float(getattr(message_group, field)) + delta,
+            )
+            valid, reason, _, _ = mux._motion_authority_grant_eligible(
+                final_command=unexplained_final,
+                selected_sample=sample,
+                tracking_plan_generation=9,
+                authority_plan_generation=9,
+                authority_constraint=constraint,
+                constraint_decision=decision,
+                decision_source="pure_pursuit",
+                now_sec=now_sec,
+                active_control_fault_reason="",
+                ros_clock_stalled=False,
+                deadline_missed=False,
+                steering_result=transformed_steering_result,
+            )
+            assert not valid
+            assert reason == "final_command_binding"
+
+        stop_decision = replace(decision, stop_required=True)
+        valid, reason, _, _ = mux._motion_authority_grant_eligible(
+            final_command=transformed_final,
+            selected_sample=sample,
+            tracking_plan_generation=9,
+            authority_plan_generation=9,
+            authority_constraint=constraint,
+            constraint_decision=stop_decision,
+            decision_source="pure_pursuit",
+            now_sec=now_sec,
+            active_control_fault_reason="",
+            ros_clock_stalled=False,
+            deadline_missed=False,
+            steering_result=transformed_steering_result,
+        )
+        assert not valid
+        assert reason == "constraint"
+
+        nonfinite_envelope = copy.deepcopy(runtime_envelope)
+        nonfinite_envelope.command.longitudinal.speed = math.nan
+        nonfinite_identity = mux._pure_pursuit_envelope_identity(
+            nonfinite_envelope
+        )
+        mux.pure_pursuit_envelope_cache[nonfinite_identity] = (
+            mux._pure_pursuit_envelope_fingerprint(nonfinite_envelope),
+            now_sec,
+            True,
+            "valid",
+            nonfinite_envelope,
+        )
+        mux.pure_pursuit_envelope_active_producer_instance_id = int(
+            nonfinite_envelope.producer_instance_id
+        )
+        mux.pure_pursuit_envelope_active_sequence = int(
+            nonfinite_envelope.command_sequence
+        )
+        nonfinite_sample = mux._build_selected_pp_motion_sample(
+            nonfinite_envelope.command,
+            now_sec,
+            envelope_identity=nonfinite_identity,
+        )
+        valid, reason, _, _ = mux._motion_authority_grant_eligible(
+            final_command=transformed_final,
+            selected_sample=nonfinite_sample,
+            tracking_plan_generation=9,
+            authority_plan_generation=9,
+            authority_constraint=constraint,
+            constraint_decision=decision,
+            decision_source="pure_pursuit",
+            now_sec=now_sec,
+            active_control_fault_reason="",
+            ros_clock_stalled=False,
+            deadline_missed=False,
+            steering_result=transformed_steering_result,
+        )
+        assert not valid
+        assert reason == "final_command_binding"
+
+        mux.pure_pursuit_envelope_cache[identity] = (
+            mux._pure_pursuit_envelope_fingerprint(envelope),
+            now_sec,
+            True,
+            "valid",
+            envelope,
+        )
+        mux.pure_pursuit_envelope_active_sequence = int(
+            envelope.command_sequence
+        )
 
         rate_limited_final = copy.deepcopy(envelope.command)
         rate_limited_final.lateral.steering_tire_angle = 0.04
@@ -3727,15 +4076,29 @@ def test_motion_authority_accepts_exact_current_successor_with_new_safe_digest()
             mux.now_sec(),
             "pure_pursuit",
         )
+        now_sec = mux.now_sec()
+        transformed_motion_command = mux._fallback_command(
+            copy.deepcopy(motion_envelope.command), now_sec
+        )
+        transformed_motion_command, transformed_source, _ = (
+            mux._apply_safety_constraint(
+                transformed_motion_command,
+                "pure_pursuit",
+                "selected",
+                decision,
+                now_sec,
+            )
+        )
+        assert transformed_source == "pure_pursuit"
         valid, reason, _, _ = mux._motion_authority_grant_eligible(
-            final_command=motion_envelope.command,
+            final_command=transformed_motion_command,
             selected_sample=motion_sample,
             tracking_plan_generation=10,
             authority_plan_generation=10,
             authority_constraint=motion_constraint,
             constraint_decision=decision,
             decision_source="pure_pursuit",
-            now_sec=mux.now_sec(),
+            now_sec=now_sec,
             active_control_fault_reason="",
             ros_clock_stalled=False,
             deadline_missed=False,
@@ -3906,9 +4269,22 @@ def test_motion_authority_ignores_warmup_history_but_rejects_current_binding_mut
             now_sec,
             "pure_pursuit",
         )
+        transformed_command = mux._fallback_command(
+            copy.deepcopy(envelope.command), now_sec
+        )
+        transformed_command, transformed_source, _ = (
+            mux._apply_safety_constraint(
+                transformed_command,
+                "pure_pursuit",
+                "selected",
+                decision,
+                now_sec,
+            )
+        )
+        assert transformed_source == "pure_pursuit"
 
         valid, _, _, _ = mux._motion_authority_grant_eligible(
-            final_command=envelope.command,
+            final_command=transformed_command,
             selected_sample=sample,
             tracking_plan_generation=9,
             authority_plan_generation=9,

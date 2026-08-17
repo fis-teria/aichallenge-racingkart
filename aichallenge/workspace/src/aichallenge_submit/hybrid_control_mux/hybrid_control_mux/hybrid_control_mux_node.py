@@ -5138,6 +5138,48 @@ class HybridControlMuxNode(Node):
             steering_result=steering_result,
         )
 
+    def _motion_authority_expected_longitudinal_values(
+        self,
+        *,
+        envelope_command: AckermannControlCommand,
+        constraint_decision: SafetyConstraintDecision,
+        now_sec: float,
+    ) -> Optional[tuple[float, float, float, float]]:
+        """Replay the deterministic Mux transforms used before grant binding."""
+        envelope_values = (
+            float(envelope_command.longitudinal.speed),
+            float(envelope_command.longitudinal.acceleration),
+            float(envelope_command.longitudinal.jerk),
+            float(envelope_command.lateral.steering_tire_rotation_rate),
+        )
+        if (
+            not all(math.isfinite(value) for value in envelope_values)
+            or constraint_decision.stop_required
+        ):
+            return None
+        expected = self._fallback_command(
+            copy.deepcopy(envelope_command), now_sec
+        )
+        expected, expected_source, _ = self._apply_safety_constraint(
+            expected,
+            "pure_pursuit",
+            "motion_authority_expected_transform",
+            constraint_decision,
+            now_sec,
+        )
+        expected_values = (
+            float(expected.longitudinal.speed),
+            float(expected.longitudinal.acceleration),
+            float(expected.longitudinal.jerk),
+            float(expected.lateral.steering_tire_rotation_rate),
+        )
+        if (
+            expected_source != "pure_pursuit"
+            or not all(math.isfinite(value) for value in expected_values)
+        ):
+            return None
+        return expected_values
+
     def _motion_authority_grant_eligible(
         self,
         *,
@@ -5257,7 +5299,15 @@ class HybridControlMuxNode(Node):
             float(final_command.longitudinal.jerk),
             float(final_command.lateral.steering_tire_rotation_rate),
         )
-        expected_final_longitudinal_values = envelope_longitudinal_values
+        expected_final_longitudinal_values = (
+            self._motion_authority_expected_longitudinal_values(
+                envelope_command=envelope_command,
+                constraint_decision=constraint_decision,
+                now_sec=now_sec,
+            )
+        )
+        if expected_final_longitudinal_values is None:
+            return False, "final_command_binding", envelope, plan_identity
         if delivery_gap_lease_active:
             lease = self.motion_authority_delivery_gap_lease
             successor_constraint = self.safety_constraint
@@ -6305,6 +6355,117 @@ class HybridControlMuxNode(Node):
         )
         self.motion_authority_delivery_gap_lease = committed
         self.motion_authority_delivery_gap_tombstone = committed
+
+    def _ratchet_motion_authority_delivery_gap_lease_after_publish(
+        self,
+        *,
+        plan_identity: tuple,
+        constraint: SafetyConstraintState,
+        envelope: ControllerCommandEnvelope,
+        final_command: AckermannControlCommand,
+        steering_result: Optional[SteeringLimitResult],
+    ) -> None:
+        """Advance only the published-command snapshot of an existing lease.
+
+        A same-generation PP command must never mint or renew delivery-gap
+        time.  It may, however, become the command that was actually applied
+        last.  Record that newer exact command only after publication and only
+        while every immutable Plan/Constraint/candidate binding remains equal.
+        """
+        lease = self.motion_authority_delivery_gap_lease
+        published = self.last_published_control_command
+        if (
+            lease is None
+            or published is None
+            or len(plan_identity) < 12
+            or len(lease.plan_identity) < 12
+            or lease.constraint_header_stamp_ns is None
+            or lease.constraint_payload_fingerprint is None
+            or self.last_published_control_source != "pure_pursuit"
+            or tuple(plan_identity) != tuple(lease.plan_identity)
+            or int(plan_identity[7]) != int(lease.plan_generation)
+        ):
+            return
+
+        published_payload = self._control_command_payload(published)
+        final_payload = self._control_command_payload(final_command)
+        if (
+            not all(
+                math.isfinite(value)
+                for value in (*published_payload, *final_payload)
+            )
+            or published_payload != final_payload
+            or self._stamp_ns(published.stamp)
+            != self._stamp_ns(final_command.stamp)
+            or self._stamp_ns(published.longitudinal.stamp)
+            != self._stamp_ns(final_command.longitudinal.stamp)
+            or self._stamp_ns(published.lateral.stamp)
+            != self._stamp_ns(final_command.lateral.stamp)
+        ):
+            return
+
+        expected_envelope_plan_identity = (
+            int(plan_identity[0]),
+            int(plan_identity[1]),
+            int(plan_identity[2]),
+            str(plan_identity[3]),
+            int(plan_identity[4]),
+            int(plan_identity[5]),
+            int(plan_identity[6]),
+            int(plan_identity[7]),
+            int(plan_identity[9]),
+            bytes(plan_identity[10]),
+        )
+        envelope_identity = self._pure_pursuit_envelope_identity(envelope)
+        previous_envelope_identity = self._pure_pursuit_envelope_identity(
+            lease.envelope
+        )
+        if (
+            self._pure_pursuit_envelope_plan_identity(envelope)
+            != expected_envelope_plan_identity
+            or int(envelope_identity[0]) != int(previous_envelope_identity[0])
+            or int(envelope_identity[1]) <= int(previous_envelope_identity[1])
+            or int(envelope_identity[2]) <= int(previous_envelope_identity[2])
+            or int(envelope_identity[3]) != int(lease.plan_generation)
+            or not self._motion_authority_committed_steering_binding_valid(
+                envelope_steering_rad=float(
+                    envelope.command.lateral.steering_tire_angle
+                ),
+                final_steering_rad=float(
+                    final_command.lateral.steering_tire_angle
+                ),
+                steering_result=steering_result,
+            )
+        ):
+            return
+
+        constraint_state = self._coerce_safety_constraint_state(constraint)
+        constraint_fingerprint = self._motion_constraint_payload_fingerprint(
+            constraint_state
+        )
+        if (
+            int(constraint_state.plan_generation) != int(lease.plan_generation)
+            or int(constraint_state.header_stamp_ns)
+            != int(lease.constraint_header_stamp_ns)
+            or constraint_fingerprint != lease.constraint_payload_fingerprint
+        ):
+            return
+
+        # ``replace`` intentionally preserves every receipt/acquisition/gap
+        # deadline and successor preview.  This is a published-command
+        # ownership ratchet, never a temporal lease renewal.
+        ratcheted = replace(
+            lease,
+            constraint=constraint_state,
+            envelope=copy.deepcopy(envelope),
+            final_command=copy.deepcopy(final_command),
+            steering_result=copy.deepcopy(steering_result),
+            envelope_header_stamp_ns=self._stamp_ns(envelope.header.stamp),
+            command_header_stamp_ns=self._stamp_ns(final_command.stamp),
+            constraint_payload_fingerprint=constraint_fingerprint,
+        )
+        self.motion_authority_delivery_gap_lease = ratcheted
+        self.motion_authority_delivery_gap_tombstone = ratcheted
 
     def _capture_motion_authority_warmup_proof(
         self,
@@ -9539,6 +9700,24 @@ class HybridControlMuxNode(Node):
         self.last_published_control_command = copy.deepcopy(cmd)
         self.last_published_control_source = str(decision_source)
         self.last_published_control_steady_time_sec = float(now_sec)
+        if (
+            pass_motion_grant_valid
+            and not motion_authority_delivery_gap_lease_active
+            and pass_motion_grant_envelope is not None
+            and pass_motion_grant_identity is not None
+            and grant_authority_constraint is not None
+        ):
+            # Publication is the ownership boundary.  A newer fully verified
+            # same-generation PP command may replace only the frozen command
+            # snapshot/provenance; the original lease and gap clocks remain
+            # immutable.
+            self._ratchet_motion_authority_delivery_gap_lease_after_publish(
+                plan_identity=pass_motion_grant_identity,
+                constraint=grant_authority_constraint,
+                envelope=pass_motion_grant_envelope,
+                final_command=cmd,
+                steering_result=steering_result,
+            )
         if self.latest_sample_observability_enabled:
             self._mux_latest_sample_cycle_context = (
                 selector_watermark_identity,

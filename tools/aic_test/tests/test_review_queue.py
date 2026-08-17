@@ -4,7 +4,7 @@ import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -114,11 +114,39 @@ def _evidence(tmp_path: Path, attempts: int = 3, outcome: str = "DISCONNECTED") 
     ]}))
 
 
-def _terminal_failure_evidence(tmp_path: Path, *, retryable: bool = True) -> Path:
+def _terminal_failure_evidence(
+    tmp_path: Path, *, retryable: bool = True,
+    kind: str = "RATE_LIMIT", text: str = "Too many requests.",
+) -> Path:
     return _file(tmp_path / "terminal-failure-evidence.json", json.dumps({
         "schema_version": 1, "submission_id": "submission-1",
-        "terminal_error_kind": "RATE_LIMIT", "terminal_error_text": "Too many requests.",
+        "terminal_error_kind": kind, "terminal_error_text": text,
         "observed_at": "2026-08-05T00:00:01Z", "retryable": retryable,
+    }))
+
+
+def _incomplete_response_evidence(tmp_path: Path, submitted_at: str) -> Path:
+    submitted = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+    def at(minute: int, second: int = 1) -> str:
+        return (submitted + timedelta(minutes=minute, seconds=second)).isoformat().replace("+00:00", "Z")
+    return _file(tmp_path / "incomplete-response-evidence.json", json.dumps({
+        "schema_version": 1,
+        "submission_id": "submission-1",
+        "terminal_error_kind": "INCOMPLETE_RESPONSE_AFTER_30M",
+        "terminal_error_text": "HOLD",
+        "submitted_at": submitted_at,
+        "observed_at": at(30),
+        "retryable": True,
+        "missing_required_fields": [
+            "execution_or_handoff_binding", "severity", "disposition",
+            "minimum_changes", "transition_permission",
+        ],
+        "checkpoint_observations": [
+            {"elapsed_minutes": minute, "observed_at": at(minute),
+             "reloaded": True, "response_text": "HOLD", "generating": False,
+             "ui_errors": []}
+            for minute in (10, 20, 30)
+        ],
     }))
 
 
@@ -630,6 +658,90 @@ def test_retryable_terminal_failure_binds_claim_and_allows_hash_bound_retry(tmp_
     assert queue.claim(
         execution_id="exec-1", review_attempt_id="attempt-2", worker_id="transport"
     )["state"] == "CLAIMED"
+
+
+def test_network_disconnect_terminalizes_and_allows_hash_bound_retry(tmp_path: Path) -> None:
+    queue = ReviewQueue(tmp_path / "queue")
+    _request(queue, tmp_path)
+    queue.claim(execution_id="exec-1", review_attempt_id="attempt-1", worker_id="transport")
+    _submit(queue, tmp_path)
+    evidence = _terminal_failure_evidence(
+        tmp_path, kind="NETWORK_DISCONNECTED",
+        text="A network error occurred. Please check your connection and try again.",
+    )
+    failed = queue.terminal_failure(
+        execution_id="exec-1", review_attempt_id="attempt-1", worker_id="transport",
+        evidence=evidence, evidence_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+    )
+    assert failed["state"] == "RETRYABLE_UI_TERMINAL_FAILURE"
+    assert failed["terminal_failure"]["terminal_error_kind"] == "NETWORK_DISCONNECTED"
+    retry = _request(queue, tmp_path, attempt="attempt-2", retry_of="attempt-1")
+    assert retry["request"]["handoff_sha256"] == failed["request"]["handoff_sha256"]
+    assert retry["request"]["packet_sha256"] == failed["request"]["packet_sha256"]
+    assert "not_before" not in retry["request"]
+
+
+def test_unknown_terminal_failure_kind_remains_fail_closed(tmp_path: Path) -> None:
+    queue = ReviewQueue(tmp_path / "queue")
+    _request(queue, tmp_path)
+    queue.claim(execution_id="exec-1", review_attempt_id="attempt-1", worker_id="transport")
+    _submit(queue, tmp_path)
+    evidence = _terminal_failure_evidence(tmp_path, kind="GENERIC_ERROR")
+    with pytest.raises(ReviewQueueError, match="terminal_failure_evidence_invalid"):
+        queue.terminal_failure(
+            execution_id="exec-1", review_attempt_id="attempt-1", worker_id="transport",
+            evidence=evidence,
+            evidence_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        )
+
+
+def test_incomplete_response_after_30m_terminalizes_and_releases_singleflight(tmp_path: Path) -> None:
+    queue = ReviewQueue(tmp_path / "queue")
+    _request(queue, tmp_path)
+    queue.claim(execution_id="exec-1", review_attempt_id="attempt-1", worker_id="transport")
+    submitted = _submit(queue, tmp_path)
+    evidence = _incomplete_response_evidence(
+        tmp_path, submitted["submission"]["submitted_at"]
+    )
+    failed = queue.terminal_failure(
+        execution_id="exec-1", review_attempt_id="attempt-1", worker_id="transport",
+        evidence=evidence, evidence_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+    )
+    assert failed["state"] == "RETRYABLE_UI_TERMINAL_FAILURE"
+    assert failed["terminal_failure"]["terminal_error_kind"] == "INCOMPLETE_RESPONSE_AFTER_30M"
+    retry = _request(queue, tmp_path, attempt="attempt-2", retry_of="attempt-1")
+    assert "not_before" not in retry["request"]
+
+    marker_path = tmp_path / "queue/terminals/attempt-1.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["failed_at"] = "2000-01-01T00:00:00Z"
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    assert queue.claim(
+        execution_id="exec-1", review_attempt_id="attempt-2", worker_id="transport"
+    )["state"] == "CLAIMED"
+
+
+@pytest.mark.parametrize("mutation", ("too_early", "missing_checkpoint", "response_changed"))
+def test_incomplete_response_evidence_fails_closed(tmp_path: Path, mutation: str) -> None:
+    queue = ReviewQueue(tmp_path / "queue")
+    _request(queue, tmp_path)
+    queue.claim(execution_id="exec-1", review_attempt_id="attempt-1", worker_id="transport")
+    submitted = _submit(queue, tmp_path)
+    submitted_at = submitted["submission"]["submitted_at"]
+    evidence = _incomplete_response_evidence(tmp_path, submitted_at)
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    if mutation == "too_early":
+        payload["observed_at"] = submitted_at
+    elif mutation == "missing_checkpoint":
+        payload["checkpoint_observations"].pop()
+    else:
+        payload["checkpoint_observations"][1]["response_text"] = "different"
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ReviewQueueError, match="terminal_failure_evidence_invalid"):
+        queue.terminal_failure(
+            execution_id="exec-1", review_attempt_id="attempt-1", worker_id="transport",
+            evidence=evidence, evidence_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        )
 
 
 def test_connection_deferral_retry_is_not_rate_limited(tmp_path: Path) -> None:

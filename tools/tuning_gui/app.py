@@ -1439,7 +1439,7 @@ SAFETY_GATES: dict[str, dict[str, Any]] = {
         "vehicles": 4,
     },
     "gate2": {
-        "label": "gate2 追い越し",
+        "label": "gate2 追い越し（公式 SafetyGate2）",
         "scenario": "SafetyGate/scenario2.yaml",
         "vehicles": 4,
     },
@@ -1449,6 +1449,22 @@ SAFETY_GATES: dict[str, dict[str, Any]] = {
         "vehicles": 1,
     },
 }
+
+# These values are owned by the reviewed Gate2 Make target.  The official
+# aic-test wrapper projects its own immutable runtime context onto Make, so a
+# GUI parent must not leak a selected development control method (or any other
+# protected selector) into that top-level dispatch.
+GATE2_MAKE_DISPATCH_OWNED_ENV_KEYS = frozenset({
+    "AUTOWARE_SERVICE",
+    "AUTOWARE_COMMAND_SERVICE",
+    "AUTOWARE_COMMAND_MODE",
+    "AUTOWARE_RUNTIME_IMAGE",
+    "AWSIM_START_TARGET",
+    "AUTOWARE_RUN_MODE",
+    "AUTOSTART_DEBUG_VISUALIZATION",
+    "CONTROL_METHOD",
+    "RUN_KIND",
+})
 
 SIMULATOR_BOOL_OPTIONS = {
     "camera": "--camera",
@@ -2686,8 +2702,16 @@ def load_history() -> list[dict[str, Any]]:
     return rows[-200:]
 
 
-def command_env(method: str) -> dict[str, str]:
+def command_env(
+    method: str,
+    action: str | None = None,
+    safety_gate: str | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
+    if action == "gate" and safety_gate == "gate2":
+        for key in GATE2_MAKE_DISPATCH_OWNED_ENV_KEYS:
+            env.pop(key, None)
+        return env
     env["CONTROL_METHOD"] = method
     if method == "state_lattice_pure_pursuit":
         # Explicit GUI/SafetyGate PoC opt-in. Repository and production launch
@@ -2965,6 +2989,17 @@ def command_for(
         return f"make autoware-build && {run}" if build_first else run
     if action == "gate":
         gate_id = normalize_safety_gate(safety_gate, required=True)
+        if gate_id == "gate2":
+            # SafetyGate2 is authority-bearing.  Keep its fixed scenario,
+            # controller, timeout, review binding and no-retry policy inside
+            # the canonical wrapper instead of rebuilding those controls from
+            # mutable GUI fields.
+            run = "./aic-test run safegate2-stopped-overtake --runtime-timeout 120 --json"
+            # A rebuild after external admission can change the exact binary
+            # identity.  The wrapper owns the preflight and must see the
+            # already reviewed artifact, so the GUI build-first checkbox is
+            # intentionally ignored for this one authority-bearing action.
+            return run
         gate_extra_args = awsim_extra_args(
             headless,
             simulator_options,
@@ -3074,7 +3109,7 @@ def start_command(
         process = subprocess.Popen(
             ["bash", "-lc", command],
             cwd=REPO_ROOT,
-            env=command_env(method),
+            env=command_env(method, action, safety_gate),
             stdout=log,
             stderr=subprocess.STDOUT,
             text=True,

@@ -1051,7 +1051,130 @@ def _gate2_anchored_file(path: Path, expected_sha: str) -> bool:
         return False
 
 
-def _gate2_review_anchor(repo: Path, run_id: str, authority_profile: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+def _gate2_runtime_budget_is_exact(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(GATE2_RUNTIME_BUDGET)
+        and type(value.get("fresh_runtime_max")) is int
+        and value.get("fresh_runtime_max") == 1
+        and type(value.get("fresh_runtime_used")) is int
+        and value.get("fresh_runtime_used") == 0
+        and type(value.get("process_group_timeout_s")) is int
+        and value.get("process_group_timeout_s") == 120
+        and type(value.get("retry_allowed")) is bool
+        and value.get("retry_allowed") is False
+    )
+
+
+def _gate2_discover_current_review_identity(
+    repo: Path,
+) -> tuple[dict[str, str] | None, str | None]:
+    """Find the sole unused authorization for the current admitted artifacts.
+
+    This is only a convenience selector for GUI/direct wrapper callers.  The
+    selected IDs still pass through ``resolve_completed_gate2`` and every
+    existing image, launch, artifact, quiescence and one-shot consumption gate.
+    """
+    artifact_sha256: dict[str, str] = {}
+    for name, relative_path in GATE2_CURRENT_ARTIFACT_ADMISSION_PATHS.items():
+        observed = _regular_file_sha256(repo / relative_path)
+        if observed is None:
+            return None, f"gate2_required_{name}_source_unreadable"
+        artifact_sha256[name] = observed
+    queue_root = repo / GATE2_REVIEW_QUEUE_ROOT_RELATIVE
+    authorization_root = queue_root / "gate2_authorizations"
+    try:
+        canonical_root = authorization_root.resolve(strict=True)
+        expected_root = repo.resolve(strict=True) / GATE2_REVIEW_QUEUE_ROOT_RELATIVE / "gate2_authorizations"
+        if (
+            canonical_root != expected_root
+            or stat.S_ISLNK(authorization_root.lstat().st_mode)
+            or not authorization_root.is_dir()
+        ):
+            return None, "gate2_review_queue_root_invalid"
+    except OSError:
+        return None, "gate2_review_queue_root_invalid"
+    queue = ReviewQueue(queue_root)
+    candidates: list[dict[str, str]] = []
+    for path in sorted(authorization_root.glob("*.json")):
+        try:
+            if (
+                path.resolve(strict=True).parent != canonical_root
+                or stat.S_ISLNK(path.lstat().st_mode)
+                or not path.is_file()
+                or stat.S_IMODE(path.stat().st_mode) != 0o644
+                or path.stat().st_uid != os.getuid()
+            ):
+                continue
+            raw = path.read_bytes()
+            text = raw.decode("utf-8")
+            payload = json.loads(text)
+            canonical = (
+                json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, indent=2,
+                    allow_nan=False,
+                ) + "\n"
+            ).encode("utf-8")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if (
+            not isinstance(payload, dict)
+            or raw != canonical
+            or payload.get("schema_version") != 1
+            or payload.get("transition_permission") != "GO_RUNTIME_ONCE"
+            or not _gate2_runtime_budget_is_exact(payload.get("runtime_budget"))
+        ):
+            continue
+        execution_id = payload.get("execution_id")
+        attempt_id = payload.get("review_attempt_id")
+        run_id = payload.get("run_id")
+        if (
+            not isinstance(execution_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", execution_id)
+            or not isinstance(attempt_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", attempt_id)
+            or path.name != f"{attempt_id}.json"
+            or not isinstance(run_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id)
+        ):
+            continue
+        try:
+            anchor = queue.resolve_completed_gate2(
+                execution_id=execution_id,
+                review_attempt_id=attempt_id,
+                run_id=run_id,
+            )
+        except (OSError, ReviewQueueError):
+            continue
+        if (
+            anchor.get("authorization_index_path") != str(path.resolve())
+            or anchor.get("artifact_sha256") != artifact_sha256
+            or not _gate2_runtime_budget_is_exact(anchor.get("runtime_budget"))
+        ):
+            continue
+        anchor_sha = anchor["authorization_index_sha256"]
+        consumed_guard = (
+            repo / "analysis" / "aic_test"
+            / f"gate2_runtime_authorization_consumed_{anchor_sha}.json"
+        )
+        if consumed_guard.exists():
+            continue
+        candidates.append({
+            "execution_id": execution_id,
+            "review_attempt_id": attempt_id,
+            "run_id": run_id,
+        })
+    if not candidates:
+        return None, "gate2_review_queue_no_current_unconsumed_authorization"
+    if len(candidates) != 1:
+        return None, "gate2_review_queue_current_authorization_ambiguous"
+    return candidates[0], None
+
+
+def _gate2_review_anchor(
+    repo: Path, run_id: str, authority_profile: dict[str, Any],
+    review_identity: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve local Gate2 authority plus canonical advisory-review provenance.
 
     Only the two review IDs are accepted from the caller.  The queue root,
@@ -1061,8 +1184,14 @@ def _gate2_review_anchor(repo: Path, run_id: str, authority_profile: dict[str, A
     severity does not grant or deny runtime; the exclusive index created by the
     owner-facing ``authorize-gate2`` command is the one-runtime transition.
     """
-    execution_id = os.environ.get(GATE2_REVIEWED_EXECUTION_ID_ENV)
-    attempt_id = os.environ.get(GATE2_REVIEW_ATTEMPT_ID_ENV)
+    execution_id = (
+        review_identity.get("execution_id") if review_identity is not None
+        else os.environ.get(GATE2_REVIEWED_EXECUTION_ID_ENV)
+    )
+    attempt_id = (
+        review_identity.get("review_attempt_id") if review_identity is not None
+        else os.environ.get(GATE2_REVIEW_ATTEMPT_ID_ENV)
+    )
     if (
         not isinstance(execution_id, str)
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", execution_id)
@@ -1081,7 +1210,10 @@ def _gate2_review_anchor(repo: Path, run_id: str, authority_profile: dict[str, A
         )
     except (OSError, ReviewQueueError) as error:
         return None, str(error)
-    if anchor.get("authority_profile") != authority_profile or anchor.get("runtime_budget") != GATE2_RUNTIME_BUDGET:
+    if (
+        anchor.get("authority_profile") != authority_profile
+        or not _gate2_runtime_budget_is_exact(anchor.get("runtime_budget"))
+    ):
         return None, "gate2_review_anchor_contract_invalid"
     if anchor.get("transition_permission") != "GO_RUNTIME_ONCE":
         return None, "gate2_review_anchor_contract_invalid"
@@ -1159,11 +1291,15 @@ def _gate2_review_anchor(repo: Path, run_id: str, authority_profile: dict[str, A
 
 
 def _gate2_runtime_authorization(
-    repo: Path, run_id: str, reviewed_inputs: dict[str, Any] | None, authority_profile: dict[str, Any],
+    repo: Path, run_id: str, reviewed_inputs: dict[str, Any] | None,
+    authority_profile: dict[str, Any],
+    review_identity: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     if os.environ.get(GATE2_RUNTIME_AUTHORIZATION_PATH_ENV) or os.environ.get(GATE2_RUNTIME_AUTHORIZATION_SHA_ENV):
         return None, "gate2_runtime_authorization_contract_invalid"
-    anchor, error = _gate2_review_anchor(repo, run_id, authority_profile)
+    anchor, error = _gate2_review_anchor(
+        repo, run_id, authority_profile, review_identity,
+    )
     if error is not None:
         return None, error
     assert anchor is not None
@@ -3546,11 +3682,26 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
     """Run the fixed State Lattice-to-PP Gate 2 target without overrides."""
     repo = _repo_root(args.repo_root)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_id = (
-        args.run_id
-        if args.run_id is not None
-        else f"{timestamp}-safegate2-stopped-overtake-{secrets.token_hex(4)}"
-    )
+    review_identity: dict[str, str] | None = None
+    caller_execution_id = os.environ.get(GATE2_REVIEWED_EXECUTION_ID_ENV)
+    caller_attempt_id = os.environ.get(GATE2_REVIEW_ATTEMPT_ID_ENV)
+    if (
+        caller_execution_id is None
+        and caller_attempt_id is None
+        and args.run_id is None
+    ):
+        review_identity, identity_error = _gate2_discover_current_review_identity(repo)
+        if identity_error is not None:
+            print(f"PRECONDITION_NOT_MET: {identity_error}")
+            return 3
+        assert review_identity is not None
+        run_id = review_identity["run_id"]
+    else:
+        run_id = (
+            args.run_id
+            if args.run_id is not None
+            else f"{timestamp}-safegate2-stopped-overtake-{secrets.token_hex(4)}"
+        )
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
         print("PRECONDITION_NOT_MET: invalid run id")
         return 3
@@ -3570,7 +3721,7 @@ def run_safegate2_stopped_overtake(args: argparse.Namespace) -> int:
     )
     environment.update(fixed_runtime_environment)
     runtime_authorization, runtime_authorization_error = _gate2_runtime_authorization(
-        repo, run_id, None, authority_profile,
+        repo, run_id, None, authority_profile, review_identity,
     )
     if runtime_authorization_error is not None:
         print(f"PRECONDITION_NOT_MET: {runtime_authorization_error}")

@@ -53,7 +53,11 @@ struct PlannerConfig {
   std::vector<int> cost_levels{6, 9, 12, 15, 18, 60, 70, 80, 90, 100};
   std::vector<double> wall_distance_thresholds_m{0.1, 0.3, 0.5};
   std::vector<double> object_distance_thresholds_m{0.8, 1.0, 1.3, 1.5, 1.7};
+  // Retained for launch/config compatibility only. Reference cost no longer
+  // uses irregular threshold bands.
   std::vector<double> reference_distance_thresholds_m{0.5, 0.8, 1.2, 1.5};
+  // Uniform reference-deviation cost step. The production contract is one
+  // numeric cost point per 0.2 m, with 100 reserved for occupied cells.
   double reference_extra_step_m{0.2};
   double sigma_multiplier{3.0};
   double sigma_min_margin_m{0.15};

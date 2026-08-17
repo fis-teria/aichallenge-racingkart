@@ -183,6 +183,62 @@ def test_state_lattice_pure_pursuit_command_env_enables_v4_poc_sideband(
     assert "STATE_LATTICE_V4_POC_COMMAND_ACTIVATION_ENABLED" not in baseline
 
 
+def test_dev_command_keeps_selected_control_method() -> None:
+    command = APP.command_for(
+        "dev",
+        "state_lattice_pure_pursuit",
+        False,
+        simulator_options={},
+    )
+
+    assert "CONTROL_METHOD='state_lattice_pure_pursuit'" in command
+    assert command.endswith("make dev")
+
+
+def test_gate2_uses_official_wrapper_without_mutable_gate_overrides(
+    monkeypatch,
+) -> None:
+    for key in APP.GATE2_MAKE_DISPATCH_OWNED_ENV_KEYS:
+        monkeypatch.setenv(key, "caller-controlled")
+
+    command = APP.command_for(
+        "gate",
+        "state_lattice_pure_pursuit",
+        False,
+        headless=False,
+        simulator_options={"timeout": 999, "raw_args": ""},
+        safety_gate="gate2",
+    )
+    env = APP.command_env(
+        "state_lattice_pure_pursuit", "gate", "gate2"
+    )
+
+    assert command == (
+        "./aic-test run safegate2-stopped-overtake "
+        "--runtime-timeout 120 --json"
+    )
+    assert all(
+        key not in env for key in APP.GATE2_MAKE_DISPATCH_OWNED_ENV_KEYS
+    )
+    assert "AWSIM_TIMEOUT" not in command
+    assert "CONTROL_METHOD" not in command
+
+
+def test_gate2_build_first_cannot_rebuild_reviewed_artifact() -> None:
+    command = APP.command_for(
+        "gate",
+        "state_lattice_pure_pursuit",
+        True,
+        simulator_options={},
+        safety_gate="gate2",
+    )
+
+    assert command == (
+        "./aic-test run safegate2-stopped-overtake "
+        "--runtime-timeout 120 --json"
+    )
+
+
 def test_overtake_route_config_rejects_unknown_modes() -> None:
     path = str(APP.OVERTAKE_ROOT / "config/overtake_planner.param.yaml")
     content = APP.abs_path(path).read_text(encoding="utf-8")

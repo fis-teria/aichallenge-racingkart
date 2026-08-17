@@ -13,6 +13,7 @@
 #include <overtake_planner/cartesian_trackability_evaluator.hpp>
 #include <overtake_planner/pp_core_exact_snapshot.hpp>
 #include <overtake_transport_contract/c002ay0_canonical.hpp>
+#include <overtake_transport_contract/c002ay0_fixed_record.hpp>
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rosidl_runtime_cpp/traits.hpp>
 
@@ -431,6 +432,66 @@ public:
     (void)node.publishControllerTrackingStatus(
         stamp, nullptr, nullptr, nullptr, nullptr, 0.0, nullptr);
   }
+
+  static void publishStateLatticeV2BaseForTest(
+      SimplePurePursuit &node,
+      const ControllerCommandEnvelope &command_envelope,
+      const Trajectory &base_trajectory,
+      std::uint32_t source_generation = 4U) {
+    node.state_lattice_shadow_race_arm_epoch_.observe(true);
+    node.reference_source_generation_ = source_generation;
+    SimplePurePursuit::ControlTrajectoryContext context;
+    context.base_trajectory = &base_trajectory;
+    context.base_nearest_index = 0U;
+    node.publishStateLatticeV2BaseAttestation(command_envelope, context);
+  }
+
+  static bool enqueueStateLatticeV2ProposalAndBegin(
+      SimplePurePursuit &node,
+      const AuthorizedCartesianTrajectoryV2 &proposal,
+      const builtin_interfaces::msg::Time &now_ros,
+      overtake_transport_contract::state_lattice_v2::CycleResult &result) {
+    if (node.state_lattice_v2_binding_store_ == nullptr) {
+      return false;
+    }
+    overtake_transport_contract::state_lattice_v2::RejectReason reason{};
+    if (!node.state_lattice_v2_binding_store_->enqueue(proposal, 1U,
+                                                       &reason)) {
+      return false;
+    }
+    result = node.state_lattice_v2_binding_store_->beginCycle(now_ros, 2U);
+    return true;
+  }
+
+  static bool hasCachedStateLatticeV2BaseAttestation(
+      const SimplePurePursuit &node) {
+    return node.state_lattice_v2_last_published_base_attestation_.has_value();
+  }
+
+  static bool stateLatticeV2BaseAttestationRefreshPending(
+      const SimplePurePursuit &node) {
+    return node.state_lattice_v2_base_attestation_refresh_pending_;
+  }
+
+  static std::uint8_t stateLatticeV2BaseAttestationRejectReason(
+      const SimplePurePursuit &node) {
+    return node.state_lattice_v2_base_attestation_local_reject_reason_;
+  }
+
+  static void expireCachedStateLatticeV2BaseAttestation(
+      SimplePurePursuit &node, const builtin_interfaces::msg::Time &expiry) {
+    ASSERT_TRUE(node.state_lattice_v2_last_published_base_attestation_.has_value());
+    node.state_lattice_v2_last_published_base_attestation_->base.lease_valid_until =
+        expiry;
+    node.state_lattice_v2_base_attestation_refresh_pending_ = true;
+  }
+
+  static void applyStateLatticeV2CycleResultForTest(
+      SimplePurePursuit &node,
+      const overtake_transport_contract::state_lattice_v2::CycleResult
+          &result) {
+    node.applyStateLatticeV2CycleResult(result);
+  }
 };
 
 } // namespace simple_pure_pursuit
@@ -467,6 +528,159 @@ TrajectoryPoint makePoint(double x, double y, double yaw_rad) {
 
 TrajectoryPoint makePointWithSpeed(double x, double y, double yaw_rad,
                                    double speed_mps);
+
+multi_purpose_mpc_ros_msgs::msg::StateLatticeV2BaseAttestation
+makeSemanticStableBaseAttestation(std::uint64_t volatile_sequence) {
+  namespace canonical = overtake_transport_contract::c002ay0;
+  canonical::FixedBaseRecord record{};
+  record.session_generation = 1U;
+  record.session_nonce = 1U;
+  record.record_stamp = {
+      23, static_cast<std::uint32_t>(30000000U + volatile_sequence)};
+  record.frame_size = 3U;
+  record.frame[0] = 'm';
+  record.frame[1] = 'a';
+  record.frame[2] = 'p';
+  record.race_arm_epoch = 1U;
+  record.controller_instance_id = 31U;
+  record.controller_sequence = 37U + volatile_sequence;
+  record.base_lease_id = 41U + volatile_sequence;
+  record.lease_valid_until = {24, 0U};
+  record.base_source_kind = canonical::kFixedBaseSourceReferenceTrajectory;
+  record.base_source_stamp = {23, 25000000U};
+  record.base_source_generation = 4U;
+  record.base_original_point_count = 2U;
+  record.nearest_source_index = 0U;
+  record.point_count = 2U;
+  record.points[0].orientation_w = 1.0;
+  record.points[0].longitudinal_velocity_mps = 1.0F;
+  record.points[1].time_from_start.nanosec = 25000000U;
+  record.points[1].position_x_m = 0.25;
+  record.points[1].orientation_w = 1.0;
+  record.points[1].longitudinal_velocity_mps = 1.0F;
+  record.controller_implementation_sha256.fill(0x31U);
+  record.controller_config_sha256.fill(0x41U);
+
+  multi_purpose_mpc_ros_msgs::msg::StateLatticeV2BaseAttestation result;
+  EXPECT_EQ(canonical::buildBaseSnapshotFromFixedRecord(record, result.base),
+            canonical::ValidationError::NONE);
+  result.schema_version = result.SCHEMA_V1_NON_AUTHORITATIVE;
+  result.header.stamp = result.base.record_stamp;
+  result.header.frame_id = result.base.frame_id;
+  result.producer_instance_id = "pp-primary";
+  result.session_id = "1";
+  result.attestation_sequence = record.controller_sequence;
+  return result;
+}
+
+void bindProposalToBaseAttestation(
+    multi_purpose_mpc_ros_msgs::msg::AuthorizedCartesianTrajectoryV2 &proposal,
+    const multi_purpose_mpc_ros_msgs::msg::StateLatticeV2BaseAttestation
+        &attestation,
+    const builtin_interfaces::msg::Time &now_ros) {
+  namespace canonical = overtake_transport_contract::c002ay0;
+  const auto &base = attestation.base;
+  proposal.header.stamp = now_ros;
+  proposal.identity.source_generation = base.base_source_generation;
+  proposal.identity.source_stamp = base.base_source_stamp;
+  proposal.identity.frame_id = base.frame_id;
+  auto &payload = proposal.proposal;
+  payload.plan_stamp = now_ros;
+  payload.plan_sample_key.plan_stamp = now_ros;
+  payload.plan_sample_key.race_arm_epoch = base.race_arm_epoch;
+  payload.safety_evaluation_stamp = now_ros;
+  payload.safety_valid_until = base.lease_valid_until;
+  payload.candidate_start_control_pose_stamp = now_ros;
+  payload.source_controller_instance_id = base.controller_instance_id;
+  payload.source_controller_sequence = base.controller_sequence;
+  payload.base_lease_id = base.base_lease_id;
+  payload.base_lease_valid_until = base.lease_valid_until;
+  payload.base_source_kind = base.base_source_kind;
+  payload.base_source_stamp = base.base_source_stamp;
+  payload.base_source_generation = base.base_source_generation;
+  payload.base_original_point_count = base.base_original_point_count;
+  payload.base_first_source_index = base.first_source_index;
+  payload.base_last_source_index = base.last_source_index;
+  payload.base_nearest_source_index = base.nearest_source_index;
+  payload.base_source_digest_state = base.base_source_digest_state;
+  payload.canonical_algorithm_version = base.canonical_algorithm_version;
+  payload.base_geometry_sha256 = base.base_geometry_sha256;
+  payload.base_source_sha256 = base.base_source_sha256;
+  payload.base_snapshot_sha256 = base.snapshot_sha256;
+  payload.controller_implementation_sha256 =
+      base.controller_implementation_sha256;
+  payload.controller_config_sha256 = base.controller_config_sha256;
+  auto encoded = canonical::canonicalizeAuthorizedTrajectoryV1(payload);
+  payload.candidate_start_control_pose_sha256 = encoded.control_pose_sha256;
+  payload.safety_proof_sha256 = encoded.safety_proof_sha256;
+  encoded = canonical::canonicalizeAuthorizedTrajectoryV1(payload);
+  payload.payload_sha256 = encoded.sha256;
+  proposal.identity.canonical_sha256 = encoded.sha256;
+}
+
+TEST(StateLatticeV2BaseAttestationReuse,
+     SemanticIdentityExcludesOnlyVolatileCommandFieldsAndNeverRenewsExpiry) {
+  const auto previous = makeSemanticStableBaseAttestation(1U);
+  const auto candidate = makeSemanticStableBaseAttestation(2U);
+  builtin_interfaces::msg::Time now_ros;
+  now_ros.sec = 23;
+  now_ros.nanosec = 40000000U;
+
+  ASSERT_EQ(
+      overtake_transport_contract::state_lattice_v2::validateBaseAttestation(
+          previous, "pp-primary", "1", now_ros),
+      overtake_transport_contract::state_lattice_v2::RejectReason::kNone);
+  ASSERT_EQ(
+      overtake_transport_contract::state_lattice_v2::validateBaseAttestation(
+          candidate, "pp-primary", "1", now_ros),
+      overtake_transport_contract::state_lattice_v2::RejectReason::kNone);
+  ASSERT_NE(previous.attestation_sequence, candidate.attestation_sequence);
+  ASSERT_NE(previous.base.record_stamp, candidate.base.record_stamp);
+  ASSERT_NE(previous.base.controller_sequence,
+            candidate.base.controller_sequence);
+  ASSERT_NE(previous.base.base_lease_id, candidate.base.base_lease_id);
+  ASSERT_NE(previous.base.snapshot_sha256, candidate.base.snapshot_sha256);
+  EXPECT_TRUE(simple_pure_pursuit::stateLatticeV2BaseAttestationReusable(
+      previous, candidate, now_ros));
+
+  const auto expect_rejected = [&](const auto &mutate) {
+    auto changed = candidate;
+    mutate(changed);
+    EXPECT_FALSE(simple_pure_pursuit::stateLatticeV2BaseAttestationReusable(
+        previous, changed, now_ros));
+  };
+  expect_rejected([](auto &value) { value.producer_instance_id = "other"; });
+  expect_rejected([](auto &value) { value.session_id = "2"; });
+  expect_rejected([](auto &value) { value.header.frame_id = "odom"; });
+  expect_rejected([](auto &value) { ++value.base.race_arm_epoch; });
+  expect_rejected([](auto &value) { ++value.base.controller_instance_id; });
+  expect_rejected([](auto &value) { ++value.base.lease_valid_until.nanosec; });
+  expect_rejected([](auto &value) { ++value.base.base_source_kind; });
+  expect_rejected([](auto &value) { ++value.base.base_source_stamp.nanosec; });
+  expect_rejected([](auto &value) { ++value.base.base_source_generation; });
+  expect_rejected([](auto &value) { ++value.base.base_original_point_count; });
+  expect_rejected([](auto &value) { ++value.base.first_source_index; });
+  expect_rejected([](auto &value) { ++value.base.last_source_index; });
+  expect_rejected([](auto &value) { ++value.base.nearest_source_index; });
+  expect_rejected([](auto &value) { ++value.base.base_source_digest_state; });
+  expect_rejected([](auto &value) { ++value.base.canonical_algorithm_version; });
+  expect_rejected(
+      [](auto &value) { ++value.base.base_geometry_sha256.front(); });
+  expect_rejected(
+      [](auto &value) { ++value.base.base_source_sha256.front(); });
+  expect_rejected([](auto &value) {
+    ++value.base.controller_implementation_sha256.front();
+  });
+  expect_rejected(
+      [](auto &value) { ++value.base.controller_config_sha256.front(); });
+
+  now_ros = previous.base.lease_valid_until;
+  EXPECT_FALSE(simple_pure_pursuit::stateLatticeV2BaseAttestationReusable(
+      previous, candidate, now_ros));
+  ++now_ros.nanosec;
+  EXPECT_FALSE(simple_pure_pursuit::stateLatticeV2BaseAttestationReusable(
+      previous, candidate, now_ros));
+}
 
 TEST(V4PocIdentityGate, AppliesOnlyExactIdentityTuple) {
   unsetenv("CYCLONEDDS_URI");
@@ -1151,6 +1365,206 @@ TrajectoryPoint makePointWithSpeed(double x, double y, double yaw_rad,
   auto point = makePoint(x, y, yaw_rad);
   point.longitudinal_velocity_mps = speed_mps;
   return point;
+}
+
+TEST(StateLatticeV2BaseAttestationReuse,
+     AcceptedProposalRatchetsOnceThenReusesWithoutRenewingLease) {
+  unsetenv("CYCLONEDDS_URI");
+  int argc = 0;
+  char **argv = nullptr;
+  if (!rclcpp::ok()) {
+    rclcpp::init(argc, argv);
+  }
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("aw2_shadow_transport_enabled", false),
+      rclcpp::Parameter("c002ay0_shadow_capture_enabled", false),
+      rclcpp::Parameter("free_run_live_exact_ack_enabled", false),
+      rclcpp::Parameter("pp_core_exact_snapshot_enabled", false),
+      rclcpp::Parameter("state_lattice_v2_live_proposal_accept_enabled", true),
+      rclcpp::Parameter("state_lattice_v2_expected_producer_instance_id",
+                        "4101"),
+      rclcpp::Parameter("state_lattice_v2_base_attestation_publish_enabled",
+                        true),
+      rclcpp::Parameter(
+          "state_lattice_v2_base_attestation_producer_instance_id", "4201"),
+      rclcpp::Parameter("state_lattice_v2_base_attestation_session_id", "1"),
+      rclcpp::Parameter("max_trajectory_age_sec", 10.0),
+  });
+  auto node = std::make_shared<simple_pure_pursuit::SimplePurePursuit>(options);
+  auto observer = std::make_shared<rclcpp::Node>(
+      "state_lattice_v2_base_attestation_reuse_observer");
+  using Attestation =
+      multi_purpose_mpc_ros_msgs::msg::StateLatticeV2BaseAttestation;
+  std::vector<Attestation> received;
+  const auto subscription = observer->create_subscription<Attestation>(
+      "/control/overtake/state_lattice/v2_base_attestation",
+      rclcpp::QoS(rclcpp::KeepLast(16)).reliable().durability_volatile(),
+      [&received](const Attestation::SharedPtr message) {
+        received.push_back(*message);
+      });
+  (void)subscription;
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(observer);
+  for (std::size_t attempt = 0U;
+       attempt < 100U &&
+       node->count_subscribers(
+           "/control/overtake/state_lattice/v2_base_attestation") == 0U;
+       ++attempt) {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_GT(node->count_subscribers(
+                "/control/overtake/state_lattice/v2_base_attestation"),
+            0U);
+
+  Trajectory base;
+  base.header.frame_id = "map";
+  base.header.stamp = node->get_clock()->now();
+  for (std::size_t index = 0U; index < 20U; ++index) {
+    auto point =
+        makePointWithSpeed(0.25 * static_cast<double>(index), 0.0, 0.0, 1.0);
+    point.time_from_start.nanosec =
+        static_cast<std::uint32_t>(index * 25000000U);
+    base.points.push_back(std::move(point));
+  }
+
+  constexpr std::size_t kRedundantCommandCount =
+      overtake_transport_contract::state_lattice_v2::BindingStore::kCapacity +
+      2U;
+  for (std::size_t index = 0U; index < kRedundantCommandCount; ++index) {
+    multi_purpose_mpc_ros_msgs::msg::ControllerCommandEnvelope command;
+    command.header.stamp = base.header.stamp;
+    command.command_sequence = static_cast<std::uint64_t>(index + 1U);
+    simple_pure_pursuit::PurePursuitExactGoldenAccess::
+        publishStateLatticeV2BaseForTest(*node, command, base);
+    for (std::size_t wait = 0U;
+         wait < 100U && received.size() <= index; ++wait) {
+      executor.spin_some();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_EQ(received.size(), index + 1U);
+  }
+
+  const auto first = received.front();
+  for (const auto &message : received) {
+    EXPECT_EQ(message.attestation_sequence, first.attestation_sequence);
+    EXPECT_EQ(message.header.stamp, first.header.stamp);
+    EXPECT_EQ(message.base.record_stamp, first.base.record_stamp);
+    EXPECT_EQ(message.base.controller_sequence,
+              first.base.controller_sequence);
+    EXPECT_EQ(message.base.base_lease_id, first.base.base_lease_id);
+    EXPECT_EQ(message.base.lease_valid_until,
+              first.base.lease_valid_until);
+    EXPECT_EQ(message.base.snapshot_sha256, first.base.snapshot_sha256);
+  }
+
+  auto proposal = simple_pure_pursuit::validStateLatticeV2Proposal(1U);
+  const builtin_interfaces::msg::Time now_ros = node->get_clock()->now();
+  bindProposalToBaseAttestation(proposal, first, now_ros);
+  ASSERT_EQ(overtake_transport_contract::c002ay0::
+                validateAuthorizedTrajectoryV1(proposal.proposal),
+            overtake_transport_contract::c002ay0::ValidationError::NONE);
+  overtake_transport_contract::state_lattice_v2::CycleResult result;
+  ASSERT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  enqueueStateLatticeV2ProposalAndBegin(*node, proposal,
+                                                       now_ros, result));
+  EXPECT_TRUE(result.first_uptake);
+  EXPECT_TRUE(result.accepted.has_value());
+  EXPECT_EQ(result.reject_reason,
+            overtake_transport_contract::state_lattice_v2::RejectReason::
+                kNone);
+
+  simple_pure_pursuit::PurePursuitExactGoldenAccess::
+      applyStateLatticeV2CycleResultForTest(*node, result);
+  ASSERT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  stateLatticeV2BaseAttestationRefreshPending(*node));
+
+  const auto &drifted_base = base;
+  multi_purpose_mpc_ros_msgs::msg::ControllerCommandEnvelope drift_command;
+  drift_command.header.stamp = node->get_clock()->now();
+  drift_command.command_sequence = 99U;
+  simple_pure_pursuit::PurePursuitExactGoldenAccess::
+      publishStateLatticeV2BaseForTest(*node, drift_command, drifted_base, 5U);
+  for (std::size_t wait = 0U;
+       wait < 100U && received.size() <= kRedundantCommandCount; ++wait) {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_EQ(received.size(), kRedundantCommandCount + 1U)
+      << "reject_reason="
+      << static_cast<unsigned>(
+             simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                 stateLatticeV2BaseAttestationRejectReason(*node));
+  const auto ratcheted = received.back();
+  EXPECT_NE(ratcheted.base.record_stamp, first.base.record_stamp);
+  EXPECT_NE(ratcheted.base.snapshot_sha256, first.base.snapshot_sha256);
+  EXPECT_EQ(ratcheted.base.lease_valid_until, first.base.lease_valid_until);
+  EXPECT_EQ(ratcheted.base.base_geometry_sha256,
+            first.base.base_geometry_sha256);
+  EXPECT_EQ(ratcheted.base.base_source_generation,
+            first.base.base_source_generation);
+  EXPECT_FALSE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                   stateLatticeV2BaseAttestationRefreshPending(*node));
+
+  multi_purpose_mpc_ros_msgs::msg::ControllerCommandEnvelope next_base_command;
+  next_base_command.header.stamp = node->get_clock()->now();
+  next_base_command.command_sequence = 100U;
+  simple_pure_pursuit::PurePursuitExactGoldenAccess::
+      publishStateLatticeV2BaseForTest(*node, next_base_command, drifted_base,
+                                       5U);
+  for (std::size_t wait = 0U;
+       wait < 100U && received.size() <= kRedundantCommandCount + 1U; ++wait) {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_EQ(received.size(), kRedundantCommandCount + 2U);
+  const auto next_base = received.back();
+  EXPECT_NE(next_base.base.base_source_generation,
+            ratcheted.base.base_source_generation);
+
+  multi_purpose_mpc_ros_msgs::msg::ControllerCommandEnvelope reuse_command;
+  reuse_command.header.stamp = node->get_clock()->now();
+  reuse_command.command_sequence = 101U;
+  simple_pure_pursuit::PurePursuitExactGoldenAccess::
+      publishStateLatticeV2BaseForTest(*node, reuse_command, drifted_base, 5U);
+  for (std::size_t wait = 0U;
+       wait < 100U && received.size() <= kRedundantCommandCount + 2U; ++wait) {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_EQ(received.size(), kRedundantCommandCount + 3U);
+  const auto &reused = received.back();
+  EXPECT_EQ(reused.attestation_sequence, next_base.attestation_sequence);
+  EXPECT_EQ(reused.base.record_stamp, next_base.base.record_stamp);
+  EXPECT_EQ(reused.base.snapshot_sha256, next_base.base.snapshot_sha256);
+  EXPECT_EQ(reused.base.lease_valid_until, next_base.base.lease_valid_until);
+
+  const builtin_interfaces::msg::Time expired_at = node->get_clock()->now();
+  simple_pure_pursuit::PurePursuitExactGoldenAccess::
+      expireCachedStateLatticeV2BaseAttestation(*node, expired_at);
+  multi_purpose_mpc_ros_msgs::msg::ControllerCommandEnvelope expired_command;
+  expired_command.header.stamp = node->get_clock()->now();
+  expired_command.command_sequence = 102U;
+  simple_pure_pursuit::PurePursuitExactGoldenAccess::
+      publishStateLatticeV2BaseForTest(*node, expired_command, base);
+  for (std::size_t wait = 0U; wait < 10U; ++wait) {
+    executor.spin_some();
+  }
+  EXPECT_EQ(received.size(), kRedundantCommandCount + 3U);
+  EXPECT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  stateLatticeV2BaseAttestationRefreshPending(*node));
+
+  EXPECT_TRUE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                  hasCachedStateLatticeV2BaseAttestation(*node));
+  overtake_transport_contract::state_lattice_v2::CycleResult run_invalid;
+  run_invalid.run_invalid = true;
+  simple_pure_pursuit::PurePursuitExactGoldenAccess::
+      applyStateLatticeV2CycleResultForTest(*node, run_invalid);
+  EXPECT_FALSE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                   hasCachedStateLatticeV2BaseAttestation(*node));
+  EXPECT_FALSE(simple_pure_pursuit::PurePursuitExactGoldenAccess::
+                   stateLatticeV2BaseAttestationRefreshPending(*node));
 }
 
 Trajectory makeStraightThenArcTrajectory() {

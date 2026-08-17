@@ -1324,6 +1324,29 @@ def _write_gate2_preflight_bundle(repo: Path, run_id: str) -> Path:
     return bundle
 
 
+def _bind_gate2_authorization_to_current_artifacts(
+    repo: Path, attempt_id: str = "anchor-attempt",
+) -> Path:
+    index_path = (
+        repo / "analysis" / "aic_test" / "external_review_queue"
+        / "gate2_authorizations" / f"{attempt_id}.json"
+    )
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["artifact_sha256"] = {
+        name: hashlib.sha256((repo / relative).read_bytes()).hexdigest()
+        for name, relative in cli.GATE2_CURRENT_ARTIFACT_ADMISSION_PATHS.items()
+    }
+    index_path.write_text(
+        json.dumps(
+            index, ensure_ascii=False, sort_keys=True, indent=2,
+            allow_nan=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    index_path.chmod(0o644)
+    return index_path
+
+
 def _set_gate2_review_verdict(
     repo: Path, *, severity: str, transition_permission: str,
 ) -> None:
@@ -1624,6 +1647,181 @@ def test_gate2_runtime_authorization_accepts_independent_review_anchor(
     assert (
         cli._consume_gate2_runtime_authorization(tmp_path, authorization)
         == "gate2_runtime_authorization_already_consumed"
+    )
+
+
+def test_gate2_discovers_sole_unconsumed_current_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_gate2_authority_profile(tmp_path)
+    _write_gate2_review_anchor(tmp_path, "anchor-run")
+    _write_gate2_current_artifact_inputs(tmp_path, monkeypatch)
+    _bind_gate2_authorization_to_current_artifacts(tmp_path)
+    monkeypatch.delenv(cli.GATE2_REVIEWED_EXECUTION_ID_ENV, raising=False)
+    monkeypatch.delenv(cli.GATE2_REVIEW_ATTEMPT_ID_ENV, raising=False)
+
+    identity, error = cli._gate2_discover_current_review_identity(tmp_path)
+
+    assert error is None
+    assert identity == {
+        "execution_id": "anchor-execution",
+        "review_attempt_id": "anchor-attempt",
+        "run_id": "anchor-run",
+    }
+
+
+def test_gate2_discovery_rejects_missing_or_stale_artifact_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_gate2_authority_profile(tmp_path)
+    _write_gate2_review_anchor(tmp_path, "anchor-run")
+    _write_gate2_current_artifact_inputs(tmp_path, monkeypatch)
+
+    identity, error = cli._gate2_discover_current_review_identity(tmp_path)
+
+    assert identity is None
+    assert error == "gate2_review_queue_no_current_unconsumed_authorization"
+
+
+def test_gate2_discovery_rejects_consumed_current_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_gate2_authority_profile(tmp_path)
+    _write_gate2_review_anchor(tmp_path, "anchor-run")
+    _write_gate2_current_artifact_inputs(tmp_path, monkeypatch)
+    index_path = _bind_gate2_authorization_to_current_artifacts(tmp_path)
+    anchor_sha = hashlib.sha256(index_path.read_bytes()).hexdigest()
+    consumed = (
+        tmp_path / "analysis" / "aic_test"
+        / f"gate2_runtime_authorization_consumed_{anchor_sha}.json"
+    )
+    consumed.parent.mkdir(parents=True, exist_ok=True)
+    consumed.write_text("{}\n", encoding="utf-8")
+
+    identity, error = cli._gate2_discover_current_review_identity(tmp_path)
+
+    assert identity is None
+    assert error == "gate2_review_queue_no_current_unconsumed_authorization"
+
+
+def test_gate2_discovery_rejects_ambiguous_current_authorizations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_gate2_authority_profile(tmp_path)
+    _write_gate2_review_anchor(tmp_path, "anchor-run")
+    _write_gate2_current_artifact_inputs(tmp_path, monkeypatch)
+    index_path = _bind_gate2_authorization_to_current_artifacts(tmp_path)
+    duplicate = json.loads(index_path.read_text(encoding="utf-8"))
+    duplicate["execution_id"] = "second-execution"
+    duplicate["review_attempt_id"] = "second-attempt"
+    duplicate["run_id"] = "second-run"
+    duplicate_path = index_path.with_name("second-attempt.json")
+    duplicate_path.write_text(
+        json.dumps(
+            duplicate, ensure_ascii=False, sort_keys=True, indent=2,
+            allow_nan=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    duplicate_path.chmod(0o644)
+    artifact_sha256 = {
+        name: hashlib.sha256((tmp_path / relative).read_bytes()).hexdigest()
+        for name, relative in cli.GATE2_CURRENT_ARTIFACT_ADMISSION_PATHS.items()
+    }
+
+    def resolve_candidate(
+        _queue: object, *, execution_id: str, review_attempt_id: str,
+        run_id: str,
+    ) -> dict[str, object]:
+        del execution_id, run_id
+        candidate_path = index_path.with_name(f"{review_attempt_id}.json")
+        return {
+            "authorization_index_path": str(candidate_path.resolve()),
+            "authorization_index_sha256": hashlib.sha256(
+                candidate_path.read_bytes()
+            ).hexdigest(),
+            "artifact_sha256": artifact_sha256,
+            "runtime_budget": cli.GATE2_RUNTIME_BUDGET,
+        }
+
+    monkeypatch.setattr(cli.ReviewQueue, "resolve_completed_gate2", resolve_candidate)
+
+    identity, error = cli._gate2_discover_current_review_identity(tmp_path)
+
+    assert identity is None
+    assert error == "gate2_review_queue_current_authorization_ambiguous"
+
+
+@pytest.mark.parametrize("mutation", ["bool_budget", "noncanonical", "invalid_utf8"])
+def test_gate2_discovery_rejects_non_exact_authorization_encoding_or_types(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
+) -> None:
+    _write_gate2_authority_profile(tmp_path)
+    _write_gate2_review_anchor(tmp_path, "anchor-run")
+    _write_gate2_current_artifact_inputs(tmp_path, monkeypatch)
+    index_path = _bind_gate2_authorization_to_current_artifacts(tmp_path)
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if mutation == "bool_budget":
+        index["runtime_budget"]["fresh_runtime_max"] = True
+        index_path.write_text(
+            json.dumps(
+                index, ensure_ascii=False, sort_keys=True, indent=2,
+                allow_nan=False,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    elif mutation == "noncanonical":
+        index_path.write_text(json.dumps(index, sort_keys=True), encoding="utf-8")
+    else:
+        index_path.write_bytes(b"\xff\xfe")
+
+    identity, error = cli._gate2_discover_current_review_identity(tmp_path)
+
+    assert identity is None
+    assert error == "gate2_review_queue_no_current_unconsumed_authorization"
+
+
+def test_gate2_review_idless_cli_discovers_resolves_and_consumes_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_gate2_authority_profile(tmp_path)
+    _write_gate2_review_anchor(tmp_path, "anchor-run")
+    _write_gate2_current_artifact_inputs(tmp_path, monkeypatch)
+    _bind_gate2_authorization_to_current_artifacts(tmp_path)
+    monkeypatch.delenv(cli.GATE2_REVIEWED_EXECUTION_ID_ENV, raising=False)
+    monkeypatch.delenv(cli.GATE2_REVIEW_ATTEMPT_ID_ENV, raising=False)
+    monkeypatch.setattr(
+        cli, "_gate2_current_image_artifact_admission",
+        lambda *_args: ({"fixture": "image-admission"}, None),
+    )
+    monkeypatch.setattr(cli, "_gate2_compose_preflight", lambda *_args: (None, None))
+    monkeypatch.setattr(
+        cli, "_gate2_launch_spec_admission",
+        lambda *_args: ({"fixture": "launch-admission"}, None),
+    )
+    xauthority = tmp_path / ".Xauthority"
+    xauthority.write_bytes(b"fixture")
+    monkeypatch.setattr(cli, "_gate2_xauthority_path", lambda: xauthority)
+    real_consume = cli._consume_gate2_runtime_authorization
+    consumed: list[dict[str, object]] = []
+
+    def consume_then_stop(
+        repo: Path, authorization: dict[str, object],
+    ) -> str:
+        assert real_consume(repo, authorization) is None
+        consumed.append(authorization)
+        return "fixture_stop_after_exact_consume"
+
+    monkeypatch.setattr(cli, "_consume_gate2_runtime_authorization", consume_then_stop)
+    args = build_parser().parse_args([
+        "--repo-root", str(tmp_path), "run", "safegate2-stopped-overtake",
+    ])
+
+    assert cli.run_scenario(args) == 3
+    assert len(consumed) == 1
+    assert consumed[0]["anchor"]["run_id"] == "anchor-run"
+    assert real_consume(tmp_path, consumed[0]) == (
+        "gate2_runtime_authorization_already_consumed"
     )
 
 

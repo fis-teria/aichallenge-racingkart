@@ -15,7 +15,7 @@ from typing import Optional
 
 
 EXIT_CONTINUOUS_STOP = 42
-EXIT_VELOCITY_EVIDENCE = 43
+EXIT_PROGRESS_EVIDENCE = 43
 EXIT_RACE_ABORTED = 44
 
 
@@ -25,9 +25,12 @@ class WatchdogConfig:
     stop_enter_speed_mps: float = 0.05
     stop_exit_speed_mps: float = 0.10
     velocity_freshness_sec: float = 1.0
+    pose_freshness_sec: float = 1.0
     evidence_failure_sec: float = 15.0
     source_stamp_max_age_sec: float = 1.0
     source_stamp_future_tolerance_sec: float = 0.10
+    pose_progress_min_m: float = 0.10
+    pose_max_step_m: float = 2.0
     finish_ordering_grace_sec: float = 1.0
     race_arm_confirmation_timeout_sec: float = 5.0
 
@@ -37,9 +40,12 @@ class WatchdogConfig:
             self.stop_enter_speed_mps,
             self.stop_exit_speed_mps,
             self.velocity_freshness_sec,
+            self.pose_freshness_sec,
             self.evidence_failure_sec,
             self.source_stamp_max_age_sec,
             self.source_stamp_future_tolerance_sec,
+            self.pose_progress_min_m,
+            self.pose_max_step_m,
             self.finish_ordering_grace_sec,
             self.race_arm_confirmation_timeout_sec,
         )
@@ -53,12 +59,18 @@ class WatchdogConfig:
             raise ValueError("stop_exit_speed_mps must be greater than stop_enter_speed_mps")
         if self.velocity_freshness_sec <= 0.0:
             raise ValueError("velocity_freshness_sec must be positive")
+        if self.pose_freshness_sec <= 0.0:
+            raise ValueError("pose_freshness_sec must be positive")
         if self.evidence_failure_sec <= 0.0:
             raise ValueError("evidence_failure_sec must be positive")
         if self.source_stamp_max_age_sec <= 0.0:
             raise ValueError("source_stamp_max_age_sec must be positive")
         if self.source_stamp_future_tolerance_sec < 0.0:
             raise ValueError("source_stamp_future_tolerance_sec must be non-negative")
+        if self.pose_progress_min_m <= 0.0:
+            raise ValueError("pose_progress_min_m must be positive")
+        if self.pose_max_step_m <= self.pose_progress_min_m:
+            raise ValueError("pose_max_step_m must be greater than pose_progress_min_m")
         if self.finish_ordering_grace_sec <= 0.0:
             raise ValueError("finish_ordering_grace_sec must be positive")
         if self.race_arm_confirmation_timeout_sec <= 0.0:
@@ -105,13 +117,31 @@ class D1ProgressWatchdog:
         self.last_speed_mps: Optional[float] = None
         self.last_source_stamp_sec: Optional[float] = None
         self.last_valid_velocity_receipt_sec: Optional[float] = None
+        self.last_pose_source_stamp_sec: Optional[float] = None
+        self.last_valid_pose_receipt_sec: Optional[float] = None
+        self.last_pose_x_m: Optional[float] = None
+        self.last_pose_y_m: Optional[float] = None
+        self.last_pose_yaw_rad: Optional[float] = None
+        self.pose_anchor_x_m: Optional[float] = None
+        self.pose_anchor_y_m: Optional[float] = None
+        self.pose_anchor_yaw_rad: Optional[float] = None
+        self.pose_frame_id: Optional[str] = None
+        self.last_pose_progress_sec: Optional[float] = None
         self.last_clock_sec: Optional[float] = None
         self.last_clock_receipt_sec: Optional[float] = None
         self.stationary_since_sec: Optional[float] = None
-        self.evidence_invalid_since_sec: Optional[float] = None
+        self.velocity_evidence_invalid_since_sec: Optional[float] = None
+        self.pose_evidence_invalid_since_sec: Optional[float] = None
+        self.progress_evidence_invalid_since_sec: Optional[float] = None
+        self.velocity_pose_inconsistent_since_sec: Optional[float] = None
         self.sample_count = 0
+        self.pose_sample_count = 0
+        self.pose_progress_count = 0
         self.stationary_sample_count = 0
         self.non_monotonic_stamp_count = 0
+        self.non_monotonic_pose_stamp_count = 0
+        self.pose_discontinuity_count = 0
+        self.velocity_pose_inconsistent_count = 0
         self.pending_abort_reason: Optional[str] = None
         self.pending_abort_since_sec: Optional[float] = None
         self._terminal: Optional[WatchdogVerdict] = None
@@ -189,10 +219,12 @@ class D1ProgressWatchdog:
         if self._terminal is not None:
             return self._terminal
         if not math.isfinite(clock_sec):
-            self._mark_invalid_evidence(now_sec)
+            self._mark_velocity_invalid(now_sec)
+            self._mark_pose_invalid(now_sec)
             return self.evaluate(now_sec)
         if self.last_clock_sec is not None and clock_sec < self.last_clock_sec:
-            self._mark_invalid_evidence(now_sec)
+            self._mark_velocity_invalid(now_sec)
+            self._mark_pose_invalid(now_sec)
             return self.evaluate(now_sec)
         self.last_clock_sec = float(clock_sec)
         self.last_clock_receipt_sec = float(now_sec)
@@ -204,14 +236,14 @@ class D1ProgressWatchdog:
         if self._terminal is not None:
             return self._terminal
         if not math.isfinite(speed_mps) or not math.isfinite(source_stamp_sec):
-            self._mark_invalid_evidence(now_sec)
+            self._mark_velocity_invalid(now_sec)
             return self.evaluate(now_sec)
         if (
             self.last_source_stamp_sec is not None
             and source_stamp_sec <= self.last_source_stamp_sec
         ):
             self.non_monotonic_stamp_count += 1
-            self._mark_invalid_evidence(now_sec)
+            self._mark_velocity_invalid(now_sec)
             return self.evaluate(now_sec)
         if (
             self.last_clock_sec is None
@@ -219,34 +251,105 @@ class D1ProgressWatchdog:
             or now_sec - self.last_clock_receipt_sec
             > self.config.velocity_freshness_sec
         ):
-            self._mark_invalid_evidence(now_sec)
+            self._mark_velocity_invalid(now_sec)
             return self.evaluate(now_sec)
         source_age_sec = self.last_clock_sec - source_stamp_sec
         if (
             source_age_sec > self.config.source_stamp_max_age_sec
             or source_age_sec < -self.config.source_stamp_future_tolerance_sec
         ):
-            self._mark_invalid_evidence(now_sec)
+            self._mark_velocity_invalid(now_sec)
             return self.evaluate(now_sec)
 
         self.last_source_stamp_sec = float(source_stamp_sec)
         self.last_valid_velocity_receipt_sec = float(now_sec)
-        self.evidence_invalid_since_sec = None
+        self.velocity_evidence_invalid_since_sec = None
         self.last_speed_mps = float(speed_mps)
         self.sample_count += 1
+        self._update_progress_evidence(now_sec)
+        return self.evaluate(now_sec)
 
-        if not self._monitoring_active():
-            self._reset_stationary()
+    def observe_pose(
+        self,
+        x_m: float,
+        y_m: float,
+        yaw_rad: float,
+        source_stamp_sec: float,
+        frame_id: str,
+        now_sec: float,
+    ) -> Optional[WatchdogVerdict]:
+        if self._terminal is not None:
             return self._terminal
+        normalized_frame_id = str(frame_id).strip()
+        if (
+            not all(
+                math.isfinite(value)
+                for value in (x_m, y_m, yaw_rad, source_stamp_sec)
+            )
+            or not normalized_frame_id
+        ):
+            self._mark_pose_invalid(now_sec)
+            return self.evaluate(now_sec)
+        if (
+            self.last_pose_source_stamp_sec is not None
+            and source_stamp_sec <= self.last_pose_source_stamp_sec
+        ):
+            self.non_monotonic_pose_stamp_count += 1
+            self._mark_pose_invalid(now_sec)
+            return self.evaluate(now_sec)
+        if self.pose_frame_id is not None and normalized_frame_id != self.pose_frame_id:
+            self._mark_pose_invalid(now_sec)
+            return self.evaluate(now_sec)
+        if (
+            self.last_clock_sec is None
+            or self.last_clock_receipt_sec is None
+            or now_sec - self.last_clock_receipt_sec
+            > self.config.pose_freshness_sec
+        ):
+            self._mark_pose_invalid(now_sec)
+            return self.evaluate(now_sec)
+        source_age_sec = self.last_clock_sec - source_stamp_sec
+        if (
+            source_age_sec > self.config.source_stamp_max_age_sec
+            or source_age_sec < -self.config.source_stamp_future_tolerance_sec
+        ):
+            self._mark_pose_invalid(now_sec)
+            return self.evaluate(now_sec)
 
-        absolute_speed_mps = abs(speed_mps)
-        if absolute_speed_mps <= self.config.stop_enter_speed_mps:
-            if self.stationary_since_sec is None:
-                self.stationary_since_sec = float(now_sec)
-                self.stationary_sample_count = 0
-            self.stationary_sample_count += 1
-        elif absolute_speed_mps >= self.config.stop_exit_speed_mps:
-            self._reset_stationary()
+        if self.last_pose_x_m is not None and self.last_pose_y_m is not None:
+            step_m = math.hypot(x_m - self.last_pose_x_m, y_m - self.last_pose_y_m)
+            if step_m > self.config.pose_max_step_m:
+                self.pose_discontinuity_count += 1
+                self._mark_pose_invalid(now_sec)
+                return self.evaluate(now_sec)
+
+        self.last_pose_source_stamp_sec = float(source_stamp_sec)
+        self.last_valid_pose_receipt_sec = float(now_sec)
+        self.last_pose_x_m = float(x_m)
+        self.last_pose_y_m = float(y_m)
+        self.last_pose_yaw_rad = float(yaw_rad)
+        self.pose_frame_id = normalized_frame_id
+        self.pose_evidence_invalid_since_sec = None
+        self.pose_sample_count += 1
+
+        if self.pose_anchor_x_m is None or self.pose_anchor_y_m is None:
+            self._set_pose_anchor(x_m, y_m, yaw_rad)
+        else:
+            dx_m = x_m - self.pose_anchor_x_m
+            dy_m = y_m - self.pose_anchor_y_m
+            anchor_yaw_rad = self.pose_anchor_yaw_rad
+            if anchor_yaw_rad is None:
+                self._mark_pose_invalid(now_sec)
+                return self.evaluate(now_sec)
+            forward_progress_m = (
+                dx_m * math.cos(anchor_yaw_rad) + dy_m * math.sin(anchor_yaw_rad)
+            )
+            if forward_progress_m >= self.config.pose_progress_min_m:
+                self.last_pose_progress_sec = float(now_sec)
+                self.pose_progress_count += 1
+                self._set_pose_anchor(x_m, y_m, yaw_rad)
+
+        self._update_progress_evidence(now_sec)
         return self.evaluate(now_sec)
 
     def evaluate(self, now_sec: float) -> Optional[WatchdogVerdict]:
@@ -291,16 +394,67 @@ class D1ProgressWatchdog:
             or now_sec - self.last_clock_receipt_sec
             > self.config.velocity_freshness_sec
         ):
-            self._mark_invalid_evidence(now_sec)
-        if self.evidence_invalid_since_sec is not None:
+            self._mark_velocity_invalid(now_sec)
+        if (
+            self.last_valid_pose_receipt_sec is None
+            or now_sec - self.last_valid_pose_receipt_sec
+            > self.config.pose_freshness_sec
+            or self.last_clock_receipt_sec is None
+            or now_sec - self.last_clock_receipt_sec
+            > self.config.pose_freshness_sec
+        ):
+            self._mark_pose_invalid(now_sec)
+        velocity_evidence_expired = (
+            self.velocity_evidence_invalid_since_sec is not None
+            and now_sec - self.velocity_evidence_invalid_since_sec
+            >= self.config.evidence_failure_sec
+        )
+        pose_evidence_expired = (
+            self.pose_evidence_invalid_since_sec is not None
+            and now_sec - self.pose_evidence_invalid_since_sec
+            >= self.config.evidence_failure_sec
+        )
+        progress_evidence_expired = (
+            self.progress_evidence_invalid_since_sec is not None
+            and now_sec - self.progress_evidence_invalid_since_sec
+            >= self.config.evidence_failure_sec
+        )
+        if velocity_evidence_expired:
+            return self._latch(
+                "VELOCITY_EVIDENCE_STALE",
+                EXIT_PROGRESS_EVIDENCE,
+                False,
+                now_sec,
+            )
+        if pose_evidence_expired:
+            return self._latch(
+                "POSE_EVIDENCE_STALE",
+                EXIT_PROGRESS_EVIDENCE,
+                False,
+                now_sec,
+            )
+        if progress_evidence_expired:
+            return self._latch(
+                "PROGRESS_EVIDENCE_NOT_JOINTLY_FRESH",
+                EXIT_PROGRESS_EVIDENCE,
+                False,
+                now_sec,
+            )
+        if self.velocity_evidence_invalid_since_sec is not None:
+            return None
+        if self.pose_evidence_invalid_since_sec is not None:
+            return None
+
+        self._update_progress_evidence(now_sec)
+        if self.velocity_pose_inconsistent_since_sec is not None:
             self._reset_stationary()
             if (
-                now_sec - self.evidence_invalid_since_sec
+                now_sec - self.velocity_pose_inconsistent_since_sec
                 >= self.config.evidence_failure_sec
             ):
                 return self._latch(
-                    "VELOCITY_EVIDENCE_STALE",
-                    EXIT_VELOCITY_EVIDENCE,
+                    "VELOCITY_POSE_INCONSISTENT",
+                    EXIT_PROGRESS_EVIDENCE,
                     False,
                     now_sec,
                 )
@@ -329,9 +483,86 @@ class D1ProgressWatchdog:
             )
         )
 
-    def _mark_invalid_evidence(self, now_sec: float) -> None:
-        if self.evidence_invalid_since_sec is None:
-            self.evidence_invalid_since_sec = float(now_sec)
+    def _mark_velocity_invalid(self, now_sec: float) -> None:
+        if self.velocity_evidence_invalid_since_sec is None:
+            self.velocity_evidence_invalid_since_sec = float(now_sec)
+        self._mark_progress_evidence_invalid(now_sec)
+
+    def _mark_pose_invalid(self, now_sec: float) -> None:
+        if self.pose_evidence_invalid_since_sec is None:
+            self.pose_evidence_invalid_since_sec = float(now_sec)
+        self._mark_progress_evidence_invalid(now_sec)
+
+    def _mark_progress_evidence_invalid(self, now_sec: float) -> None:
+        if self.progress_evidence_invalid_since_sec is None:
+            self.progress_evidence_invalid_since_sec = float(now_sec)
+
+    def _set_pose_anchor(self, x_m: float, y_m: float, yaw_rad: float) -> None:
+        self.pose_anchor_x_m = float(x_m)
+        self.pose_anchor_y_m = float(y_m)
+        self.pose_anchor_yaw_rad = float(yaw_rad)
+
+    def _pose_supports_motion(self, now_sec: float) -> bool:
+        return (
+            self.last_pose_progress_sec is not None
+            and now_sec - self.last_pose_progress_sec
+            <= self.config.pose_freshness_sec
+        )
+
+    def _progress_evidence_fresh(self, now_sec: float) -> bool:
+        return (
+            self.velocity_evidence_invalid_since_sec is None
+            and self.pose_evidence_invalid_since_sec is None
+            and self.last_valid_velocity_receipt_sec is not None
+            and now_sec - self.last_valid_velocity_receipt_sec
+            <= self.config.velocity_freshness_sec
+            and self.last_valid_pose_receipt_sec is not None
+            and now_sec - self.last_valid_pose_receipt_sec
+            <= self.config.pose_freshness_sec
+        )
+
+    def _update_progress_evidence(self, now_sec: float) -> None:
+        if not self._monitoring_active():
+            self._reset_stationary()
+            self.velocity_pose_inconsistent_since_sec = None
+            return
+        if not self._progress_evidence_fresh(now_sec):
+            # An inadmissible sample cannot prove motion and must not erase
+            # already accumulated stop evidence.  Preserve both timers until
+            # fresh evidence either proves motion or the evidence-failure
+            # deadline latches fail-closed.
+            return
+        if (
+            self.progress_evidence_invalid_since_sec is not None
+            and now_sec - self.progress_evidence_invalid_since_sec
+            < self.config.evidence_failure_sec
+        ):
+            self.progress_evidence_invalid_since_sec = None
+        if self.last_speed_mps is None:
+            self._reset_stationary()
+            return
+
+        absolute_speed_mps = abs(self.last_speed_mps)
+        pose_supports_motion = self._pose_supports_motion(now_sec)
+        velocity_supports_motion = absolute_speed_mps >= self.config.stop_exit_speed_mps
+        velocity_supports_stop = absolute_speed_mps <= self.config.stop_enter_speed_mps
+
+        if velocity_supports_motion != pose_supports_motion:
+            if self.velocity_pose_inconsistent_since_sec is None:
+                self.velocity_pose_inconsistent_since_sec = float(now_sec)
+            self.velocity_pose_inconsistent_count += 1
+            self._reset_stationary()
+            return
+        self.velocity_pose_inconsistent_since_sec = None
+
+        if velocity_supports_motion:
+            self._reset_stationary()
+            return
+        if velocity_supports_stop:
+            if self.stationary_since_sec is None:
+                self.stationary_since_sec = float(now_sec)
+                self.stationary_sample_count = 0
+            self.stationary_sample_count += 1
 
     def _reset_stationary(self) -> None:
         self.stationary_since_sec = None
@@ -339,7 +570,10 @@ class D1ProgressWatchdog:
 
     def _reset_stop_evidence(self) -> None:
         self._reset_stationary()
-        self.evidence_invalid_since_sec = None
+        self.velocity_evidence_invalid_since_sec = None
+        self.pose_evidence_invalid_since_sec = None
+        self.progress_evidence_invalid_since_sec = None
+        self.velocity_pose_inconsistent_since_sec = None
 
     def _begin_pending_abort(self, reason: str, now_sec: float) -> None:
         if self.pending_abort_reason is None:
@@ -357,7 +591,7 @@ class D1ProgressWatchdog:
                 0.0, verdict.detected_monotonic_sec - self.stationary_since_sec
             )
         return {
-            "schema": "D1_START_PROGRESS_WATCHDOG_V1",
+            "schema": "D1_START_PROGRESS_WATCHDOG_V2",
             "reason": verdict.reason,
             "exit_code": verdict.exit_code,
             "passed": verdict.passed,
@@ -373,12 +607,30 @@ class D1ProgressWatchdog:
             "last_speed_mps": self.last_speed_mps,
             "last_source_stamp_sec": self.last_source_stamp_sec,
             "last_valid_velocity_receipt_sec": self.last_valid_velocity_receipt_sec,
+            "last_pose_source_stamp_sec": self.last_pose_source_stamp_sec,
+            "last_valid_pose_receipt_sec": self.last_valid_pose_receipt_sec,
+            "last_pose_x_m": self.last_pose_x_m,
+            "last_pose_y_m": self.last_pose_y_m,
+            "last_pose_yaw_rad": self.last_pose_yaw_rad,
+            "pose_frame_id": self.pose_frame_id,
+            "last_pose_progress_sec": self.last_pose_progress_sec,
             "last_clock_sec": self.last_clock_sec,
             "last_clock_receipt_sec": self.last_clock_receipt_sec,
             "stationary_duration_sec": stationary_duration_sec,
             "sample_count": self.sample_count,
+            "pose_sample_count": self.pose_sample_count,
+            "pose_progress_count": self.pose_progress_count,
             "stationary_sample_count": self.stationary_sample_count,
             "non_monotonic_stamp_count": self.non_monotonic_stamp_count,
+            "non_monotonic_pose_stamp_count": self.non_monotonic_pose_stamp_count,
+            "pose_discontinuity_count": self.pose_discontinuity_count,
+            "velocity_pose_inconsistent_count": self.velocity_pose_inconsistent_count,
+            "velocity_evidence_invalid_since_sec": self.velocity_evidence_invalid_since_sec,
+            "pose_evidence_invalid_since_sec": self.pose_evidence_invalid_since_sec,
+            "progress_evidence_invalid_since_sec": (
+                self.progress_evidence_invalid_since_sec
+            ),
+            "velocity_pose_inconsistent_since_sec": self.velocity_pose_inconsistent_since_sec,
             "pending_abort_reason": self.pending_abort_reason,
             "pending_abort_since_sec": self.pending_abort_since_sec,
             "config": asdict(self.config),
@@ -405,6 +657,7 @@ def _write_verdict(
     payload = watchdog.snapshot(verdict)
     payload["run_id"] = run_id
     payload["velocity_topic"] = "/vehicle/status/velocity_status"
+    payload["pose_topic"] = "/localization/kinematic_state"
     payload["vehicle_state_topic"] = "/awsim/state"
     payload["race_arm_topic"] = "/overtake/race_armed"
     payload["artifact_fingerprint_file"] = (
@@ -425,6 +678,7 @@ def _write_verdict(
 def _run_ros(args: argparse.Namespace, watchdog: D1ProgressWatchdog) -> WatchdogVerdict:
     import rclpy
     from autoware_auto_vehicle_msgs.msg import VelocityReport
+    from nav_msgs.msg import Odometry
     from rclpy.node import Node
     from rclpy.qos import (
         DurabilityPolicy,
@@ -465,6 +719,12 @@ def _run_ros(args: argparse.Namespace, watchdog: D1ProgressWatchdog) -> Watchdog
                 self._on_velocity,
                 qos_profile_sensor_data,
             )
+            self.create_subscription(
+                Odometry,
+                "/localization/kinematic_state",
+                self._on_pose,
+                qos_profile_sensor_data,
+            )
             clock_qos = QoSProfile(
                 depth=10,
                 reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -486,6 +746,37 @@ def _run_ros(args: argparse.Namespace, watchdog: D1ProgressWatchdog) -> Watchdog
             watchdog.observe_velocity(
                 float(msg.longitudinal_velocity),
                 stamp_sec,
+                time.monotonic(),
+            )
+
+        @staticmethod
+        def _on_pose(msg: Odometry) -> None:
+            stamp_sec = float(msg.header.stamp.sec) + float(
+                msg.header.stamp.nanosec
+            ) * 1.0e-9
+            orientation = msg.pose.pose.orientation
+            quaternion_norm = math.sqrt(
+                float(orientation.x) ** 2
+                + float(orientation.y) ** 2
+                + float(orientation.z) ** 2
+                + float(orientation.w) ** 2
+            )
+            yaw_rad = float("nan")
+            if math.isfinite(quaternion_norm) and quaternion_norm > 1.0e-6:
+                x = float(orientation.x) / quaternion_norm
+                y = float(orientation.y) / quaternion_norm
+                z = float(orientation.z) / quaternion_norm
+                w = float(orientation.w) / quaternion_norm
+                yaw_rad = math.atan2(
+                    2.0 * (w * z + x * y),
+                    1.0 - 2.0 * (y * y + z * z),
+                )
+            watchdog.observe_pose(
+                float(msg.pose.pose.position.x),
+                float(msg.pose.pose.position.y),
+                yaw_rad,
+                stamp_sec,
+                msg.header.frame_id,
                 time.monotonic(),
             )
 
@@ -517,7 +808,10 @@ def _run_ros(args: argparse.Namespace, watchdog: D1ProgressWatchdog) -> Watchdog
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fail a Gate/dev run when D1 is continuously stopped after Start."
+        description=(
+            "Fail a Gate/dev run when fresh velocity and pose evidence both prove "
+            "that D1 is continuously stopped after Start."
+        )
     )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
@@ -531,11 +825,14 @@ def main() -> int:
     parser.add_argument("--stop-enter-speed-mps", type=float, default=0.05)
     parser.add_argument("--stop-exit-speed-mps", type=float, default=0.10)
     parser.add_argument("--velocity-freshness-sec", type=float, default=1.0)
+    parser.add_argument("--pose-freshness-sec", type=float, default=1.0)
     parser.add_argument("--evidence-failure-sec", type=float, default=15.0)
     parser.add_argument("--source-stamp-max-age-sec", type=float, default=1.0)
     parser.add_argument(
         "--source-stamp-future-tolerance-sec", type=float, default=0.10
     )
+    parser.add_argument("--pose-progress-min-m", type=float, default=0.10)
+    parser.add_argument("--pose-max-step-m", type=float, default=2.0)
     parser.add_argument("--finish-ordering-grace-sec", type=float, default=1.0)
     parser.add_argument(
         "--race-arm-confirmation-timeout-sec", type=float, default=5.0
@@ -548,9 +845,12 @@ def main() -> int:
         stop_enter_speed_mps=args.stop_enter_speed_mps,
         stop_exit_speed_mps=args.stop_exit_speed_mps,
         velocity_freshness_sec=args.velocity_freshness_sec,
+        pose_freshness_sec=args.pose_freshness_sec,
         evidence_failure_sec=args.evidence_failure_sec,
         source_stamp_max_age_sec=args.source_stamp_max_age_sec,
         source_stamp_future_tolerance_sec=args.source_stamp_future_tolerance_sec,
+        pose_progress_min_m=args.pose_progress_min_m,
+        pose_max_step_m=args.pose_max_step_m,
         finish_ordering_grace_sec=args.finish_ordering_grace_sec,
         race_arm_confirmation_timeout_sec=args.race_arm_confirmation_timeout_sec,
     )

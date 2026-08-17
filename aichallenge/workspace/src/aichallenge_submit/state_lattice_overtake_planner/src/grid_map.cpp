@@ -260,7 +260,8 @@ bool GridMap::buildReferenceLayer(const FrenetFrame & frame, const PlannerConfig
   const auto distance = euclideanDistanceTransform(width_, height_, seeds, resolution_m_);
   reference_levels_.resize(distance.size());
   for (std::size_t i = 0; i < distance.size(); ++i) {
-    reference_levels_[i] = static_cast<std::uint8_t>(referenceCostLevel(distance[i], config));
+    reference_levels_[i] =
+      static_cast<std::uint8_t>(referenceCostValue(distance[i], config));
   }
   ++static_generation_;
   return true;

@@ -48,7 +48,7 @@ tools/run_tuning_gui.bash --restart
 - `AWSIMヘッドレス` を有効にした `dev` は、AWSIMサービスを起動したまま `AWSIM_EXTRA_ARGS='-batchmode -nographics --camera false --lidar false'` を渡し、AWSIM画面や重いセンサ描画を抑えます。シミュレーション時刻 `/clock` は出るので、カートは通常のdevと同じく動けます。
 - `追加Autoware車両` は自車以外に起動する追加Autoware台数です。通常 `dev` では `0台` が `make dev`、`1台`〜`3台` が `make dev2`〜`make dev4` に対応します。`AWSIMヘッドレス` の場合も同じターゲットを使い、AWSIMの車両数は通常通り `dev2`〜`dev4` 側で指定されます。
 - ヘッダーの `Run Settings` から `Simulator`、`Safety Gate`、`Multiplay` の設定を開けます。
-- `Safety Gate` の `gate` ボタンは `make gate1`〜`make gate3` を呼び出し、AWSIMの `SafetyGate/scenario*.yaml` を使って障害物停止、追い越し、車線維持のシナリオを実行します。
+- `Safety Gate` の `gate1` / `gate3` は従来どおり `make gate1` / `make gate3` を呼び出します。`gate2` は権限を持つ実行経路なので、GUIで選んだ `CONTROL_METHOD` やシミュレータ引数を直接渡さず、公式の `./aic-test run safegate2-stopped-overtake --runtime-timeout 120 --json` を呼び出します。exact artifactを再buildで変えないよう、この操作だけは「実行前に更新ビルド」を無視します。実行前のartifact・外部レビュー・未使用attempt条件に不一致があればwrapperがfail-closedで拒否します。
 - `control_method` が `mpc`、`delay_aware_mpc`、`hybrid_delay_aware_mpc` のとき、Files に `Overtake planner params` と `Overtake permission profile` が出ます。`Overtake permission profile` では `name`、`start_wp`、`end_wp`、`allow_overtake` を表編集でき、行追加・削除もできます。
 - `control_method` が `hybrid_delay_aware_mpc` のとき、Files に `Hybrid delay-aware MPC launch params`、`Hybrid control mux params`、`Hybrid control mux launch`、`Pure Pursuit launch params`、`Wall recovery planner params`、`Wall recovery planner launch` が出ます。MPC infeasible時のPure Pursuit fallback速度、追い越しoverride連携、切り替え閾値、復帰条件、timeoutを表編集で変更できます。
 - `control_method` が `pure_pursuit_mpc_horizon` のときも、Files に `Wall recovery planner params` と `Wall recovery planner launch` が出ます。`wall_recovery_enabled` はデフォルトfalseなので、Tuning GUIで編集できることと実行時に復帰機能が有効であることは別です。

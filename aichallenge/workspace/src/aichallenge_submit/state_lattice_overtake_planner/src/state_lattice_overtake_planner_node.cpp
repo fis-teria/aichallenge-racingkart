@@ -1350,11 +1350,17 @@ private:
       state.y = pose->y;
       state.yaw = pose->yaw;
       state.frenet = frame_.project(state.x, state.y, state.yaw);
-      state.curvature =
-          std::abs(state.speed_mps) > 0.1
-              ? state.yaw_rate_radps / state.speed_mps
-              : (state.frenet.valid ? frame_.interpolate(state.frenet.s).kappa
-                                    : 0.0);
+      const double maximum_abs_curvature = std::min(
+          curvatureForSteering(
+              std::min(config_.planner_max_steer_rad,
+                       config_.hard_max_steer_rad),
+              config_.wheel_base_m),
+          config_.reference_curvature_sanity_limit_radpm);
+      const auto continuous_curvature = low_speed_curvature_continuity_.update(
+          state, state.stamp_sec, state.speed_mps, state.yaw_rate_radps,
+          maximum_abs_curvature, config_.ego_stale_sec);
+      state.curvature = continuous_curvature.value_or(
+          state.frenet.valid ? frame_.interpolate(state.frenet.s).kappa : 0.0);
       state.valid = state.frenet.valid && std::isfinite(state.speed_mps) &&
                     std::isfinite(state.yaw_rate_radps);
     }
@@ -1605,7 +1611,10 @@ private:
       // A deadline cycle cannot prove that the latched pass identity advanced
       // transactionally. Reusing a currently revalidated output is allowed,
       // but the next normal cycle must start without continuation authority.
-      planner_->clearPassContinuationLatch();
+      // Preserve only the finite accepted-profile scalars as a one-shot,
+      // identity-bound search-order hint; no trajectory, lease, generation,
+      // timestamp renewal, or motion authority survives the deadline.
+      planner_->clearPassContinuationAuthorityPreservingSearchHint();
       if (consecutive_overruns_ < config_.overrun_stop_cycles &&
           previous_still_safe) {
         PlannerOutput reused_output = previous_safe_output_.value();
@@ -2642,7 +2651,53 @@ private:
          << ",\"rejected_trackability_candidates\":"
          << output.rejected_trackability_candidates
          << ",\"rejected_other_candidates\":"
-         << output.rejected_other_candidates << ",\"candidate_diagnostics\":[";
+         << output.rejected_other_candidates
+         << ",\"accepted_path_continuation\":{"
+         << "\"requested\":"
+         << (planner_cycle_metrics.accepted_path_continuation_requested
+                 ? "true" : "false")
+         << ",\"target_matches\":"
+         << (planner_cycle_metrics.accepted_path_continuation_target_matches
+                 ? "true" : "false")
+         << ",\"target_missing_recovery\":"
+         << (planner_cycle_metrics
+                     .accepted_path_continuation_target_missing_recovery
+                 ? "true" : "false")
+         << ",\"evaluated\":"
+         << (planner_cycle_metrics.accepted_path_continuation_evaluated
+                 ? "true" : "false")
+         << ",\"exact_binding_valid\":"
+         << (planner_cycle_metrics
+                     .accepted_path_continuation_exact_binding_valid
+                 ? "true" : "false")
+         << ",\"anchor_valid\":"
+         << (planner_cycle_metrics.accepted_path_continuation_anchor_valid
+                 ? "true" : "false")
+         << ",\"nearest_distance_m\":";
+    append_finite(
+        planner_cycle_metrics.accepted_path_continuation_nearest_distance_m);
+    json << ",\"nearest_yaw_error_rad\":";
+    append_finite(planner_cycle_metrics
+                      .accepted_path_continuation_nearest_yaw_error_rad);
+    json << ",\"join_points\":"
+         << planner_cycle_metrics.accepted_path_continuation_join_points
+         << ",\"connector_attempts\":"
+         << planner_cycle_metrics.accepted_path_continuation_connector_attempts
+         << ",\"connector_generation_rejects\":"
+         << planner_cycle_metrics
+                .accepted_path_continuation_connector_generation_rejects
+         << ",\"evaluator_rejects\":"
+         << planner_cycle_metrics.accepted_path_continuation_evaluator_rejects
+         << ",\"cartesian_rejects\":"
+         << planner_cycle_metrics.accepted_path_continuation_cartesian_rejects
+         << ",\"accepted\":"
+         << (planner_cycle_metrics.accepted_path_continuation_accepted
+                 ? "true" : "false")
+         << ",\"stage\":\""
+         << planner_cycle_metrics.accepted_path_continuation_stage
+         << "\",\"last_reject_reason\":\""
+         << planner_cycle_metrics.accepted_path_continuation_last_reject_reason
+         << "\"},\"candidate_diagnostics\":[";
     for (std::size_t i = 0U;
          i < planner_cycle_metrics.candidate_diagnostic_count; ++i) {
       if (i != 0U) {
@@ -3141,7 +3196,7 @@ private:
 
   void publishCostmap() {
     if (!map_.initialized() ||
-        map_.referenceLevels().size() != map_.wallLevels().size()) {
+        map_.referenceCosts().size() != map_.wallLevels().size()) {
       return;
     }
     nav_msgs::msg::OccupancyGrid message;
@@ -3180,10 +3235,13 @@ private:
     }
 
     for (std::size_t i = 0; i < message.data.size(); ++i) {
-      const int level =
-          mergeCostLevels(map_.wallLevels()[i], map_.referenceLevels()[i]);
-      message.data[i] = static_cast<std::int8_t>(
-          config_.cost_levels[static_cast<std::size_t>(level)]);
+      const int wall_level = static_cast<int>(map_.wallLevels()[i]);
+      const int wall_cost = wall_level > 0
+                                ? config_.cost_levels[static_cast<std::size_t>(
+                                      wall_level)]
+                                : 0;
+      message.data[i] = static_cast<std::int8_t>(std::max(
+          static_cast<int>(map_.referenceCosts()[i]), wall_cost));
     }
     std::optional<nav_msgs::msg::OccupancyGrid> opponent_cost_message;
     if (opponent_costmap_pub_->get_subscription_count() > 0U) {
@@ -3231,17 +3289,14 @@ private:
                   config_.cost_levels[static_cast<std::size_t>(
                       mergeCostLevels(isolated_level, object_level))]);
             }
-            const auto current_level_it =
-                std::find(config_.cost_levels.begin(),
-                          config_.cost_levels.end(), message.data[index]);
-            const int current_level =
-                current_level_it == config_.cost_levels.end()
-                    ? 0
-                    : static_cast<int>(std::distance(
-                          config_.cost_levels.begin(), current_level_it));
-            message.data[index] = static_cast<std::int8_t>(
-                config_.cost_levels[static_cast<std::size_t>(
-                    mergeCostLevels(current_level, object_level))]);
+            const int safety_level = mergeCostLevels(
+                static_cast<int>(map_.wallLevels()[index]), object_level);
+            const int safety_cost = safety_level > 0
+                                        ? config_.cost_levels[static_cast<
+                                              std::size_t>(safety_level)]
+                                        : 0;
+            message.data[index] = static_cast<std::int8_t>(std::max(
+                static_cast<int>(map_.referenceCosts()[index]), safety_cost));
           }
         }
       }
@@ -3341,6 +3396,7 @@ private:
   GridMap map_;
   std::unique_ptr<LatticePlanner> planner_;
   EgoState ego_;
+  LowSpeedCurvatureContinuity low_speed_curvature_continuity_;
   std::vector<OpponentState> opponents_;
   std::unordered_map<std::string, OpponentState> opponent_history_;
   bool v2x_received_{false};

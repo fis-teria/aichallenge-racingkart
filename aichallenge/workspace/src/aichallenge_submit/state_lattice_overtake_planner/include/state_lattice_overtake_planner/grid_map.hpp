@@ -36,6 +36,9 @@ public:
   bool footprintHitsWall(const Pose2d & pose, const Footprint & footprint) const;
   const std::vector<std::uint8_t> & occupiedCells() const {return occupied_;}
   const std::vector<std::uint8_t> & wallLevels() const {return wall_levels_;}
+  const std::vector<std::uint8_t> & referenceCosts() const {return reference_levels_;}
+  // Compatibility alias; stored values are numeric costs, not shared safety
+  // levels.
   const std::vector<std::uint8_t> & referenceLevels() const {return reference_levels_;}
 
 private:

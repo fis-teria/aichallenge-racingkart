@@ -12,6 +12,9 @@ stop_timeout_sec="${D1_STALL_TIMEOUT_SEC:-15}"
 stop_enter_speed_mps="${D1_STALL_ENTER_SPEED_MPS:-0.05}"
 stop_exit_speed_mps="${D1_STALL_EXIT_SPEED_MPS:-0.10}"
 velocity_freshness_sec="${D1_VELOCITY_FRESHNESS_SEC:-1.0}"
+pose_freshness_sec="${D1_POSE_FRESHNESS_SEC:-1.0}"
+pose_progress_min_m="${D1_POSE_PROGRESS_MIN_M:-0.10}"
+pose_max_step_m="${D1_POSE_MAX_STEP_M:-2.0}"
 evidence_failure_sec="${D1_VELOCITY_EVIDENCE_FAILURE_SEC:-15}"
 autoware_command_service="${AUTOWARE_COMMAND_SERVICE:-autoware-command}"
 autoware_command_mode="${AUTOWARE_COMMAND_MODE:-run}"
@@ -61,6 +64,9 @@ for numeric_value in \
     "${stop_enter_speed_mps}" \
     "${stop_exit_speed_mps}" \
     "${velocity_freshness_sec}" \
+    "${pose_freshness_sec}" \
+    "${pose_progress_min_m}" \
+    "${pose_max_step_m}" \
     "${evidence_failure_sec}"; do
     if ! [[ "${numeric_value}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         echo "[d1-progress-supervisor][ERROR] invalid numeric watchdog setting" >&2
@@ -141,7 +147,7 @@ expected_status = int(expected_status_text)
 with open(path, encoding="utf-8") as stream:
     payload = json.load(stream)
 valid = (
-    payload.get("schema") == "D1_START_PROGRESS_WATCHDOG_V1"
+    payload.get("schema") == "D1_START_PROGRESS_WATCHDOG_V2"
     and payload.get("run_id") == expected_run_id
     and payload.get("exit_code") == expected_status
     and payload.get("passed") is (expected_status == 0)
@@ -271,6 +277,8 @@ watchdog_args=(
     --authoritative-start-confirmed --stop-timeout-sec "${stop_timeout_sec}"
     --stop-enter-speed-mps "${stop_enter_speed_mps}" --stop-exit-speed-mps "${stop_exit_speed_mps}"
     --velocity-freshness-sec "${velocity_freshness_sec}" --evidence-failure-sec "${evidence_failure_sec}"
+    --pose-freshness-sec "${pose_freshness_sec}" --pose-progress-min-m "${pose_progress_min_m}"
+    --pose-max-step-m "${pose_max_step_m}"
     --fingerprint "${fingerprint_path}"
 )
 if [ "${autoware_command_mode}" = "exec" ]; then

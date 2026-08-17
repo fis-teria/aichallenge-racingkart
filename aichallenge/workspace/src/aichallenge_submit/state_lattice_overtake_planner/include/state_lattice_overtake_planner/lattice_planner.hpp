@@ -20,6 +20,21 @@ double requiredLateralTransitionDistance(const PlannerConfig &config,
 double derivedFrontDetectionRadius(const PlannerConfig &config,
                                    const OpponentState &opponent);
 
+class LowSpeedCurvatureContinuity {
+public:
+  std::optional<double> update(const Pose2d &pose, double stamp_sec,
+                               double speed_mps, double yaw_rate_radps,
+                               double maximum_abs_curvature,
+                               double freshness_limit_sec);
+  void reset();
+
+private:
+  std::optional<Pose2d> anchor_pose_;
+  double anchor_stamp_sec_{-1.0};
+  std::optional<double> last_valid_curvature_;
+  double last_valid_stamp_sec_{-1.0};
+};
+
 class ParametricQuintic {
 public:
   bool configure(const Pose2d &start, double start_curvature,
@@ -135,6 +150,12 @@ public:
   // Clear only pass-continuation identity. Node-level fail-closed paths that
   // bypass update() must not reset unrelated maneuver or detector state.
   void clearPassContinuationLatch();
+  // A deadline must revoke motion-continuation authority, but exact finite
+  // profile parameters and the last fully admitted path may survive as
+  // one-shot search hints. They carry no command, lease, timestamp renewal, or
+  // authority; path geometry is never published directly and is used only to
+  // build a fresh current-input connector that passes every validator again.
+  void clearPassContinuationAuthorityPreservingSearchHint();
   void resetManeuverState();
 
   std::vector<CandidateTrajectory>
@@ -222,6 +243,40 @@ private:
     double required_arc_m{0.0};
     double target_observation_stamp_sec{0.0};
     std::uint64_t revision{0U};
+    bool clearance_profile_hint_valid{false};
+    double clearance_profile_join_fraction{0.0};
+    double clearance_profile_yaw_magnitude{0.0};
+    double clearance_profile_tangent_scale{0.0};
+  };
+
+  struct AcceptedProfileSearchHint {
+    std::string target_id;
+    int side{0};
+    std::size_t lateral_index{0U};
+    std::size_t tangent_index{0U};
+    double goal_d_m{0.0};
+    double target_observation_stamp_sec{0.0};
+    double join_fraction{0.0};
+    double yaw_magnitude{0.0};
+    double tangent_scale{0.0};
+  };
+
+  // Geometry from the last fully admitted pass candidate. This is only a
+  // bounded search hint: every continuation is rebuilt from the current
+  // measured ego pose and must pass the complete current-input evaluator and
+  // exact Cartesian contract again. It carries no motion authority or lease.
+  struct AcceptedPathContinuationHint {
+    std::string target_id;
+    int side{0};
+    std::size_t lateral_index{0U};
+    std::size_t tangent_index{0U};
+    double goal_d_m{0.0};
+    double target_observation_stamp_sec{0.0};
+    CandidateTrajectory candidate;
+    // Set only by the node's transactional deadline path after it revokes
+    // pass authority. This distinguishes the one early non-authoritative
+    // recovery attempt from normal authority-bound continuation ordering.
+    bool deadline_preserved{false};
   };
 
   struct RoleCandidateEvaluation {
@@ -239,6 +294,10 @@ private:
   std::vector<CandidateTrajectory>
   generateCandidatesInternal(const EgoState &ego,
                              const std::vector<OpponentState> &opponents) const;
+  std::optional<CandidateTrajectory> acceptedPathContinuationCandidate(
+      const AcceptedPathContinuationHint &hint, const EgoState &ego,
+      const OpponentState &raw_target,
+      const std::vector<OpponentState> &opponents, double now_sec);
   std::optional<CandidateTrajectory> movingTargetFollowCandidate(
       const EgoState &ego, const OpponentState &target,
       const std::vector<OpponentState> &opponents) const;
@@ -370,6 +429,9 @@ private:
   std::string mpc_health_guard_reason_;
   std::optional<PassContinuationLatch> pass_continuation_latch_;
   std::optional<PassContinuationLatch> suspended_pass_continuation_latch_;
+  std::optional<AcceptedProfileSearchHint> deadline_profile_search_hint_;
+  std::optional<AcceptedPathContinuationHint>
+      accepted_path_continuation_hint_;
   std::optional<PreventiveSideRoleLatch> preventive_side_role_latch_;
   std::uint64_t preventive_side_role_generation_{0U};
   // Set only while update() evaluates a proven-safe rear-only current pose.

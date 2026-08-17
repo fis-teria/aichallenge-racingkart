@@ -1253,6 +1253,9 @@ class ReviewQueue:
         submission_payload = _read_json(submission_path, "submission")
         if submission_payload.get("submission_id") != evidence_payload.get("submission_id"):
             raise ReviewQueueError("terminal_failure_submission_mismatch")
+        if (evidence_payload.get("terminal_error_kind") == "INCOMPLETE_RESPONSE_AFTER_30M"
+                and submission_payload.get("submitted_at") != evidence_payload.get("submitted_at")):
+            raise ReviewQueueError("terminal_failure_submission_time_mismatch")
         payload = {
             "schema_version": SCHEMA_VERSION, "execution_id": execution_id,
             "review_attempt_id": review_attempt_id, "status": "RETRYABLE_UI_TERMINAL_FAILURE",
@@ -1275,17 +1278,50 @@ class ReviewQueue:
 
     @staticmethod
     def _retryable_terminal_failure_evidence_valid(evidence: Any) -> bool:
-        required = {"schema_version", "submission_id", "terminal_error_kind",
-                    "terminal_error_text", "observed_at", "retryable"}
-        return (isinstance(evidence, dict) and set(evidence) == required
-                and evidence.get("schema_version") == 1
-                and isinstance(evidence.get("submission_id"), str)
-                and bool(_ID_RE.fullmatch(evidence["submission_id"]))
-                and all(isinstance(evidence.get(field), str) and evidence[field].strip()
-                        and len(evidence[field]) <= 4096
-                        for field in ("terminal_error_kind", "terminal_error_text", "observed_at"))
-                and evidence.get("terminal_error_kind") == "RATE_LIMIT"
-                and evidence.get("retryable") is True)
+        common = {"schema_version", "submission_id", "terminal_error_kind",
+                  "terminal_error_text", "observed_at", "retryable"}
+        if (not isinstance(evidence, dict) or evidence.get("schema_version") != 1
+                or not isinstance(evidence.get("submission_id"), str)
+                or not _ID_RE.fullmatch(evidence["submission_id"])
+                or not all(isinstance(evidence.get(field), str) and evidence[field].strip()
+                           and len(evidence[field]) <= 4096
+                           for field in ("terminal_error_kind", "terminal_error_text", "observed_at"))
+                or _parse_utc(evidence.get("observed_at")) is None
+                or evidence.get("retryable") is not True):
+            return False
+        if evidence.get("terminal_error_kind") in {
+            "RATE_LIMIT", "NETWORK_DISCONNECTED",
+        }:
+            return set(evidence) == common
+        if evidence.get("terminal_error_kind") != "INCOMPLETE_RESPONSE_AFTER_30M":
+            return False
+        required = common | {"submitted_at", "checkpoint_observations", "missing_required_fields"}
+        submitted_at = _parse_utc(evidence.get("submitted_at"))
+        observed_at = _parse_utc(evidence.get("observed_at"))
+        required_missing = {
+            "execution_or_handoff_binding", "severity", "disposition",
+            "minimum_changes", "transition_permission",
+        }
+        checkpoints = evidence.get("checkpoint_observations")
+        if (set(evidence) != required or submitted_at is None or observed_at is None
+                or observed_at < submitted_at + timedelta(minutes=30)
+                or set(evidence.get("missing_required_fields", [])) != required_missing
+                or not isinstance(checkpoints, list) or len(checkpoints) != 3):
+            return False
+        for expected_minute, checkpoint in zip((10, 20, 30), checkpoints, strict=True):
+            if (not isinstance(checkpoint, dict)
+                    or set(checkpoint) != {"elapsed_minutes", "observed_at", "reloaded",
+                                           "response_text", "generating", "ui_errors"}
+                    or checkpoint.get("elapsed_minutes") != expected_minute
+                    or checkpoint.get("reloaded") is not True
+                    or checkpoint.get("generating") is not False
+                    or checkpoint.get("ui_errors") != []
+                    or checkpoint.get("response_text") != evidence["terminal_error_text"]):
+                return False
+            checkpoint_at = _parse_utc(checkpoint.get("observed_at"))
+            if checkpoint_at is None or checkpoint_at < submitted_at + timedelta(minutes=expected_minute):
+                return False
+        return True
 
     @staticmethod
     def _connection_attempt_valid(item: Any) -> bool:

@@ -84,6 +84,22 @@ bool stateLatticeV2IdentityMatches(
     const multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity &lhs,
     const multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity &rhs);
 
+// Call only after the candidate has passed the normal complete attestation
+// validation. A semantic duplicate may republish the previous already-
+// validated non-authoritative base attestation only while its original
+// immutable record remains valid. The volatile command/record identity is
+// intentionally excluded; every field that describes the base source,
+// geometry, producer/session, configuration, race epoch, and original expiry
+// remains exact.
+bool stateLatticeV2BaseAttestationReusable(
+    const StateLatticeV2BaseAttestation &previous,
+    const StateLatticeV2BaseAttestation &candidate,
+    const builtin_interfaces::msg::Time &now_ros);
+
+bool stateLatticeV2BaseAttestationSemanticMatch(
+    const StateLatticeV2BaseAttestation &previous,
+    const StateLatticeV2BaseAttestation &candidate);
+
 bool stateLatticeV2CurrentAvailabilityRejected(
     const overtake_transport_contract::state_lattice_v2::CycleResult &result);
 
@@ -604,6 +620,12 @@ public:
   std::string state_lattice_v2_base_attestation_session_id_;
   std::unique_ptr<overtake_transport_contract::state_lattice_v2::BindingStore>
       state_lattice_v2_binding_store_;
+  std::optional<StateLatticeV2BaseAttestation>
+      state_lattice_v2_last_published_base_attestation_;
+  // Set only after one exact proposal is accepted, converted, and installed.
+  // It permits one fully validated base-attestation ratchet without extending
+  // the immutable source-derived lease.
+  bool state_lattice_v2_base_attestation_refresh_pending_{false};
   struct StateLatticeV2ControlTrajectoryCache {
     multi_purpose_mpc_ros_msgs::msg::StateLatticeV2Identity identity;
     std::shared_ptr<Trajectory> trajectory;

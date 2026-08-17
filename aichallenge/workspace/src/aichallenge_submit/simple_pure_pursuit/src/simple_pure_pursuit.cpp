@@ -513,6 +513,60 @@ bool stateLatticeV2IdentityMatches(
          lhs.canonical_sha256 == rhs.canonical_sha256;
 }
 
+bool stateLatticeV2BaseAttestationSemanticMatch(
+    const StateLatticeV2BaseAttestation &previous,
+    const StateLatticeV2BaseAttestation &candidate) {
+  const auto &lhs = previous.base;
+  const auto &rhs = candidate.base;
+  const auto same_time = [](const auto &left, const auto &right) {
+    return left.sec == right.sec && left.nanosec == right.nanosec;
+  };
+  return previous.schema_version == candidate.schema_version &&
+         previous.producer_instance_id == candidate.producer_instance_id &&
+         previous.session_id == candidate.session_id &&
+         previous.header.frame_id == candidate.header.frame_id &&
+         lhs.schema_version == rhs.schema_version &&
+         lhs.authority_eligible == rhs.authority_eligible &&
+         lhs.frame_id == rhs.frame_id &&
+         lhs.race_arm_epoch == rhs.race_arm_epoch &&
+         lhs.controller_instance_id == rhs.controller_instance_id &&
+         same_time(lhs.lease_valid_until, rhs.lease_valid_until) &&
+         lhs.base_source_kind == rhs.base_source_kind &&
+         same_time(lhs.base_source_stamp, rhs.base_source_stamp) &&
+         lhs.base_source_generation == rhs.base_source_generation &&
+         lhs.base_original_point_count == rhs.base_original_point_count &&
+         lhs.first_source_index == rhs.first_source_index &&
+         lhs.last_source_index == rhs.last_source_index &&
+         lhs.nearest_source_index == rhs.nearest_source_index &&
+         lhs.base_source_digest_state == rhs.base_source_digest_state &&
+         lhs.canonical_algorithm_version == rhs.canonical_algorithm_version &&
+         lhs.base_geometry_sha256 == rhs.base_geometry_sha256 &&
+         lhs.base_source_sha256 == rhs.base_source_sha256 &&
+         lhs.controller_implementation_sha256 ==
+             rhs.controller_implementation_sha256 &&
+         lhs.controller_config_sha256 == rhs.controller_config_sha256;
+}
+
+bool stateLatticeV2BaseAttestationReusable(
+    const StateLatticeV2BaseAttestation &previous,
+    const StateLatticeV2BaseAttestation &candidate,
+    const builtin_interfaces::msg::Time &now_ros) {
+  const auto time_ns =
+      [](const builtin_interfaces::msg::Time &value) -> std::int64_t {
+    if (value.sec < 0 || value.nanosec >= 1000000000U) {
+      return std::int64_t{-1};
+    }
+    return static_cast<std::int64_t>(value.sec) *
+               static_cast<std::int64_t>(1000000000LL) +
+           static_cast<std::int64_t>(value.nanosec);
+  };
+  const auto now_ns = time_ns(now_ros);
+  const auto previous_expiry_ns = time_ns(previous.base.lease_valid_until);
+  return now_ns > 0 && previous_expiry_ns > 0 &&
+         now_ns < previous_expiry_ns &&
+         stateLatticeV2BaseAttestationSemanticMatch(previous, candidate);
+}
+
 bool stateLatticeV2CurrentAvailabilityRejected(
     const overtake_transport_contract::state_lattice_v2::CycleResult &result) {
   if (result.run_invalid) {
@@ -1201,6 +1255,13 @@ void SimplePurePursuit::publishFreeRunExecutionAck(
 
 void SimplePurePursuit::applyStateLatticeV2CycleResult(
     const overtake_transport_contract::state_lattice_v2::CycleResult &result) {
+  if (result.run_invalid) {
+    // BindingStore clears its exact base history on clock recovery and makes
+    // overflow terminal. Keep the republish cache in the same fail-closed
+    // lifecycle so a key no longer recorded by the Store cannot be reused.
+    state_lattice_v2_last_published_base_attestation_.reset();
+    state_lattice_v2_base_attestation_refresh_pending_ = false;
+  }
   if (state_lattice_v4_poc_identity_gate_enabled_ &&
       result.availability_present && result.availability_identity.has_value()) {
     state_lattice_v4_poc_identity_ = result.availability_identity;
@@ -1239,6 +1300,12 @@ void SimplePurePursuit::applyStateLatticeV2CycleResult(
           state_lattice_v2_control_trajectory_cache_->identity,
           result.availability_identity.value());
   if (exact_cached_availability) {
+    if (result.accepted.has_value()) {
+      // The proposal is accepted, converted, installed, and is the exact
+      // current availability. Ratchet at most once on the next normal,
+      // fully-validated publication; timer cycles alone never renew it.
+      state_lattice_v2_base_attestation_refresh_pending_ = true;
+    }
     (void)activatePendingStateLatticeV4Contract(
         result.availability_identity.value());
   }
@@ -2472,14 +2539,92 @@ void SimplePurePursuit::publishStateLatticeV2BaseAttestation(
   attestation.session_id = state_lattice_v2_base_attestation_session_id_;
   attestation.attestation_sequence = command_envelope.command_sequence;
 
+  const builtin_interfaces::msg::Time now_ros = get_clock()->now();
+  const auto candidate_validation =
+      overtake_transport_contract::state_lattice_v2::validateBaseAttestation(
+          attestation,
+          state_lattice_v2_base_attestation_producer_instance_id_,
+          state_lattice_v2_base_attestation_session_id_, now_ros);
+  if (candidate_validation !=
+      overtake_transport_contract::state_lattice_v2::RejectReason::kNone) {
+    state_lattice_v2_base_attestation_local_reject_reason_ =
+        static_cast<std::uint8_t>(candidate_validation);
+    state_lattice_v2_base_attestation_stage_ =
+        BindingStatus::BASE_ATTESTATION_LOCAL_RECORD_REJECTED;
+    return;
+  }
+
+  const bool has_previous =
+      state_lattice_v2_last_published_base_attestation_.has_value();
+  StateLatticeV2BaseAttestation attestation_to_record = attestation;
+  if (state_lattice_v2_base_attestation_refresh_pending_) {
+    if (!has_previous) {
+      state_lattice_v2_base_attestation_local_reject_reason_ =
+          static_cast<std::uint8_t>(
+              overtake_transport_contract::state_lattice_v2::RejectReason::
+                  kBaseAttestationMissing);
+      state_lattice_v2_base_attestation_stage_ =
+          BindingStatus::BASE_ATTESTATION_LOCAL_RECORD_REJECTED;
+      return;
+    }
+    // The accepted proposal is bound to the previously published exact base.
+    // A newer reference may arrive between its callback and this timer. Build
+    // the one-shot ratchet from that immutable accepted base, not from the
+    // newly selected reference, so the new reference cannot deadlock pending.
+    // Only volatile record/command identity changes; the source-derived lease
+    // and every semantic field remain byte-identical.
+    attestation_to_record =
+        state_lattice_v2_last_published_base_attestation_.value();
+    attestation_to_record.header.stamp = attestation.header.stamp;
+    attestation_to_record.attestation_sequence =
+        attestation.attestation_sequence;
+    attestation_to_record.base.record_stamp = attestation.base.record_stamp;
+    attestation_to_record.base.controller_sequence =
+        attestation.base.controller_sequence;
+    attestation_to_record.base.base_lease_id = attestation.base.base_lease_id;
+    attestation_to_record.base.snapshot_sha256 =
+        overtake_transport_contract::c002ay0::canonicalizeBaseSnapshotV1(
+            attestation_to_record.base)
+            .sha256;
+    const auto ratchet_validation =
+        overtake_transport_contract::state_lattice_v2::validateBaseAttestation(
+            attestation_to_record,
+            state_lattice_v2_base_attestation_producer_instance_id_,
+            state_lattice_v2_base_attestation_session_id_, now_ros);
+    if (ratchet_validation !=
+            overtake_transport_contract::state_lattice_v2::RejectReason::kNone ||
+        !stateLatticeV2BaseAttestationReusable(
+            state_lattice_v2_last_published_base_attestation_.value(),
+            attestation_to_record, now_ros)) {
+      state_lattice_v2_base_attestation_local_reject_reason_ =
+          static_cast<std::uint8_t>(
+              ratchet_validation != overtake_transport_contract::
+                                        state_lattice_v2::RejectReason::kNone
+                  ? ratchet_validation
+                  : overtake_transport_contract::state_lattice_v2::
+                        RejectReason::kBaseAttestationMismatch);
+      state_lattice_v2_base_attestation_stage_ =
+          BindingStatus::BASE_ATTESTATION_LOCAL_RECORD_REJECTED;
+      return;
+    }
+  }
+  const bool semantic_match =
+      has_previous && stateLatticeV2BaseAttestationReusable(
+                          state_lattice_v2_last_published_base_attestation_.value(),
+                          attestation_to_record, now_ros);
+  const bool reuse_previous =
+      !state_lattice_v2_base_attestation_refresh_pending_ && semantic_match;
+
   // Commit the compact local witness before exposing the matching wire
   // attestation.  A multi-threaded executor can otherwise complete the
   // Planner round-trip before this PP records its own base, causing a false
-  // BASE_ATTESTATION_MISSING rejection.  The 256-point message is not retained.
+  // BASE_ATTESTATION_MISSING rejection. Semantic duplicates keep the original
+  // compact key and immutable message, so per-command volatile fields cannot
+  // evict a still-valid Planner base from the bounded exact history.
   overtake_transport_contract::state_lattice_v2::RejectReason reason{};
-  const builtin_interfaces::msg::Time now_ros = get_clock()->now();
-  if (!state_lattice_v2_binding_store_->recordBaseAttestation(
-          attestation, now_ros, &reason)) {
+  if (!reuse_previous &&
+      !state_lattice_v2_binding_store_->recordBaseAttestation(
+          attestation_to_record, now_ros, &reason)) {
     state_lattice_v2_base_attestation_local_reject_reason_ =
         static_cast<std::uint8_t>(reason);
     state_lattice_v2_base_attestation_stage_ =
@@ -2488,7 +2633,17 @@ void SimplePurePursuit::publishStateLatticeV2BaseAttestation(
   }
   // Publication remains observation-only and occurs after the existing
   // command/status publications at the call site.
-  pub_state_lattice_v2_base_attestation_->publish(attestation);
+  const auto &published_attestation =
+      reuse_previous
+          ? state_lattice_v2_last_published_base_attestation_.value()
+          : attestation_to_record;
+  pub_state_lattice_v2_base_attestation_->publish(published_attestation);
+  if (!reuse_previous) {
+    state_lattice_v2_last_published_base_attestation_ = attestation_to_record;
+    // Clear only after record-before-publish completed. A record rejection or
+    // publish exception retains pending and cannot silently self-renew.
+    state_lattice_v2_base_attestation_refresh_pending_ = false;
+  }
   if (state_lattice_v2_base_attestation_publish_count_ !=
       std::numeric_limits<std::uint64_t>::max()) {
     ++state_lattice_v2_base_attestation_publish_count_;

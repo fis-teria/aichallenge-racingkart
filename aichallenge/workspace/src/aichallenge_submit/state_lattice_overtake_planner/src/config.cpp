@@ -116,6 +116,10 @@ std::string validateConfig(const PlannerConfig &c) {
       !strictlyIncreasing(c.reference_distance_thresholds_m)) {
     return "distance threshold arrays have invalid size or ordering";
   }
+  if (!std::isfinite(c.reference_extra_step_m) ||
+      c.reference_extra_step_m != 0.2) {
+    return "reference_extra_step_m must equal the 0.2 m reference-cost contract";
+  }
   const bool supported_lateral_count =
       c.lateral_targets_m.size() == 5U || c.lateral_targets_m.size() == 7U;
   if (!supported_lateral_count || !allFinite(c.lateral_targets_m) ||

@@ -142,6 +142,10 @@ TEST(Config, VehicleSteeringEnvelopeIsFailClosed) {
   config = sl::PlannerConfig{};
   config.max_steer_rate_radps = 128.000001;
   EXPECT_FALSE(sl::validateConfig(config).empty());
+
+  config = sl::PlannerConfig{};
+  config.reference_extra_step_m = 0.25;
+  EXPECT_FALSE(sl::validateConfig(config).empty());
 }
 
 TEST(Config, LateralTargetsAreDefinedByRuntimeParameters) {
@@ -168,10 +172,56 @@ TEST(CostModel, DistanceBoundariesAndMergeRules) {
   EXPECT_EQ(sl::wallCostLevel(0.5, config), 0);
   EXPECT_EQ(sl::objectCostLevel(0.8, config), 8);
   EXPECT_EQ(sl::objectCostLevel(1.7, config), 0);
-  EXPECT_EQ(sl::referenceCostLevel(1.499, config), 3);
-  EXPECT_EQ(sl::referenceCostLevel(1.5, config), 4);
-  EXPECT_EQ(sl::referenceCostLevel(1.7, config), 5);
-  EXPECT_EQ(sl::referenceCostLevel(1.9, config), 6);
+  EXPECT_EQ(sl::referenceCostValue(0.199999, config), 0);
+  EXPECT_EQ(sl::referenceCostValue(
+                std::nextafter(0.2, -std::numeric_limits<double>::infinity()),
+                config),
+            0);
+  EXPECT_EQ(sl::referenceCostValue(0.2, config), 1);
+  EXPECT_EQ(sl::referenceCostValue(
+                std::nextafter(0.2, std::numeric_limits<double>::infinity()),
+                config),
+            1);
+  EXPECT_EQ(sl::referenceCostValue(0.399999, config), 1);
+  EXPECT_EQ(sl::referenceCostValue(
+                std::nextafter(0.4, -std::numeric_limits<double>::infinity()),
+                config),
+            1);
+  EXPECT_EQ(sl::referenceCostValue(0.4, config), 2);
+  EXPECT_EQ(sl::referenceCostValue(0.6, config), 3);
+  EXPECT_EQ(sl::referenceCostValue(-1.0, config), 5);
+  EXPECT_EQ(sl::referenceCostValue(19.8, config), 99);
+  EXPECT_EQ(sl::referenceCostValue(100.0, config), 99);
+  EXPECT_EQ(sl::referenceCostValue(std::numeric_limits<double>::max(), config),
+            99);
+  EXPECT_EQ(sl::referenceCostValue(
+                std::numeric_limits<double>::quiet_NaN(), config),
+            99);
+  EXPECT_EQ(sl::referenceCostValue(
+                std::numeric_limits<double>::infinity(), config),
+            99);
+  for (int expected_cost = 1; expected_cost <= 99; ++expected_cost) {
+    const double boundary_m = static_cast<double>(expected_cost) / 5.0;
+    const double predecessor = std::nextafter(
+        boundary_m, -std::numeric_limits<double>::infinity());
+    const double successor = std::nextafter(
+        boundary_m, std::numeric_limits<double>::infinity());
+    EXPECT_EQ(sl::referenceCostValue(predecessor, config), expected_cost - 1)
+        << "positive predecessor at cost boundary " << expected_cost;
+    EXPECT_EQ(sl::referenceCostValue(boundary_m, config), expected_cost)
+        << "positive exact boundary " << expected_cost;
+    EXPECT_EQ(sl::referenceCostValue(successor, config), expected_cost)
+        << "positive successor at cost boundary " << expected_cost;
+    EXPECT_EQ(sl::referenceCostValue(-predecessor, config), expected_cost - 1)
+        << "negative predecessor magnitude at cost boundary " << expected_cost;
+    EXPECT_EQ(sl::referenceCostValue(-boundary_m, config), expected_cost)
+        << "negative exact boundary " << expected_cost;
+    EXPECT_EQ(sl::referenceCostValue(-successor, config), expected_cost)
+        << "negative successor magnitude at cost boundary " << expected_cost;
+  }
+  auto invalid_step = config;
+  invalid_step.reference_extra_step_m = 0.25;
+  EXPECT_EQ(sl::referenceCostValue(0.0, invalid_step), 99);
   EXPECT_EQ(sl::mergeCostLevels(7, 8), 9);
   EXPECT_EQ(sl::mergeCostLevels(5, 6), 7);
   EXPECT_EQ(sl::mergeCostLevels(8, 6), 9);

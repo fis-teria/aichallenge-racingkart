@@ -29,6 +29,9 @@ struct UncertaintyMargin
 
 int wallCostLevel(double distance_m, const PlannerConfig & config);
 int objectCostLevel(double effective_distance_m, const PlannerConfig & config);
+int referenceCostValue(double distance_m, const PlannerConfig & config);
+// Legacy level view retained for source compatibility. Production reference
+// ranking and costmap publication use referenceCostValue().
 int referenceCostLevel(double distance_m, const PlannerConfig & config);
 int mergeCostLevels(int lhs, int rhs);
 int trajectoryCost(const std::vector<int> & pose_costs);

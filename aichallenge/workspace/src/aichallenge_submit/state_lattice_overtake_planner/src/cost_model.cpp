@@ -113,28 +113,38 @@ int objectCostLevel(double distance_m, const PlannerConfig &c) {
   return 0;
 }
 
-int referenceCostLevel(double distance_m, const PlannerConfig &c) {
+int referenceCostValue(double distance_m, const PlannerConfig &c) {
+  constexpr double kReferenceCostStepM = 0.2;
+  constexpr int kMaximumReferenceCost = 99;
   if (!std::isfinite(distance_m)) {
-    return 9;
+    return 99;
   }
   const double d = std::abs(distance_m);
-  if (d < c.reference_distance_thresholds_m[0]) {
-    return 0;
+  if (!std::isfinite(c.reference_extra_step_m) ||
+      c.reference_extra_step_m != kReferenceCostStepM) {
+    return 99;
   }
-  if (d < c.reference_distance_thresholds_m[1]) {
-    return 1;
+
+  // Compare against the correctly rounded decimal boundaries directly.
+  // Multiplying d by 5.0 can round a predecessor such as
+  // nextafter(1.8, -inf) up to the integer 9 and promote it one bin early.
+  int lower_cost = 0;
+  int upper_cost = kMaximumReferenceCost;
+  while (lower_cost < upper_cost) {
+    const int candidate_cost =
+        lower_cost + (upper_cost - lower_cost + 1) / 2;
+    const double boundary_m = static_cast<double>(candidate_cost) / 5.0;
+    if (d >= boundary_m) {
+      lower_cost = candidate_cost;
+    } else {
+      upper_cost = candidate_cost - 1;
+    }
   }
-  if (d < c.reference_distance_thresholds_m[2]) {
-    return 2;
-  }
-  if (d < c.reference_distance_thresholds_m[3]) {
-    return 3;
-  }
-  if (d < 1.7) {
-    return 4;
-  }
-  return std::min(9, 5 + static_cast<int>(std::floor(
-                             (d - 1.7 + 1.0e-9) / c.reference_extra_step_m)));
+  return lower_cost;
+}
+
+int referenceCostLevel(double distance_m, const PlannerConfig &c) {
+  return std::min(9, referenceCostValue(distance_m, c));
 }
 
 int mergeCostLevels(int lhs, int rhs) {

@@ -24,9 +24,9 @@ WatchdogConfig = watchdog_module.WatchdogConfig
 WatchdogVerdict = watchdog_module.WatchdogVerdict
 
 
-def active_watchdog() -> D1ProgressWatchdog:
+def active_watchdog(config: WatchdogConfig | None = None) -> D1ProgressWatchdog:
     watchdog = D1ProgressWatchdog(
-        WatchdogConfig(), authoritative_start_confirmed=True
+        config or WatchdogConfig(), authoritative_start_confirmed=True
     )
     watchdog.observe_race_arm(True, 0.0)
     watchdog.observe_vehicle_state("Start", 0.0)
@@ -40,11 +40,44 @@ def observe_velocity(
     now_sec: float,
     *,
     clock_sec: float | None = None,
+    pose_x_m: float = 0.0,
+    pose_y_m: float = 0.0,
+    pose_yaw_rad: float = 0.0,
+    pose_frame_id: str = "map",
+    with_pose: bool = True,
 ):
     effective_clock_sec = stamp_sec if clock_sec is None else clock_sec
     if effective_clock_sec == effective_clock_sec:
         watchdog.observe_clock(effective_clock_sec, now_sec)
+    if with_pose:
+        watchdog.observe_pose(
+            pose_x_m,
+            pose_y_m,
+            pose_yaw_rad,
+            stamp_sec,
+            pose_frame_id,
+            now_sec,
+        )
     return watchdog.observe_velocity(speed_mps, stamp_sec, now_sec)
+
+
+def observe_pose(
+    watchdog: D1ProgressWatchdog,
+    x_m: float,
+    stamp_sec: float,
+    now_sec: float,
+    *,
+    y_m: float = 0.0,
+    yaw_rad: float = 0.0,
+    frame_id: str = "map",
+    clock_sec: float | None = None,
+):
+    effective_clock_sec = stamp_sec if clock_sec is None else clock_sec
+    if effective_clock_sec == effective_clock_sec:
+        watchdog.observe_clock(effective_clock_sec, now_sec)
+    return watchdog.observe_pose(
+        x_m, y_m, yaw_rad, stamp_sec, frame_id, now_sec
+    )
 
 
 def test_start_wait_does_not_count_stationary_time() -> None:
@@ -118,13 +151,81 @@ def test_continuous_stop_latches_only_at_15_seconds() -> None:
     assert verdict.exit_code == 42
 
 
+def test_forward_pose_progress_prevents_false_continuous_stop() -> None:
+    watchdog = active_watchdog()
+    watchdog.config = WatchdogConfig(evidence_failure_sec=30.0)
+    for index in range(0, 161):
+        now_sec = index * 0.1
+        verdict = observe_velocity(
+            watchdog,
+            0.0,
+            1.0 + now_sec,
+            now_sec,
+            pose_x_m=index * 0.03,
+        )
+        assert verdict is None
+    assert watchdog.stationary_since_sec is None
+    assert watchdog.pose_progress_count > 0
+    assert watchdog.velocity_pose_inconsistent_since_sec == pytest.approx(0.4)
+
+
+def test_persistent_velocity_pose_disagreement_is_distinct_evidence_failure() -> None:
+    watchdog = active_watchdog()
+    for index in range(0, 161):
+        now_sec = index * 0.1
+        verdict = observe_velocity(
+            watchdog,
+            0.0,
+            1.0 + now_sec,
+            now_sec,
+            pose_x_m=index * 0.03,
+        )
+        if verdict is not None:
+            break
+    assert verdict is not None
+    assert verdict.reason == "VELOCITY_POSE_INCONSISTENT"
+    assert verdict.exit_code == 43
+
+
+def test_stop_timeout_starts_after_last_bounded_forward_progress() -> None:
+    watchdog = active_watchdog()
+    watchdog.config = WatchdogConfig(evidence_failure_sec=30.0)
+    for index in range(0, 51):
+        now_sec = index * 0.1
+        assert observe_velocity(
+            watchdog,
+            0.0,
+            1.0 + now_sec,
+            now_sec,
+            pose_x_m=index * 0.03,
+        ) is None
+    final_x_m = 50 * 0.03
+    for index in range(51, 211):
+        now_sec = index * 0.1
+        verdict = observe_velocity(
+            watchdog,
+            0.0,
+            1.0 + now_sec,
+            now_sec,
+            pose_x_m=final_x_m,
+        )
+        if verdict is not None:
+            break
+    assert verdict is not None
+    assert verdict.reason == "D1_CONTINUOUS_STOP_15S"
+    assert verdict.detected_monotonic_sec >= 20.0
+
+
 def test_exit_threshold_resets_continuous_stop_timer() -> None:
     watchdog = active_watchdog()
     observe_velocity(watchdog, 0.0, 1.0, 0.0)
-    observe_velocity(watchdog, 0.11, 2.0, 14.9)
-    observe_velocity(watchdog, 0.0, 3.0, 15.0)
-    assert observe_velocity(watchdog, 0.0, 4.0, 29.9) is None
-    verdict = observe_velocity(watchdog, 0.0, 5.0, 30.0)
+    observe_velocity(watchdog, 0.11, 2.0, 0.5)
+    observe_velocity(watchdog, 0.0, 3.0, 0.6)
+    for index in range(1, 150):
+        assert observe_velocity(
+            watchdog, 0.0, 3.0 + index * 0.1, 0.6 + index * 0.1
+        ) is None
+    verdict = observe_velocity(watchdog, 0.0, 18.0, 15.6)
     assert verdict is not None
     assert verdict.reason == "D1_CONTINUOUS_STOP_15S"
 
@@ -132,7 +233,7 @@ def test_exit_threshold_resets_continuous_stop_timer() -> None:
 def test_hysteresis_band_preserves_stationary_state() -> None:
     watchdog = active_watchdog()
     observe_velocity(watchdog, 0.04, 1.0, 0.0)
-    observe_velocity(watchdog, 0.07, 2.0, 5.0)
+    observe_velocity(watchdog, 0.07, 2.0, 0.5)
     assert watchdog.stationary_since_sec == 0.0
 
 
@@ -202,11 +303,231 @@ def test_non_monotonic_stamp_cannot_prove_continuous_stop() -> None:
     observe_velocity(watchdog, 0.0, 2.0, 0.0)
     watchdog.observe_clock(2.5, 0.5)
     watchdog.observe_velocity(0.0, 2.0, 0.5)
-    assert watchdog.stationary_since_sec is None
+    assert watchdog.stationary_since_sec == 0.0
     verdict = watchdog.evaluate(15.5)
     assert verdict is not None
     assert verdict.reason == "VELOCITY_EVIDENCE_STALE"
     assert watchdog.non_monotonic_stamp_count == 1
+
+
+@pytest.mark.parametrize(
+    ("x_m", "stamp_sec", "frame_id"),
+    [
+        (float("nan"), 2.0, "map"),
+        (0.0, float("nan"), "map"),
+        (0.0, 2.0, ""),
+    ],
+)
+def test_invalid_pose_is_separate_evidence_failure(
+    x_m: float, stamp_sec: float, frame_id: str
+) -> None:
+    watchdog = active_watchdog()
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+    watchdog.observe_clock(2.0, 0.1)
+    assert watchdog.observe_pose(
+        x_m, 0.0, 0.0, stamp_sec, frame_id, 0.1
+    ) is None
+    verdict = watchdog.evaluate(15.1)
+    assert verdict is not None
+    assert verdict.reason == "POSE_EVIDENCE_STALE"
+    assert verdict.exit_code == 43
+
+
+def test_backward_pose_stamp_cannot_prove_stop_or_progress() -> None:
+    watchdog = active_watchdog()
+    observe_velocity(watchdog, 0.0, 2.0, 0.0)
+    watchdog.observe_clock(2.5, 0.5)
+    assert watchdog.observe_pose(0.2, 0.0, 0.0, 2.0, "map", 0.5) is None
+    verdict = watchdog.evaluate(15.5)
+    assert verdict is not None
+    assert verdict.reason == "POSE_EVIDENCE_STALE"
+    assert watchdog.non_monotonic_pose_stamp_count == 1
+
+
+def test_pose_frame_change_is_fail_closed() -> None:
+    watchdog = active_watchdog()
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+    watchdog.observe_clock(2.0, 0.1)
+    assert watchdog.observe_pose(0.0, 0.0, 0.0, 2.0, "odom", 0.1) is None
+    verdict = watchdog.evaluate(15.1)
+    assert verdict is not None
+    assert verdict.reason == "POSE_EVIDENCE_STALE"
+
+
+def test_pose_discontinuity_is_fail_closed_and_never_counts_as_progress() -> None:
+    watchdog = active_watchdog()
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+    watchdog.observe_clock(2.0, 0.1)
+    assert watchdog.observe_pose(3.0, 0.0, 0.0, 2.0, "map", 0.1) is None
+    assert watchdog.pose_progress_count == 0
+    assert watchdog.pose_discontinuity_count == 1
+    verdict = watchdog.evaluate(15.1)
+    assert verdict is not None
+    assert verdict.reason == "POSE_EVIDENCE_STALE"
+
+
+def test_repeated_transient_invalid_pose_cannot_erase_real_stop_evidence() -> None:
+    watchdog = active_watchdog()
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+
+    verdict = None
+    for index in range(1, 16):
+        stamp_sec = 1.0 + index
+        invalid_now_sec = float(index) - 0.05
+        watchdog.observe_clock(stamp_sec, invalid_now_sec)
+        assert watchdog.observe_pose(
+            float("nan"), 0.0, 0.0, stamp_sec, "map", invalid_now_sec
+        ) is None
+        assert watchdog.stationary_since_sec == 0.0
+        verdict = observe_velocity(
+            watchdog,
+            0.0,
+            stamp_sec,
+            float(index),
+            pose_x_m=0.0,
+        )
+        if verdict is not None:
+            break
+
+    assert verdict is not None
+    assert verdict.reason == "D1_CONTINUOUS_STOP_15S"
+    assert verdict.detected_monotonic_sec == 15.0
+
+
+def test_repeated_transient_invalid_velocity_cannot_erase_real_stop_evidence() -> None:
+    watchdog = active_watchdog()
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+
+    verdict = None
+    for index in range(1, 16):
+        stamp_sec = 1.0 + index
+        invalid_now_sec = float(index) - 0.05
+        watchdog.observe_clock(stamp_sec, invalid_now_sec)
+        assert watchdog.observe_velocity(
+            float("nan"), stamp_sec, invalid_now_sec
+        ) is None
+        assert watchdog.stationary_since_sec == 0.0
+        verdict = observe_velocity(watchdog, 0.0, stamp_sec, float(index))
+        if verdict is not None:
+            break
+
+    assert verdict is not None
+    assert verdict.reason == "D1_CONTINUOUS_STOP_15S"
+    assert verdict.detected_monotonic_sec == 15.0
+
+
+def test_cross_channel_invalid_relay_expires_from_first_aggregate_epoch() -> None:
+    watchdog = active_watchdog(WatchdogConfig(evidence_failure_sec=1.0))
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+
+    watchdog.observe_clock(2.0, 0.1)
+    assert watchdog.observe_pose(
+        float("nan"), 0.0, 0.0, 2.0, "map", 0.1
+    ) is None
+    watchdog.observe_clock(2.5, 0.5)
+    assert watchdog.observe_velocity(float("nan"), 2.5, 0.5) is None
+    assert observe_pose(watchdog, 0.0, 3.0, 0.6) is None
+    watchdog.observe_clock(3.5, 0.9)
+    assert watchdog.observe_pose(
+        float("nan"), 0.0, 0.0, 3.5, "map", 0.9
+    ) is None
+    assert watchdog.observe_velocity(0.0, 3.5, 0.95) is None
+
+    verdict = watchdog.evaluate(1.1)
+    assert verdict is not None
+    assert verdict.reason == "PROGRESS_EVIDENCE_NOT_JOINTLY_FRESH"
+    assert watchdog.progress_evidence_invalid_since_sec == 0.1
+
+
+def test_one_channel_recovery_does_not_reset_aggregate_invalid_epoch() -> None:
+    watchdog = active_watchdog(WatchdogConfig(evidence_failure_sec=1.0))
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+    watchdog.observe_clock(2.0, 0.1)
+    assert watchdog.observe_pose(
+        float("nan"), 0.0, 0.0, 2.0, "map", 0.1
+    ) is None
+    assert watchdog.observe_velocity(float("nan"), 2.0, 0.2) is None
+    assert observe_pose(watchdog, 0.0, 2.5, 0.3) is None
+    assert watchdog.progress_evidence_invalid_since_sec == 0.1
+
+
+def test_simultaneous_full_recovery_resets_aggregate_invalid_epoch() -> None:
+    watchdog = active_watchdog(WatchdogConfig(evidence_failure_sec=1.0))
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+    watchdog.observe_clock(2.0, 0.1)
+    assert watchdog.observe_pose(
+        float("nan"), 0.0, 0.0, 2.0, "map", 0.1
+    ) is None
+    assert watchdog.observe_velocity(float("nan"), 2.0, 0.2) is None
+    assert observe_pose(watchdog, 0.0, 2.5, 0.3) is None
+    assert watchdog.observe_velocity(0.0, 2.5, 0.4) is None
+    assert watchdog.progress_evidence_invalid_since_sec is None
+
+
+@pytest.mark.parametrize("recovery_now_sec", [1.1, 1.2])
+def test_expired_aggregate_epoch_cannot_be_cleared_by_late_full_recovery(
+    recovery_now_sec: float,
+) -> None:
+    watchdog = active_watchdog(WatchdogConfig(evidence_failure_sec=1.0))
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+    watchdog.observe_clock(2.0, 0.1)
+    assert watchdog.observe_pose(
+        float("nan"), 0.0, 0.0, 2.0, "map", 0.1
+    ) is None
+    watchdog.observe_clock(2.5, 0.6)
+    assert watchdog.observe_velocity(float("nan"), 2.5, 0.6) is None
+    assert observe_pose(watchdog, 0.0, 3.0, 0.7) is None
+    watchdog.observe_clock(3.5, 0.9)
+    assert watchdog.observe_pose(
+        float("nan"), 0.0, 0.0, 3.5, "map", 0.9
+    ) is None
+    assert watchdog.observe_velocity(0.0, 3.5, 1.0) is None
+
+    watchdog.observe_clock(4.0, recovery_now_sec)
+    verdict = watchdog.observe_pose(
+        0.0, 0.0, 0.0, 4.0, "map", recovery_now_sec
+    )
+    assert verdict is not None
+    assert verdict.reason == "PROGRESS_EVIDENCE_NOT_JOINTLY_FRESH"
+    assert watchdog.velocity_evidence_invalid_since_sec is None
+    assert watchdog.pose_evidence_invalid_since_sec is None
+    assert watchdog.last_valid_velocity_receipt_sec == 1.0
+    assert watchdog.last_valid_pose_receipt_sec == recovery_now_sec
+    assert watchdog.progress_evidence_invalid_since_sec == 0.1
+
+
+def test_invalid_relay_cannot_indefinitely_suppress_existing_mismatch() -> None:
+    watchdog = active_watchdog(WatchdogConfig(evidence_failure_sec=1.0))
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+    observe_velocity(watchdog, 0.0, 2.0, 0.1, pose_x_m=0.2)
+    assert watchdog.velocity_pose_inconsistent_since_sec == 0.1
+
+    watchdog.observe_clock(3.0, 0.2)
+    assert watchdog.observe_pose(
+        float("nan"), 0.0, 0.0, 3.0, "map", 0.2
+    ) is None
+    assert watchdog.observe_velocity(float("nan"), 3.0, 0.6) is None
+    assert observe_pose(watchdog, 0.2, 3.5, 0.7) is None
+    watchdog.observe_clock(4.0, 1.0)
+    assert watchdog.observe_pose(
+        float("nan"), 0.0, 0.0, 4.0, "map", 1.0
+    ) is None
+
+    verdict = watchdog.evaluate(1.2)
+    assert verdict is not None
+    assert verdict.reason == "PROGRESS_EVIDENCE_NOT_JOINTLY_FRESH"
+    assert watchdog.velocity_pose_inconsistent_since_sec == 0.1
+
+
+def test_lateral_or_backward_pose_does_not_create_forward_progress() -> None:
+    watchdog = active_watchdog()
+    observe_velocity(watchdog, 0.0, 1.0, 0.0)
+    observe_velocity(watchdog, 0.0, 2.0, 0.1, pose_x_m=-0.5)
+    observe_velocity(
+        watchdog, 0.0, 3.0, 0.2, pose_x_m=0.0, pose_y_m=0.5
+    )
+    assert watchdog.pose_progress_count == 0
+    assert watchdog.velocity_pose_inconsistent_since_sec is None
 
 
 def test_missing_velocity_after_start_is_not_called_stop() -> None:
@@ -271,12 +592,13 @@ def test_verdict_artifact_is_atomic_and_contains_contract(tmp_path: Path) -> Non
     watchdog_module._write_verdict(output, "unit-run", watchdog, verdict, None)
 
     payload = json.loads(output.read_text(encoding="utf-8"))
-    assert payload["schema"] == "D1_START_PROGRESS_WATCHDOG_V1"
+    assert payload["schema"] == "D1_START_PROGRESS_WATCHDOG_V2"
     assert payload["run_id"] == "unit-run"
     assert payload["reason"] == "D1_CONTINUOUS_STOP_15S"
     assert payload["exit_code"] == 42
     assert payload["passed"] is False
     assert payload["velocity_topic"] == "/vehicle/status/velocity_status"
+    assert payload["pose_topic"] == "/localization/kinematic_state"
     assert not output.with_suffix(".json.tmp").exists()
 
 
@@ -344,7 +666,7 @@ def run_supervisor_fixture(
     start_status: int = 0,
     monitor_status: int = 0,
     write_monitor_verdict: bool = True,
-    monitor_verdict_schema: str = "D1_START_PROGRESS_WATCHDOG_V1",
+    monitor_verdict_schema: str = "D1_START_PROGRESS_WATCHDOG_V2",
     command_mode: str = "run",
     bootstrap_status: int = 0,
     ready_domains: str = "1,2",
@@ -611,6 +933,12 @@ def test_exec_mode_bootstraps_ros_environment_before_unchanged_watchdog_argv(
         "1.0",
         "--evidence-failure-sec",
         "15",
+        "--pose-freshness-sec",
+        "1.0",
+        "--pose-progress-min-m",
+        "0.10",
+        "--pose-max-step-m",
+        "2.0",
         "--fingerprint",
         "/output/fixture-run/provenance/artifact-fingerprint.sha256",
     ]
@@ -685,7 +1013,7 @@ printf '%s|%s\\n' "$*" "${CMD:-}" >>"${FAKE_DOCKER_LOG}"
 case "${CMD:-}" in
 *request_awsim_start.bash*) exit 0 ;;
 *d1_start_progress_watchdog.py*)
-    trap 'mkdir -p "$(dirname "${FAKE_ABORT_VERDICT}")"; printf "{\\"schema\\": \\"D1_START_PROGRESS_WATCHDOG_V1\\", \\"run_id\\": \\"fixture-run\\", \\"reason\\": \\"ABORTED_BY_EXTERNAL_SHUTDOWN\\", \\"exit_code\\": 130, \\"passed\\": false}\\n" >"${FAKE_ABORT_VERDICT}"; printf "verdict-written|\\n" >>"${FAKE_DOCKER_LOG}"; exit 130' INT TERM
+    trap 'mkdir -p "$(dirname "${FAKE_ABORT_VERDICT}")"; printf "{\\"schema\\": \\"D1_START_PROGRESS_WATCHDOG_V2\\", \\"run_id\\": \\"fixture-run\\", \\"reason\\": \\"ABORTED_BY_EXTERNAL_SHUTDOWN\\", \\"exit_code\\": 130, \\"passed\\": false}\\n" >"${FAKE_ABORT_VERDICT}"; printf "verdict-written|\\n" >>"${FAKE_DOCKER_LOG}"; exit 130' INT TERM
     while true; do read -r -t 0.1 _unused || true; done
     ;;
 *) exit 0 ;;
